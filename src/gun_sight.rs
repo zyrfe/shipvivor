@@ -1,10 +1,11 @@
 //! The bow and stern rings follow the deck mounts, with one load pip per fitted barrel.
+//! A mount laid on a mark beyond her reach goes grey, and a note under the rings says so.
 use crate::{
     camera::ShipView,
     state::{Campaign, Encounter, PlayerHelm},
 };
 use bevy::prelude::*;
-use shipvivor_encounter::{MountStatus, Station};
+use shipvivor_encounter::{Aim, MainMount, MainShell, MountStatus, Station};
 
 #[derive(Component)]
 pub struct GunCircle(Station);
@@ -12,6 +13,30 @@ pub struct GunCircle(Station);
 pub struct GunLabel(&'static str);
 #[derive(Component)]
 pub struct GunPip(usize);
+/// Says "Out of Range" under the rings of the mounts that cannot reach the mark.
+#[derive(Component)]
+pub struct RangeNote;
+
+/// The box the note is centred in, and how far it hangs under the lowest grey ring,
+/// clear of the ring labels.
+const NOTE_WIDTH: f32 = 140.;
+const NOTE_DROP: f32 = 18.;
+
+pub(crate) fn out_of_range_ink() -> Color {
+    Color::srgb_u8(152, 158, 160)
+}
+
+/// Whether the flight the mount would take onto `aim` falls short of it at her reach.
+pub(crate) fn out_of_reach(
+    mount: &MainMount,
+    helm: &PlayerHelm,
+    aim: Vec3,
+    round: MainShell,
+) -> bool {
+    mount
+        .trajectory(helm.position, helm.heading, aim, round)
+        .is_some_and(|path| path.point(0.).xz().distance(aim.xz()) > mount.round(round).reach())
+}
 
 fn radius(station: Station) -> f32 {
     match station {
@@ -87,26 +112,56 @@ pub fn spawn(cmd: &mut Commands, root: Entity, run: &Campaign) {
             ));
         }
     }
+    cmd.spawn((
+        RangeNote,
+        Node {
+            position_type: PositionType::Absolute,
+            width: px(NOTE_WIDTH),
+            justify_content: JustifyContent::Center,
+            display: Display::None,
+            ..default()
+        },
+        ChildOf(root),
+    ))
+    .with_child((
+        Text::new("Out of Range"),
+        TextFont::from_font_size(12.),
+        TextColor(out_of_range_ink()),
+        BackgroundColor(Color::srgba_u8(14, 34, 40, 218)),
+        Node {
+            padding: UiRect::horizontal(px(4)),
+            ..default()
+        },
+    ));
 }
 
+type NoteOnly = (With<RangeNote>, Without<GunCircle>, Without<GunPip>);
+
 pub fn update(
-    sight: (Res<ShipView>, Res<PlayerHelm>),
-    encounter: Res<Encounter>,
+    sight: (Res<ShipView>, Res<PlayerHelm>, Res<Encounter>),
     window: Single<&Window>,
-    controls: (Res<UiScale>, Res<crate::state::Guns>),
+    controls: (Res<UiScale>, Res<crate::state::Guns>, Res<Campaign>),
     mut circles: Query<(&GunCircle, &Children, &mut Node, &mut BorderColor)>,
     mut labels: Query<(&GunLabel, &mut Text, &mut TextColor)>,
     mut pips: Query<
         (&GunPip, &mut Node, &mut BackgroundColor, &mut BorderColor),
         Without<GunCircle>,
     >,
+    mut notes: Query<&mut Node, NoteOnly>,
 ) {
-    let (view, helm) = sight;
-    let (scale, guns) = controls;
+    let (view, helm, encounter) = sight;
+    let (scale, guns, run) = controls;
     let size = window.size() / scale.0;
     if size.min_element() < 1. {
         return;
     }
+    let aim = match view.main_aim(helm.position, &encounter, guns.firing, guns.nearest) {
+        Aim::Sight(p) | Aim::Track(p) => Some(p),
+        _ => None,
+    };
+    let round = run.fittings.round();
+    // The rings that went grey, by centre and radius.
+    let mut short = Vec::new();
     for (circle, children, mut node, mut border) in &mut circles {
         node.display = if guns.torpedo_mode {
             Display::None
@@ -120,7 +175,24 @@ pub fn update(
         let radius = radius(station);
         node.left = px(center.x - radius);
         node.top = px(center.y - radius);
-        let color = ink(mount.status());
+        let laying = matches!(
+            mount.status(),
+            MountStatus::Ready | MountStatus::Training | MountStatus::Loading
+        );
+        let beyond = laying && aim.is_some_and(|aim| out_of_reach(mount, &helm, aim, round));
+        if beyond && edge.is_empty() && !guns.torpedo_mode {
+            short.push((center, radius));
+        }
+        let color = if beyond {
+            out_of_range_ink()
+        } else {
+            ink(mount.status())
+        };
+        let empty = if beyond {
+            out_of_range_ink()
+        } else {
+            ink(MountStatus::Loading)
+        };
         *border = BorderColor::all(if edge.is_empty() { color } else { Color::NONE });
         for child in children.iter() {
             if let Ok((pip, mut node, mut fill, mut rim)) = pips.get_mut(child) {
@@ -132,7 +204,7 @@ pub fn update(
                 let (inside, outline) = if mount.loaded(pip.0) {
                     (color, color)
                 } else {
-                    (Color::NONE, ink(MountStatus::Loading))
+                    (Color::NONE, empty)
                 };
                 fill.0 = inside;
                 *rim = BorderColor::all(outline);
@@ -147,5 +219,16 @@ pub fn update(
                 }
             }
         }
+    }
+    for mut note in &mut notes {
+        if short.is_empty() {
+            note.display = Display::None;
+            continue;
+        }
+        let x = short.iter().map(|(c, _)| c.x).sum::<f32>() / short.len() as f32;
+        let low = (short.iter().map(|(c, r)| c.y + r)).fold(f32::MIN, f32::max);
+        note.left = px((x - NOTE_WIDTH * 0.5).clamp(0., (size.x - NOTE_WIDTH).max(0.)));
+        note.top = px((low + NOTE_DROP).min(size.y - 20.));
+        note.display = Display::Flex;
     }
 }

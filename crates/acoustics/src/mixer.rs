@@ -5,6 +5,7 @@ use crate::{
     flight::{CLOSE, Flight, Passing},
     foundry::{Bank, VARIATIONS},
     hull::Hull,
+    plane::Plane,
     siren::Siren,
     tail::Tail,
     voice::{Ears, Heard, Voice},
@@ -21,6 +22,8 @@ const VOICES: usize = 64;
 const FLIGHTS: usize = 32;
 const SHORES: usize = 8;
 const SIRENS: usize = 4;
+const PLANES: usize = 4;
+const NOTICES: usize = 8;
 const QUEUE: usize = 1024;
 /// Seconds to close or open the output when world time holds or resumes.
 const GATE: f32 = 0.008;
@@ -69,8 +72,10 @@ pub fn console(bank: Arc<Bank>, air: Air) -> (Cues, Mixer) {
         air,
         voices: Vec::with_capacity(VOICES),
         flights: Vec::with_capacity(FLIGHTS),
+        notices: Vec::with_capacity(NOTICES),
         shores: [None; SHORES],
         sirens: [0x51E, 0xA1A, 0x3A9, 0x70C].map(Siren::new),
+        planes: [0xF17, 0xB1D, 0x2E9, 0xA17].map(Plane::new),
         ears: Ears::default(),
         hull: Hull::new(),
         tail: Tail::new(),
@@ -93,14 +98,18 @@ pub struct Mixer {
     air: Air,
     voices: Vec<Voice>,
     flights: Vec<Flight>,
+    /// What the game itself has to say, which is no part of the world.
+    notices: Vec<Voice>,
     /// Land that answers a report: where it stands and how wide it is.
     shores: [Option<(Vec3, f32)>; SHORES],
     sirens: [Siren; SIRENS],
+    planes: [Plane; PLANES],
     ears: Ears,
     hull: Hull,
     tail: Tail,
     bed: [[f32; 2]; BLOCK],
-    /// Sirens, which are kept out of the reckoning of how loud a moment is.
+    /// Sirens and aeroplanes, which are kept out of the reckoning of how loud a moment
+    /// is.
     aside: [[f32; 2]; BLOCK],
     send: [[f32; 2]; BLOCK],
     /// How far the ears have closed against a blast, from 0 to 1.
@@ -135,7 +144,7 @@ impl Mixer {
     pub fn making(&self, sound: Sound) -> (usize, usize) {
         let made = |v: &&Voice| v.cast() / VARIATIONS == sound as usize;
         let arrived = |v: &&Voice| v.spent(&self.air) >= 0.;
-        let voices = self.voices.iter().filter(made);
+        let voices = self.voices.iter().chain(&self.notices).filter(made);
         (voices.clone().count(), voices.filter(arrived).count())
     }
 
@@ -148,6 +157,12 @@ impl Mixer {
     /// Sirens that are turning, or have stopped with their last sound still on its way.
     pub fn wailing(&self) -> usize {
         self.sirens.iter().filter(|siren| !siren.spent()).count()
+    }
+
+    /// Aeroplanes in earshot with their engines running, or gone with their last
+    /// sound still on its way.
+    pub fn droning(&self) -> usize {
+        self.planes.iter().filter(|plane| plane.sounding()).count()
     }
 
     /// An endless stream of interleaved stereo samples.
@@ -164,9 +179,26 @@ impl Mixer {
             self.answer(cue);
         }
         out.fill([0.; 2]);
-        if !self.flowing && self.gate == 0. {
+        if self.flowing || self.gate != 0. {
+            self.world(out);
+        }
+        // The game's own voice is heard whether the world's time runs or holds.
+        if self.notices.is_empty() {
             return;
         }
+        let (bank, air) = (&self.bank, &self.air);
+        let (aside, send) = (&mut self.aside[..out.len()], &mut self.send[..out.len()]);
+        aside.fill([0.; 2]);
+        self.notices.retain_mut(|voice| {
+            voice.sing(bank.cast(voice.cast()), Heard::ABOARD, air, aside, send)
+        });
+        for (frame, said) in out.iter_mut().zip(aside) {
+            *frame = [0, 1].map(|ear| limit(frame[ear] + MASTER * said[ear]));
+        }
+    }
+
+    /// Everything that is of the world: what is in the air, and the ship's own noise.
+    fn world(&mut self, out: &mut [[f32; 2]]) {
         self.ears.settle(out.len());
         let (air, ears) = (&self.air, &self.ears);
         self.send[..out.len()].fill([0.; 2]);
@@ -194,6 +226,9 @@ impl Mixer {
         aside.fill([0.; 2]);
         for siren in self.sirens.iter_mut().filter(|siren| !siren.spent()) {
             siren.sing(ears, air, aside, send);
+        }
+        for plane in &mut self.planes {
+            plane.sing(ears, air, aside, send);
         }
         self.tail.run(send, out);
         // The ship's own noise gives way to anything loud and creeps back afterwards.
@@ -255,10 +290,20 @@ impl Mixer {
                 slot,
                 rotor,
                 position,
-                raised,
+                alert,
             } => {
                 if let Some(siren) = self.sirens.get_mut(slot) {
-                    siren.order(rotor, position, raised);
+                    siren.order(rotor, position, alert);
+                }
+            }
+            Cue::Aircraft {
+                slot,
+                position,
+                velocity,
+                flying,
+            } => {
+                if let Some(plane) = self.planes.get_mut(slot) {
+                    plane.track(position, velocity, flying);
                 }
             }
             Cue::Way { speed, throttle } => self.hull.way(speed, throttle),
@@ -267,12 +312,14 @@ impl Mixer {
                 self.hull.moor();
                 // Nobody is left to work the switch, and each siren runs down.
                 self.sirens.iter_mut().for_each(Siren::lower);
+                self.planes.iter_mut().for_each(Plane::cut);
             }
             Cue::Flow(flowing) => self.flowing = flowing,
             Cue::Hush => {
                 self.voices.clear();
                 self.flights.clear();
                 self.sirens.iter_mut().for_each(Siren::clear);
+                self.planes.iter_mut().for_each(Plane::clear);
                 self.tail.clear();
                 (self.deaf, self.muffle) = (0., [[0.; 2]; 2]);
                 self.ears.placed = false;
@@ -314,6 +361,19 @@ impl Mixer {
         };
         let cast = Bank::index(sound, serial);
         let audible = |gains: [f32; 3]| (0..3).any(|layer| levels[layer] * gains[layer] >= FAINT);
+        if sound.notice() {
+            let voice = Voice::new(cast, levels, position, speed, Heard::ABOARD);
+            // A quick second tap reverses the same sheet of paper.
+            if sound.chart_paper() {
+                self.notices
+                    .retain(|v| !Sound::ALL[v.cast() / VARIATIONS].chart_paper());
+            }
+            // One that finds no room has others saying much the same.
+            if self.notices.len() < NOTICES {
+                self.notices.push(voice.aboard());
+            }
+            return;
+        }
         if sound.aboard() {
             let voice = Voice::new(cast, levels, position, speed, Heard::ABOARD);
             return self.admit(voice.aboard());

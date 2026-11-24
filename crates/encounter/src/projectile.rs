@@ -4,9 +4,35 @@ use super::{
 };
 use glam::{Vec3, Vec3Swizzles};
 use shipvivor_artillery::{Ammo, Impact, ShellArc};
+use shipvivor_shipyard::Reach;
 
 pub const SIGHT_LIMIT: f32 = 1400.;
-pub(super) const MAIN_RANGE: f32 = 780.;
+/// Metres per second of a light anti-aircraft round.
+pub(super) const AA_SPEED: f32 = 300.;
+/// A round that holes the player runs on this far inside her before it bursts.
+const ROUND_RUN: f32 = 3.;
+/// Height of the tops of her bays above the water, a little under her deck at 1.55 m.
+const BAY_TOP: f32 = 1.2;
+
+/// The part of a round's run into her, from where it struck along its flight, that
+/// lies low enough to reach her bays. `None` if the whole run stays above them, as a
+/// shot skimming the deck does.
+fn below_bays(at: Vec3, travel: Vec3) -> Option<[Vec3; 2]> {
+    let end = at + travel * ROUND_RUN;
+    let (high, low) = (at.y, end.y);
+    if high.min(low) > BAY_TOP {
+        return None;
+    }
+    if (high - low).abs() < 1e-6 || high.max(low) <= BAY_TOP {
+        return Some([at, end]);
+    }
+    let level = at + (end - at) * ((high - BAY_TOP) / (high - low));
+    Some(if high > BAY_TOP {
+        [level, end]
+    } else {
+        [at, level]
+    })
+}
 
 pub struct Shot {
     pub body: Body,
@@ -19,6 +45,8 @@ pub struct Shot {
     pub shell: MainShell,
     /// Visible projectile body width on the compressed sea, in scene metres.
     pub diameter: f32,
+    /// Seconds after firing that a time-fused round bursts, if nothing stops it first.
+    fuse: Option<f32>,
 }
 
 impl Shot {
@@ -28,9 +56,49 @@ impl Shot {
     pub fn tangent(&self) -> Vec3 {
         Vec3::new(self.velocity.x, self.arc.slope(self.age), self.velocity.y).normalize()
     }
+    /// Where on the chart the round left the muzzle.
+    pub fn origin(&self) -> Vec2 {
+        self.origin
+    }
+    /// Inches across the round. Every battery's round is drawn to the size of its gun,
+    /// so its width is its calibre: under three inches from secondaries and aircraft,
+    /// about five from a patrol boat, eight from a cruiser and twelve from a battleship
+    /// or a shore gun.
+    pub fn calibre(&self) -> f32 {
+        self.diameter / 0.0254
+    }
     fn point(&self, time: f32) -> Vec3 {
         let p = self.origin + self.velocity * time;
         Vec3::new(p.x, self.arc.height(time), p.y)
+    }
+}
+
+/// Where a round goes: out along a straight line over the water at its muzzle speed,
+/// rising and falling on its arc.
+#[derive(Clone, Copy, Debug)]
+pub struct Trajectory {
+    origin: Vec2,
+    velocity: Vec2,
+    arc: ShellArc,
+    /// Seconds from leaving the gun to reaching the aim, or coming down at its reach.
+    pub duration: f32,
+}
+impl Trajectory {
+    /// Where the round is `t` seconds after it leaves the gun. Past `duration` it keeps
+    /// falling along the same arc.
+    pub fn point(&self, t: f32) -> Vec3 {
+        let p = self.origin + self.velocity * t;
+        Vec3::new(p.x, self.arc.height(t), p.y)
+    }
+    /// Where it reaches the aim, or the point at its reach if the aim lies beyond.
+    pub fn end(&self) -> Vec3 {
+        self.point(self.duration)
+    }
+    /// Seconds until it comes down to `height`, on the way down.
+    pub fn descends_to(&self, height: f32) -> Option<f32> {
+        self.arc
+            .contact(0., f32::MAX, height, height)
+            .filter(|&t| t > 0.)
     }
 }
 
@@ -44,13 +112,16 @@ pub(super) struct FlightPath {
     arc: ShellArc,
     shell: MainShell,
     diameter: f32,
+    /// Seconds from the muzzle to the aim, or to the round's reach.
+    pub duration: f32,
 }
 
 impl FlightPath {
     pub fn to(mount: Vec3, target: Vec3, battery: Battery) -> Option<Self> {
         let barrel = match battery {
             Battery::Main => 4.1 * MainShell::STOCK.mount_scale(),
-            Battery::Secondary | Battery::EnemySecondary => 1.8,
+            Battery::Secondary | Battery::EnemySecondary | Battery::Aircraft => 1.8,
+            Battery::AntiAir => 1.1,
             Battery::Raider => 2.8,
             Battery::Shore => 8.,
         };
@@ -81,10 +152,12 @@ impl FlightPath {
         let dir = offset.try_normalize()?;
         let muzzle = mount.xz() + dir * barrel.min(offset.length() * 0.5);
         let distance = muzzle.distance(target.xz()).min(reach);
-        let arc = ShellArc::between(mount.y, target.y, (distance / speed).max(0.015));
+        let duration = (distance / speed).max(0.015);
+        let arc = ShellArc::between(mount.y, target.y, duration);
         let diameter = match battery {
             Battery::Main => shell.diameter_metres(),
-            Battery::Secondary | Battery::EnemySecondary => 0.07,
+            Battery::Secondary | Battery::EnemySecondary | Battery::Aircraft => 0.07,
+            Battery::AntiAir => 0.05,
             // The same gun asset is drawn at a different scale on each enemy class.
             Battery::Raider => 0.15 * barrel / 3.2,
             Battery::Shore => 0.32,
@@ -97,7 +170,17 @@ impl FlightPath {
             arc,
             heading: bearing(dir),
             pitch: arc.slope(0.).atan2(speed),
+            duration,
         })
+    }
+
+    pub fn trajectory(&self) -> Trajectory {
+        Trajectory {
+            origin: self.muzzle,
+            velocity: self.velocity,
+            arc: self.arc,
+            duration: self.duration,
+        }
     }
 
     /// Send the round a barrel actually holds, which may not be the one now selected.
@@ -133,6 +216,7 @@ impl FlightPath {
             damage,
             shell: self.shell,
             diameter: self.diameter,
+            fuse: (battery == Battery::AntiAir).then_some(self.duration),
         });
     }
 }
@@ -140,9 +224,10 @@ impl FlightPath {
 /// Muzzle speed and greatest reach of a battery's rounds.
 pub(super) fn ballistics(battery: Battery, shell: MainShell) -> (f32, f32) {
     match battery {
-        Battery::Main => (shell.speed(), MAIN_RANGE),
+        Battery::Main => (shell.speed(), shell.reach()),
+        Battery::AntiAir => (AA_SPEED, 2. * AA_SPEED),
         Battery::Secondary => (240., 290.),
-        Battery::EnemySecondary => (240., 405.),
+        Battery::EnemySecondary | Battery::Aircraft => (240., 405.),
         Battery::Raider => (245., 545.),
         Battery::Shore => (280., super::SHORE_RANGE + 35.),
     }
@@ -262,7 +347,10 @@ enum Contact {
     Land,
     /// A piece of ice, by its index among the battle's icebergs.
     Ice(usize),
-    Player,
+    /// Her hull, or with `upperworks` the bridge and funnel standing above the deck.
+    Player {
+        upperworks: bool,
+    },
     Raider(usize, ShipPart),
     Port(usize, PortPart),
 }
@@ -485,15 +573,18 @@ impl Battle {
         let vertices = hull.outline().map(Vec2::from);
         let local =
             |p: Vec2| Vec2::new((p - player).dot(forward.perp()), -(p - player).dot(forward));
+        let mut bursts = Vec::new();
         self.shots.retain_mut(|shot| {
             let start = shot.age;
-            let finish = start + dt;
+            // A fused round goes no farther than its burst.
+            let step = shot.fuse.map_or(dt, |fuse| (fuse - start).clamp(0., dt));
+            let finish = start + step;
             let a = shot.body.pos;
             let b = shot.point(finish).xz();
             let contact_time = |span: Option<(f32, f32)>, low, high| {
                 let (enter, leave) = span?;
                 shot.arc
-                    .contact(start + enter * dt, start + leave * dt, low, high)
+                    .contact(start + enter * step, start + leave * step, low, high)
             };
             let mut first = shot
                 .arc
@@ -506,7 +597,10 @@ impl Battle {
                     first = Some((t, contact));
                 }
             };
-            let friendly = matches!(shot.battery, Battery::Main | Battery::Secondary);
+            let friendly = matches!(
+                shot.battery,
+                Battery::Main | Battery::Secondary | Battery::AntiAir
+            );
             for (i, berg) in self.floe.icebergs.iter().enumerate() {
                 let (center, radius, top) = berg.volume();
                 consider(
@@ -546,7 +640,7 @@ impl Battle {
                 let delta = local(b) - start;
                 consider(
                     contact_time(super::plating::clip_hull(&vertices, start, delta), 0., 1.55),
-                    Contact::Player,
+                    Contact::Player { upperworks: false },
                 );
                 // The bridge is taller than the deck, and occupies only the fore superstructure.
                 let bridge_z = self.deck.bridge_z;
@@ -556,9 +650,11 @@ impl Battle {
                     Vec2::new(1.85, 0.9 + bridge_z),
                     Vec2::new(-1.85, 0.9 + bridge_z),
                 ];
+                // Her forward funnel stands within it. A round that bursts up there
+                // reaches nothing below the deck.
                 consider(
                     contact_time(super::plating::clip_hull(&bridge, start, delta), 1.55, 4.6),
-                    Contact::Player,
+                    Contact::Player { upperworks: true },
                 );
             }
             if let Some((time, object)) = first {
@@ -593,17 +689,33 @@ impl Battle {
                         EffectKind::Burst
                     }
                     Contact::Land | Contact::Port(_, PortPart::Ground) => EffectKind::Burst,
-                    Contact::Player => {
+                    Contact::Player { upperworks } => {
                         events.damage = events.damage.saturating_add(shot.damage);
+                        let at = local(p.xz());
+                        let plan = |q: Vec3| {
+                            let at = local(q.xz());
+                            (hull.bow + at.y, at.x)
+                        };
+                        let track = (!upperworks)
+                            .then(|| below_bays(p, travel))
+                            .flatten()
+                            .map(|ends| ends.map(plan));
                         events.blows.push(Blow {
-                            aft: (hull.bow + local(p.xz()).y).clamp(0., hull.bow + hull.stern),
+                            aft: (hull.bow + at.y).clamp(0., hull.bow + hull.stern),
+                            abeam: at.x,
                             damage: shot.damage,
+                            calibre: Some(shot.calibre()),
+                            reach: Reach::Track(track),
                         });
                         EffectKind::Burst
                     }
                     Contact::Port(i, PortPart::Dock) => {
                         let port = &mut self.ports[i];
+                        let standing = port.live_factories() as u8;
                         if port.damage_yard(shot.damage) {
+                            events.recovered += self
+                                .rewards
+                                .at_once(super::DRYDOCK_STORES + super::FACTORY_STORES * standing);
                             effect_at = port.yard_position().extend(3.2).xzy();
                             EffectKind::Demolition { dock: true }
                         } else {
@@ -613,6 +725,7 @@ impl Battle {
                     Contact::Port(i, PortPart::Factory(j)) => {
                         let port = &mut self.ports[i];
                         if port.damage_factory(j, shot.damage) {
+                            events.recovered += self.rewards.at_once(super::FACTORY_STORES);
                             effect_at = port.factory_position(j).extend(3.2).xzy();
                             EffectKind::Demolition { dock: false }
                         } else {
@@ -662,6 +775,28 @@ impl Battle {
                         }
                         armor_effect(outcome, normal)
                     }
+                    // The Parliament's bridge can be shot away while her turrets still
+                    // turn every round from the hull.
+                    Contact::Raider(i, ShipPart::Tower) if self.raiders[i].bridge_standing() => {
+                        let r = &mut self.raiders[i];
+                        let (outcome, normal) = r.strike_hull(
+                            p,
+                            travel,
+                            (shot.shell.ammo, shell),
+                            shot.shell.bore,
+                            true,
+                        );
+                        let dealt = outcome.dealt(shot.damage);
+                        if dealt > 0 && r.hit_bridge(dealt) {
+                            self.effects.push(Effect {
+                                body: body(&mut self.serial, p.xz(), shot.body.heading),
+                                height: p.y,
+                                kind: EffectKind::Burst,
+                                age: 0.,
+                            });
+                        }
+                        armor_effect(outcome, normal)
+                    }
                     Contact::Raider(i, ShipPart::Hull | ShipPart::Tower)
                         if self.raiders[i].protected() =>
                     {
@@ -708,9 +843,16 @@ impl Battle {
                 });
                 return false;
             }
+            if shot.fuse.is_some_and(|fuse| finish >= fuse) {
+                bursts.push((shot.point(finish), shot.damage));
+                return false;
+            }
             shot.age = finish;
             shot.body.pos = b;
             true
         });
+        for (at, damage) in bursts {
+            self.burst_flak(at, damage);
+        }
     }
 }

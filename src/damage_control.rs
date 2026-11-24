@@ -1,9 +1,9 @@
 //! The damage-control strip in the Breakwater panel: one cell for each hull module from
-//! stern to bow, what is fitted to it, where the repair party is working, and how close
-//! she is to sinking.
+//! stern to bow, the side plating along its port and starboard edges, what is fitted
+//! to it, where the repair party is working, and how close she is to sinking.
 use crate::state::Campaign;
 use bevy::prelude::*;
-use shipvivor_shipyard::{Berth, Component as Gear, Ship, State, Task};
+use shipvivor_shipyard::{Berth, Component as Gear, Panel, Ship, Side, State, Task};
 
 /// The hull module a cell stands for. Its border marks flooding and the repair party.
 #[derive(Component)]
@@ -14,6 +14,10 @@ pub struct Fill(usize);
 /// The tick inside a cell: as far as the crew can mend the module at sea.
 #[derive(Component)]
 pub struct Limit(usize);
+/// One stretch of side plating on a module. Port runs above the cell and starboard
+/// below it, as she lies with her bow to the right.
+#[derive(Component)]
+pub struct Plate(usize, Panel);
 /// The label of one fitted component.
 #[derive(Component)]
 pub struct Pip(Berth);
@@ -54,6 +58,8 @@ fn label(gear: Gear) -> &'static str {
         Gear::Director => "DIR",
         Gear::Engine => "ENG",
         Gear::Magazine => "MAG",
+        Gear::Catapult => "CAT",
+        Gear::MissileRack => "MSL",
     }
 }
 
@@ -105,6 +111,34 @@ pub fn spawn(cmd: &mut Commands, panel: Entity, run: &Campaign) {
                 ChildOf(strip),
             ))
             .id();
+        // The after half of each beam is on the left, nearer the stern.
+        let plating = |cmd: &mut Commands, side: Side, margin: UiRect| {
+            let row = cmd
+                .spawn((
+                    Node {
+                        width: percent(100),
+                        height: px(3),
+                        column_gap: px(1),
+                        margin,
+                        ..default()
+                    },
+                    ChildOf(column),
+                ))
+                .id();
+            for fore in [false, true] {
+                cmd.spawn((
+                    Plate(module, Panel::new(side, fore)),
+                    Node {
+                        flex_grow: 1.,
+                        height: percent(100),
+                        ..default()
+                    },
+                    BackgroundColor(sound()),
+                    ChildOf(row),
+                ));
+            }
+        };
+        plating(cmd, Side::Port, UiRect::default());
         let cell = cmd
             .spawn((
                 Cell(module),
@@ -112,7 +146,6 @@ pub fn spawn(cmd: &mut Commands, panel: Entity, run: &Campaign) {
                     width: percent(100),
                     height: px(14),
                     border: UiRect::all(px(1)),
-                    margin: UiRect::bottom(px(2)),
                     ..default()
                 },
                 BorderColor::all(trim()),
@@ -120,6 +153,7 @@ pub fn spawn(cmd: &mut Commands, panel: Entity, run: &Campaign) {
                 ChildOf(column),
             ))
             .id();
+        plating(cmd, Side::Starboard, UiRect::bottom(px(2)));
         cmd.spawn((
             Fill(module),
             Node {
@@ -203,12 +237,24 @@ pub fn update(
     mut cells: Query<(&Cell, &mut BorderColor)>,
     mut fills: Query<(&Fill, &mut Node, &mut BackgroundColor), Without<Limit>>,
     mut limits: Query<(&Limit, &mut Node), Without<Fill>>,
+    mut plates: Query<(&Plate, &mut BackgroundColor), Without<Fill>>,
     mut pips: Query<(&Pip, &mut Text, &mut TextColor)>,
     mut summary: Query<(&mut Text, &mut TextColor), SummaryOnly>,
 ) {
     let ship = &run.ship;
     let holds = ship.compartments();
     let party = ship.party();
+    for (plate, mut paint) in &mut plates {
+        let share = holds[plate.0].plating(plate.1);
+        let color = if share >= 0.7 {
+            sound()
+        } else if share >= 0.35 {
+            brass()
+        } else {
+            alarm()
+        };
+        paint.set_if_neq(BackgroundColor(color));
+    }
     for (cell, mut border) in &mut cells {
         // The water inside already marks a flooded module, so the party's mark wins.
         let color = if party == Some(Task::Module(cell.0)) {

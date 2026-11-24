@@ -7,7 +7,7 @@
 //! of raw sketches the survey passed and what failed the rest. Streamlines trace the
 //! solved current, shaded by speed, and the ice is drawn where it lies on arrival.
 use shipvivor_encounter::{
-    Battle, Chart, ISLAND_RADIUS, LandmarkKind, SHORE_RANGE, Survey, Waters,
+    Battle, Chart, Course, ISLAND_RADIUS, LandmarkKind, SHORE_RANGE, Survey, Waters,
 };
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -31,7 +31,7 @@ fn main() {
     for (name, waters) in all.iter().filter(|(n, _)| pick == "all" || pick == *n) {
         let mut tiles = String::new();
         println!(
-            "\n{name}: seed  score  bases(m) sector(°) factories(m) legs turn(°) detour shore cover lanes islands  ms  set(m/s) peak  ice  sea(ms) glacier(m)"
+            "\n{name}: seed  score  bases(m) stages factories(m) turn(°) detour shore cover lanes islands  ms  set(m/s) peak  ice  sea(ms) glacier(m) coast"
         );
         for (i, seed) in (first..first + count).enumerate() {
             let clock = Instant::now();
@@ -46,12 +46,11 @@ fn main() {
             let battle = Battle::for_chart(9999., &chart).with_flagship();
             let sea_ms = clock.elapsed().as_secs_f32() * 1000.;
             println!(
-                "  {seed:>6}  {:.2}  {:>6.0}  {:>6.0}  {:>6.0}  {:.2}  {:>4.0}  {:.2}  {:.2}  {:>2}  {:>2}  {:>2}  {ms:>5.0}  {:.2}  {:.2}  {:>2}  {sea_ms:>5.0}  {:>4.0}",
+                "  {seed:>6}  {:.2}  {:>6.0}  {:.2}  {:>6.0}  {:>4.0}  {:.2}  {:.2}  {:>2}  {:>2}  {:>2}  {ms:>5.0}  {:.2}  {:.2}  {:>2}  {sea_ms:>5.0}  {:>4.0}  {:>3}",
                 survey.score,
                 m.base_spacing,
-                m.base_sector,
+                m.stage_balance,
                 m.factory_spacing,
-                m.leg_balance,
                 m.sharpest_turn,
                 m.worst_detour,
                 m.shore_exposure,
@@ -64,9 +63,11 @@ fn main() {
                 chart
                     .islets
                     .iter()
+                    .chain(&chart.coast)
                     .filter(|i| i.kind == LandmarkKind::Glacier)
                     .map(|i| i.radius)
                     .fold(0., f32::max),
+                chart.coast.len(),
             );
             let (x, y) = ((i % COLUMNS) as f32 * TILE, (i / COLUMNS) as f32 * TILE);
             tiles += &tile(&chart, &survey, &battle, x, y);
@@ -114,33 +115,23 @@ fn tile(chart: &Chart, survey: &Survey, battle: &Battle, ox: f32, oy: f32) -> St
         .iter()
         .copied()
         .fold(glam::Vec2::MAX, glam::Vec2::min)
-        - 120.;
+        - 160.;
     let high = points
         .iter()
         .copied()
         .fold(glam::Vec2::MIN, glam::Vec2::max)
-        + 120.;
+        + 160.;
     let scale = (TILE - 30.) / (high - low).max_element();
+    let middle = (high - low) * scale * 0.5;
     let at = |p: glam::Vec2| {
-        let q = (p - low) * scale;
-        (ox + 15. + q.x, oy + 22. + q.y)
+        let q = (p - low) * scale - middle;
+        (ox + TILE * 0.5 + q.x, oy + TILE * 0.5 + 6. + q.y)
     };
     let mut s = String::new();
+    let clip = format!("tile{}x{}", ox as u32, oy as u32);
     let _ = write!(
         s,
-        r##"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="#0e2333" stroke-width="4"/>"##,
-        ox, oy, TILE, TILE
-    );
-    let _ = write!(
-        s,
-        r##"<text x="{}" y="{}" fill="#e6edf2">seed {} · score {:.2} · bases {:.0} m · set {:.2} m/s · peak {:.2}</text>"##,
-        ox + 10.,
-        oy + 15.,
-        chart.seed.unwrap_or(0),
-        survey.score,
-        survey.metrics.base_spacing,
-        chart.set.flow.length(),
-        battle.currents().peak()
+        r##"<clipPath id="{clip}"><rect x="{ox}" y="{oy}" width="{TILE}" height="{TILE}"/></clipPath><g clip-path="url(#{clip})">"##
     );
     s += &streamlines(battle, low, high, &at);
     for port in battle.ports() {
@@ -154,9 +145,10 @@ fn tile(chart: &Chart, survey: &Survey, battle: &Battle, ox: f32, oy: f32) -> St
         }
     }
     let mut path = String::new();
+    let lap = (chart.course == Course::Circuit).then_some(chart.gates[0]);
     for (i, p) in std::iter::once(glam::Vec2::ZERO)
         .chain(chart.gates)
-        .chain([chart.gates[0]])
+        .chain(lap)
         .enumerate()
     {
         let (x, y) = at(p);
@@ -166,13 +158,17 @@ fn tile(chart: &Chart, survey: &Survey, battle: &Battle, ox: f32, oy: f32) -> St
         s,
         r##"<path d="{path}" fill="none" stroke="#f1c40f" stroke-opacity="0.7" stroke-width="1.5" stroke-dasharray="6 4"/>"##
     );
-    for island in battle.landmarks() {
+    // The mainland first, so glaciers and crags show over it.
+    let mut land: Vec<_> = battle.landmarks().iter().collect();
+    land.sort_by_key(|island| island.kind != LandmarkKind::Mainland);
+    for island in land {
         let (x, y) = at(island.body.pos);
         let fill = match island.kind {
             LandmarkKind::Beacon => "#c8b68a",
             LandmarkKind::Stacks => "#8d8a83",
             LandmarkKind::Pines => "#4f7a4a",
             LandmarkKind::Glacier => "#e4eef3",
+            LandmarkKind::Mainland => "#a3aaa2",
         };
         let _ = write!(
             s,
@@ -258,6 +254,21 @@ fn tile(chart: &Chart, survey: &Survey, battle: &Battle, ox: f32, oy: f32) -> St
         r##"<circle cx="{x}" cy="{y}" r="5" fill="white"/><text x="{}" y="{}" fill="white">start</text>"##,
         x + 7.,
         y + 4.
+    );
+    let _ = write!(
+        s,
+        r##"<text x="{}" y="{}" fill="#e6edf2" stroke="#0e2333" stroke-width="3" paint-order="stroke">seed {} · score {:.2} · bases {:.0} m · set {:.2} m/s · peak {:.2}</text>"##,
+        ox + 10.,
+        oy + 15.,
+        chart.seed.unwrap_or(0),
+        survey.score,
+        survey.metrics.base_spacing,
+        chart.set.flow.length(),
+        battle.currents().peak()
+    );
+    let _ = write!(
+        s,
+        r##"</g><rect x="{ox}" y="{oy}" width="{TILE}" height="{TILE}" fill="none" stroke="#0e2333" stroke-width="4"/>"##
     );
     s
 }

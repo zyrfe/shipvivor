@@ -263,7 +263,7 @@ pub fn clearance(cmd: &mut Commands, root: Entity, battle: &Encounter, run: &Cam
         16.,
         chalk(),
     );
-    let destination = if run.stage == shipvivor_campaign::Stage::IronNarrows {
+    let destination = if run.stage.is_opening() {
         "Drydock"
     } else {
         "Flagship intercept"

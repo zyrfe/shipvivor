@@ -31,6 +31,7 @@ impl Coast {
             Self::Landmark(LandmarkKind::Pines) => 89,
             Self::Landmark(LandmarkKind::Stacks) => 107,
             Self::Landmark(LandmarkKind::Glacier) => 139,
+            Self::Landmark(LandmarkKind::Mainland) => 151,
         }
     }
 
@@ -268,7 +269,7 @@ impl Outcrop {
     }
 }
 
-fn tint(rgb: [u8; 3], gain: f32) -> Color {
+pub(super) fn tint(rgb: [u8; 3], gain: f32) -> Color {
     let [r, g, b] = rgb.map(|v| (f32::from(v) * gain).min(255.) as u8);
     Color::srgb_u8(r, g, b)
 }
@@ -276,11 +277,11 @@ fn tint(rgb: [u8; 3], gain: f32) -> Color {
 /// Fresh snow, trodden snow and glacier ice, in linear light. The granite texture under
 /// every coast takes about a third off whatever it covers, and snow lies on slopes
 /// turned from the sun, so these are set well above white to come out white.
-const SNOW: [f32; 3] = [1.85, 1.9, 1.98];
+pub(super) const SNOW: [f32; 3] = [1.85, 1.9, 1.98];
 const TRODDEN: [f32; 3] = [1.2, 1.25, 1.32];
 const BLUE_ICE: [f32; 3] = [0.72, 1.35, 1.8];
 
-fn bright(rgb: [f32; 3], gain: f32) -> Color {
+pub(super) fn bright(rgb: [f32; 3], gain: f32) -> Color {
     Color::linear_rgb(rgb[0] * gain, rgb[1] * gain, rgb[2] * gain)
 }
 
@@ -432,7 +433,7 @@ pub(super) fn mesh(coast: Coast) -> Mesh {
                 }
             }
         }
-        Coast::Landmark(LandmarkKind::Beacon | LandmarkKind::Glacier) => {}
+        Coast::Landmark(LandmarkKind::Beacon | LandmarkKind::Glacier | LandmarkKind::Mainland) => {}
     }
     surfaces::weathered_mesh(out.facets, 5.6)
 }
@@ -458,31 +459,69 @@ pub(crate) fn shoals(battle: &shipvivor_encounter::Battle) -> (Image, Vec4) {
                 .map(|p| (Coast::Landmark(p.kind), p.body, p.radius)),
         )
         .collect();
+    let mainland = Coast::Landmark(LandmarkKind::Mainland);
+    // How far out from a piece of the mainland the surf chart reaches, and how far in.
+    let (offshore, inshore) = (30., 12.);
+    let reach = |coast: Coast, radius: f32| {
+        if coast == mainland {
+            radius + offshore
+        } else {
+            radius * 1.55
+        }
+    };
     let mut lo = Vec2::splat(f32::INFINITY);
     let mut hi = Vec2::splat(f32::NEG_INFINITY);
-    for &(_, body, radius) in &sites {
-        lo = lo.min(body.pos - radius * 1.6);
-        hi = hi.max(body.pos + radius * 1.6);
+    for &(coast, body, radius) in &sites {
+        lo = lo.min(body.pos - reach(coast, radius) - METRES * 4.);
+        hi = hi.max(body.pos + reach(coast, radius) + METRES * 4.);
     }
     let extent = ((hi - lo) / METRES).ceil().as_uvec2();
     let mut texels = vec![0; (extent.x * extent.y) as usize];
+    let mut chart = |x: u32, z: u32, height: f32| {
+        let pixel = &mut texels[(z * extent.x + x) as usize];
+        *pixel = (*pixel).max(((height + 8.) * (255. / 12.)) as u8);
+    };
     for (coast, body, radius) in sites {
         let center = (body.pos - lo) / METRES;
-        let pad = radius * 1.55 / METRES;
+        let pad = reach(coast, radius) / METRES;
         let first = (center - pad).floor().max(Vec2::ZERO).as_uvec2();
         let end = (center + pad).ceil().as_uvec2().min(extent);
+        let at = |x: u32, z: u32| lo + (Vec2::new(x as f32, z as f32) + 0.5) * METRES;
+        if coast == mainland {
+            // A piece of the mainland is charted only in a ring round its shore, row by
+            // row, so its broad hinterland costs nothing.
+            let (outer, inner) = ((radius + offshore) / METRES, (radius - inshore) / METRES);
+            for z in first.y..end.y {
+                let dz = z as f32 + 0.5 - center.y;
+                if dz.abs() > outer {
+                    continue;
+                }
+                let wide = (outer * outer - dz * dz).sqrt();
+                let narrow = (inner * inner - dz * dz).max(0.).sqrt();
+                let span = |from: f32, to: f32| {
+                    let from = (center.x + from).floor().max(0.) as u32;
+                    let to = ((center.x + to).ceil().max(0.) as u32).min(extent.x);
+                    from..to
+                };
+                for x in span(-wide, -narrow).chain(span(narrow, wide)) {
+                    let inside = radius - at(x, z).distance(body.pos);
+                    if (-offshore..inshore).contains(&inside) {
+                        chart(x, z, super::mainland::profile(radius, inside));
+                    }
+                }
+            }
+            continue;
+        }
         let to_local = Mat2::from_angle(-body.heading) * (ISLAND_RADIUS / radius);
         for z in first.y..end.y {
             for x in first.x..end.x {
-                let world = lo + (Vec2::new(x as f32, z as f32) + 0.5) * METRES;
-                let local = to_local * (world - body.pos);
+                let local = to_local * (at(x, z) - body.pos);
                 let height = if coast.foundry() && inside_berth(local) {
                     -5.
                 } else {
                     coast.height(local)
                 };
-                let pixel = &mut texels[(z * extent.x + x) as usize];
-                *pixel = (*pixel).max(((height + 8.) * (255. / 12.)) as u8);
+                chart(x, z, height);
             }
         }
     }

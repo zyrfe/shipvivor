@@ -3,6 +3,7 @@
 //! Damage lingers. The crew restores each module only up to its ceiling, which every
 //! hit lowers, and cannot restart a component that was knocked out or pump out a
 //! wrecked module. Those wait for the repair party. Stores and the dock raise ceilings.
+//! Side plating mends at the same pace as the module beneath it, and the dock replates.
 //!
 //! Ships running from a battery draw on its charge while the party works.
 use crate::design::{Berth, Component};
@@ -147,6 +148,7 @@ impl Ship {
                 0.
             };
             hold.structure = (hold.structure + (crew + sent) * pace * hold.max).min(hold.ceiling);
+            hold.mend_plates((crew + sent) * pace);
             if refloat(hold) {
                 mends.push(Mend::Refloated(module));
             }
@@ -201,9 +203,9 @@ impl Ship {
     }
 
     /// Dock work between legs, worth `points` of hull. New plate goes to the weakest
-    /// modules first, as stores do, and every component on a module left afloat is
-    /// returned to full strength. A badly damaged ship sails with what the dock could
-    /// not reach.
+    /// modules first, as stores do, and every module left afloat is replated and has
+    /// its components returned to full strength. A badly damaged ship sails with what
+    /// the dock could not reach.
     pub fn dock(&mut self, points: f32) -> Vec<Mend> {
         let mut mends = self.patch(points);
         if !self.afloat() {
@@ -213,6 +215,7 @@ impl Ship {
             if hold.wrecked {
                 continue;
             }
+            hold.mend_plates(1.);
             for (index, gear) in hold.gear.iter_mut().enumerate() {
                 gear.health = gear.max;
                 if std::mem::take(&mut gear.out) {

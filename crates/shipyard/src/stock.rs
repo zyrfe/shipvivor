@@ -1,7 +1,7 @@
 //! Designs the yard builds without being asked: the player's cruiser and the enemy
 //! classes. Each enemy is cut to its class's length and hull points, with its guns on
 //! the modules beneath their present deck stations.
-use crate::design::{Component::*, Design, Frame, Frame::*, Module};
+use crate::design::{Component::*, Design, Frame, Frame::*, Module, Protection};
 use shipvivor_artillery::ArmorGrade;
 
 /// An enemy design stretched to `length` metres, with `strength` hull points in each
@@ -21,6 +21,18 @@ fn enemy(
     design.fittings = gun / (12. * design.toughness);
     design.repair = repair;
     design
+}
+
+impl Protection {
+    /// Breakwater as built: an inch of stock plate, which turns nothing that is fired
+    /// at her, stock fittings, and an engine that fails once it has taken two thirds of
+    /// its compartment's structure.
+    pub const BREAKWATER: Self = Self {
+        plating: 1.,
+        thickness: 1.,
+        engine: 2. / 3.,
+        fittings: 1.,
+    };
 }
 
 impl Design {
@@ -45,7 +57,7 @@ impl Design {
         )
         .expect("a stock design");
         ship.sinks_at = 2. / 3.;
-        ship.engine_strength = 2. / 3.;
+        ship.protect(Protection::BREAKWATER);
         ship.auxiliary_drive = true;
         ship
     }
@@ -144,8 +156,9 @@ impl Design {
         ship
     }
 
-    /// The flagship: ten turrets of 3 points each, in pairs across the hull with one
-    /// at each end, and a thin hull behind them.
+    /// The flagship: ten turrets of 7 points each, in pairs across the hull with one
+    /// at each end, and a thin hull behind them. A turret stands four stock rounds,
+    /// as the Regent's do.
     pub fn flagship() -> Self {
         let pair = || Module::new(Wide, [MainGun, MainGun]);
         enemy(
@@ -162,7 +175,7 @@ impl Design {
             ],
             81.,
             (Wide, 3.),
-            3.,
+            7.,
             0.,
         )
     }

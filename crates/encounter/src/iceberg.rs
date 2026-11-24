@@ -391,7 +391,10 @@ impl Battle {
                     let ahead = (hit.point - pos).dot(forward);
                     events.blows.push(Blow {
                         aft: (orders.hull.bow - ahead).clamp(0., reach),
+                        abeam: (hit.point - pos).dot(forward.perp()),
                         damage: hit.damage[0],
+                        calibre: None,
+                        reach: shipvivor_shipyard::Reach::Bays,
                     });
                 }
                 self.effects.push(Effect {

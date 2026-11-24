@@ -14,6 +14,9 @@ use std::f32::consts::TAU;
 pub enum Haunt {
     /// Land. The sea breaks on its shore and seabirds keep to it.
     Island,
+    /// One stretch of a long shore. It has an island's surf, and fewer birds than an
+    /// island gathers.
+    Coast,
     /// Land under an ice cap that runs down to the sea. It has the shore and the
     /// birds of any island, and its ice splits and calves.
     Glacier,
@@ -76,6 +79,10 @@ const ISLAND: &[Habit] = &[
     habit(Sound::Breaker, 0.3, 320., FACING, true),
     habit(Sound::Gull, 0.1, 380., ALOFT, true),
 ];
+const COAST: &[Habit] = &[
+    habit(Sound::Breaker, 0.3, 320., FACING, true),
+    habit(Sound::Gull, 0.04, 380., ALOFT, true),
+];
 const GLACIER: &[Habit] = &[
     habit(Sound::Breaker, 0.15, 320., FACING, true),
     habit(Sound::Gull, 0.05, 380., ALOFT, true),
@@ -91,6 +98,7 @@ impl Haunt {
     fn habits(self) -> &'static [Habit] {
         match self {
             Self::Island => ISLAND,
+            Self::Coast => COAST,
             Self::Glacier => GLACIER,
             Self::Berg => BERG,
             Self::Yard => YARD,
@@ -98,6 +106,10 @@ impl Haunt {
     }
 }
 
+/// Nothing is made nearer the listener than this many metres. Right alongside, the
+/// ship's own wash is all there is to hear of the sea, and birds keep their distance.
+/// The levels of these sounds are set to carry, and would be far too much up close.
+const ALONGSIDE: f32 = 40.;
 /// Times a second the ship's frames creak when she lies stopped, and how many more
 /// at full speed.
 const WORKING: (f32, f32) = (0.03, 0.22);
@@ -161,7 +173,9 @@ impl Ambience {
                     }
                     Spot::Middle => place.position,
                 };
-                self.emit(habit.sound, position, cues);
+                if position.distance(ears) >= ALONGSIDE {
+                    self.emit(habit.sound, position, cues);
+                }
             }
         }
         let working = WORKING.0 + WORKING.1 * way.clamp(0., 1.);

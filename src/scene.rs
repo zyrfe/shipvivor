@@ -5,9 +5,10 @@ pub(crate) mod spray;
 use crate::seascape::Sea;
 use crate::state::{Campaign, Encounter, PlayerHelm, TrialCourse};
 use bevy::{asset::RenderAssetUsages, prelude::*, render::render_resource::PrimitiveTopology};
+pub(crate) use hull::deck_height;
 use hull::extended_hull_mesh;
 use shipvivor_campaign::DockModule;
-use shipvivor_encounter::{DeckOffsets, Hull, Rack, Station, TurretLayout};
+use shipvivor_encounter::{AaMount, AntiAir, DeckOffsets, Hull, Rack, Station, TurretLayout};
 use shipvivor_navigation::Helm;
 
 #[derive(Component)]
@@ -30,13 +31,16 @@ pub struct DeckFitting {
 }
 #[derive(Component)]
 pub struct SectionModel(DockModule, usize);
+/// Gear on a yard section that keeps its own proportions when the beam is widened.
+#[derive(Component)]
+pub struct Unscaled;
 
 pub fn refit_hull(
     run: Res<Campaign>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut ship: Single<&mut Mesh3d, With<Ship>>,
     mut fittings: Query<(&DeckFitting, &mut Transform), Without<SectionModel>>,
-    mut sections: Query<(&SectionModel, &mut Transform, &mut Visibility)>,
+    mut sections: Query<(&SectionModel, &mut Transform, &mut Visibility, Has<Unscaled>)>,
     mut previous: Local<(
         Option<std::sync::Arc<shipvivor_shipyard::Design>>,
         Option<shipvivor_campaign::DockJob>,
@@ -70,25 +74,17 @@ pub fn refit_hull(
             pose.translation.x = fitting.x * offsets.beam_scale;
         }
     }
-    for (model, mut pose, mut shown) in &mut sections {
+    for (model, mut pose, mut shown, unscaled) in &mut sections {
         let index = design
             .modules()
             .iter()
             .enumerate()
-            .filter(|(_, module)| {
-                module.frame == shipvivor_shipyard::Frame::Straight
-                    && match model.0 {
-                        DockModule::Reserve => module.fit.is_empty(),
-                        DockModule::EngineRoom => {
-                            module.fit.as_slice() == [shipvivor_shipyard::Component::Engine]
-                        }
-                    }
-            })
+            .filter(|(_, module)| **module == model.0.build())
             .nth(model.1);
         *shown = if let Some((i, _)) = index {
             let (fore, aft) = design.span(i);
             pose.translation.z = (fore + aft) * 0.5 - Hull::CRUISER.bow;
-            pose.scale.x = offsets.beam_scale;
+            pose.scale.x = if unscaled { 1. } else { offsets.beam_scale };
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -211,6 +207,66 @@ pub fn place_wing_guns(
     }
 }
 
+/// A light AA mount: the tub it stands in, what trains, and what elevates.
+#[derive(Component)]
+pub struct AaPosition(usize);
+#[derive(Component)]
+pub struct AaTrain(usize);
+#[derive(Component)]
+pub struct AaCradle(usize);
+/// Height of an AA tub's floor: the bridge wing deck, with the others raised to match.
+const AA_FLOOR: f32 = 3.04;
+
+/// Every AA station has a model. Only the mounts fitted are shown, trained and laid
+/// as the crews have them at sea, and turned outboard in the dock.
+#[allow(clippy::type_complexity)]
+pub fn place_aa_guns(
+    run: Res<Campaign>,
+    battle: Res<Encounter>,
+    mut tubs: Query<(&AaPosition, &mut Transform, &mut Visibility)>,
+    mut trains: Query<(&AaTrain, &mut Transform), (Without<AaPosition>, Without<AaCradle>)>,
+    mut cradles: Query<(&AaCradle, &mut Transform), (Without<AaPosition>, Without<AaTrain>)>,
+) {
+    let yard = matches!(run.screen(), crate::state::Screen::Drydock(_));
+    let deck = yard.then(|| {
+        (
+            DeckOffsets::for_design(&run.display_design()),
+            run.display_fittings().anti_air().mounts,
+        )
+    });
+    // Where each mount stands, where it points from the bow, and how high it is laid.
+    let lay = |i: usize| -> Option<(f32, f32, f32, f32)> {
+        if let Some((deck, fitted)) = deck {
+            let (x, fore) = deck.aa_position(i);
+            (i < fitted).then(|| (x, fore, x.signum() * 1.1, 0.5))
+        } else {
+            battle
+                .aa_mounts()
+                .get(i)
+                .map(|m| (m.deck_x(), m.deck_fore(), m.deck_bearing(), m.elevation()))
+        }
+    };
+    for (tub, mut pose, mut shown) in &mut tubs {
+        let Some((x, fore, _, _)) = lay(tub.0) else {
+            shown.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        shown.set_if_neq(Visibility::Inherited);
+        pose.translation.x = x;
+        pose.translation.z = -fore;
+    }
+    for (train, mut pose) in &mut trains {
+        if let Some((_, _, bearing, _)) = lay(train.0) {
+            pose.rotation = Quat::from_rotation_y(-bearing);
+        }
+    }
+    for (cradle, mut pose) in &mut cradles {
+        if let Some((_, _, _, elevation)) = lay(cradle.0) {
+            pose.rotation = Quat::from_rotation_x(elevation.clamp(-0.1, 1.45));
+        }
+    }
+}
+
 pub fn animate_gun_tubes(
     run: Res<Campaign>,
     battle: Res<Encounter>,
@@ -257,11 +313,7 @@ pub struct Horizon;
 pub struct Signal(usize);
 
 #[derive(Component)]
-pub struct Buoy {
-    gate: usize,
-    /// Index into `Gate::buoys`: port, then starboard.
-    side: usize,
-}
+pub struct Buoy;
 
 pub fn setup(
     mut commands: Commands,
@@ -286,6 +338,7 @@ pub fn setup(
     let green = paint(61, 177, 151);
 
     spray::spawn(&mut commands, &mut meshes, &mut materials);
+    let gear = crate::strike_craft::Parts::new(&mut meshes, &mut materials);
     let ship = commands
         .spawn((
             Ship,
@@ -469,13 +522,20 @@ pub fn setup(
             x: 0.,
             z: -0.85,
         },
-        Transform::from_xyz(0., 8.09, -0.85).with_scale(Vec3::new(0.64, 0.42, 0.47)),
+        // Scaled alike along and across the cloth, so the flag keeps the proportions its
+        // colours are laid out in.
+        Transform::from_xyz(0., 8.09, -0.85).with_scale(Vec3::new(0.56, 0.56, 0.47)),
         Mesh3d::default(),
         MeshMaterial3d::<StandardMaterial>::default(),
         bevy::light::NotShadowCaster,
         ChildOf(ship),
     ));
-    for kind in [DockModule::Reserve, DockModule::EngineRoom] {
+    for kind in [
+        DockModule::Reserve,
+        DockModule::EngineRoom,
+        DockModule::Floatplane,
+        DockModule::Missiles,
+    ] {
         for instance in 0..shipvivor_campaign::MAX_SECTIONS_PER_KIND {
             let section = commands
                 .spawn((
@@ -565,6 +625,22 @@ pub fn setup(
                         );
                     }
                 }
+                // The catapult and the missile launcher keep their own proportions
+                // on a widened beam, so they stand on a section of their own.
+                DockModule::Floatplane | DockModule::Missiles => {
+                    let fitted = commands
+                        .spawn((
+                            SectionModel(kind, instance),
+                            Unscaled,
+                            Transform::default(),
+                            Visibility::Hidden,
+                            ChildOf(ship),
+                        ))
+                        .id();
+                    crate::strike_craft::equip(&mut commands, fitted, kind, instance, &gear);
+                }
+                // Turrets stand on the gun stations.
+                DockModule::Turret => {}
             }
         }
     }
@@ -703,12 +779,114 @@ pub fn setup(
             ));
         }
     }
+    for i in 0..AntiAir::MOST_MOUNTS {
+        let (x, fore) = AaMount::station(i);
+        let tub = commands
+            .spawn((
+                AaPosition(i),
+                Transform::from_xyz(x, 0., -fore),
+                Visibility::Hidden,
+                ChildOf(ship),
+            ))
+            .id();
+        // The bridge wings carry their own pair. The others stand on a column raised
+        // from the main deck to the same height.
+        if i / 2 != 1 {
+            let deck = hull::deck_height(-fore);
+            commands.spawn((
+                Mesh3d(drum.clone()),
+                MeshMaterial3d(steel.clone()),
+                Transform::from_xyz(0., 0.5 * (deck + AA_FLOOR), 0.).with_scale(Vec3::new(
+                    0.42,
+                    AA_FLOOR - deck,
+                    0.42,
+                )),
+                ChildOf(tub),
+            ));
+        }
+        for (mesh, mat, at, scale) in [
+            (&drum, &iron, AA_FLOOR - 0.04, Vec3::new(1.12, 0.08, 1.12)),
+            (&drum, &pale, AA_FLOOR + 0.16, Vec3::new(1.1, 0.34, 1.1)),
+        ] {
+            commands.spawn((
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(mat.clone()),
+                Transform::from_xyz(0., at, 0.).with_scale(scale),
+                ChildOf(tub),
+            ));
+        }
+        let train = commands
+            .spawn((
+                AaTrain(i),
+                Transform::from_xyz(0., AA_FLOOR, 0.)
+                    .with_rotation(Quat::from_rotation_y(-x.signum() * 1.1)),
+                Visibility::Inherited,
+                ChildOf(tub),
+            ))
+            .id();
+        for (mesh, mat, at, scale) in [
+            (
+                &drum,
+                &iron,
+                Vec3::new(0., 0.12, 0.),
+                Vec3::new(0.5, 0.24, 0.5),
+            ),
+            (
+                &cube,
+                &steel,
+                Vec3::new(0., 0.36, 0.08),
+                Vec3::new(0.46, 0.3, 0.42),
+            ),
+            (
+                &cube,
+                &pale,
+                Vec3::new(0., 0.5, -0.24),
+                Vec3::new(0.78, 0.42, 0.05),
+            ),
+        ] {
+            commands.spawn((
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(mat.clone()),
+                Transform::from_translation(at).with_scale(scale),
+                ChildOf(train),
+            ));
+        }
+        let cradle = commands
+            .spawn((
+                AaCradle(i),
+                Transform::from_xyz(0., 0.46, 0.).with_rotation(Quat::from_rotation_x(0.5)),
+                Visibility::Inherited,
+                ChildOf(train),
+            ))
+            .id();
+        commands.spawn((
+            Mesh3d(cube.clone()),
+            MeshMaterial3d(iron.clone()),
+            Transform::from_xyz(0., 0., 0.02).with_scale(Vec3::new(0.34, 0.2, 0.5)),
+            ChildOf(cradle),
+        ));
+        // Two barrels side by side, each with a flash hider at the muzzle.
+        for side in [-0.11, 0.11] {
+            for (z, width, length, mat) in
+                [(-0.68, 0.075, 1.05, &steel), (-1.22, 0.11, 0.12, &iron)]
+            {
+                commands.spawn((
+                    Mesh3d(drum.clone()),
+                    MeshMaterial3d(mat.clone()),
+                    Transform::from_xyz(side, 0.02, z)
+                        .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
+                        .with_scale(Vec3::new(width, length, width)),
+                    ChildOf(cradle),
+                ));
+            }
+        }
+    }
     for (index, gate) in course.gates().iter().enumerate() {
-        for (side, (p, color)) in gate.buoys().into_iter().zip([&red, &green]).enumerate() {
+        for (p, color) in gate.buoys().into_iter().zip([&red, &green]) {
             let base = commands
                 .spawn((
-                    Buoy { gate: index, side },
-                    Visibility::default(),
+                    Buoy,
+                    Visibility::Hidden,
                     Transform::from_xyz(p.x, 0.62, p.y),
                 ))
                 .id();
@@ -726,6 +904,7 @@ pub fn setup(
             }
             commands.spawn((
                 Signal(index),
+                Visibility::Hidden,
                 Mesh3d(cube.clone()),
                 MeshMaterial3d(brass.clone()),
                 Transform::from_xyz(0., 3.85, 0.)
@@ -910,28 +1089,22 @@ pub fn signals(
     course: Res<TrialCourse>,
     run: Res<Campaign>,
     mut lamps: Query<(&Signal, &mut Visibility), Without<Buoy>>,
-    mut buoys: Query<(&Buoy, &mut Transform, &mut Visibility)>,
+    mut buoys: Query<&mut Visibility, With<Buoy>>,
 ) {
-    let on_title = run.mode == crate::state::Mode::Title;
-    for (buoy, mut xf, mut visible) in &mut buoys {
-        visible.set_if_neq(if on_title {
-            Visibility::Hidden
-        } else {
+    let trial = run.mode == crate::state::Mode::Trial;
+    for mut visible in &mut buoys {
+        visible.set_if_neq(if trial {
             Visibility::Inherited
+        } else {
+            Visibility::Hidden
         });
-        if course.is_changed() {
-            let p = course.gates()[buoy.gate].buoys()[buoy.side];
-            xf.translation = Vec3::new(p.x, 0.62, p.y);
-        }
     }
-    if course.is_changed() {
-        for (signal, mut lamp) in &mut lamps {
-            *lamp = if signal.0 == course.active() {
-                Visibility::Inherited
-            } else {
-                Visibility::Hidden
-            };
-        }
+    for (signal, mut lamp) in &mut lamps {
+        lamp.set_if_neq(if trial && signal.0 == course.active() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
     }
 }
 

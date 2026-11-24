@@ -76,7 +76,11 @@ fn crippled_raider_drifts_and_falls_silent_when_its_reserve_power_runs_out() {
     for port in &mut b.ports {
         port.convoy_clock = 1000.; // Isolate the disabled boat from convoy escorts.
     }
-    b.raiders[0].body.pos = Vec2::new(0., -52.);
+    for gun in &mut b.wing_guns {
+        gun.reload = 100.; // And from the player's crew.
+    }
+    // Far enough off that she carries her way off and drifts without fouling the player.
+    b.raiders[0].body.pos = Vec2::new(0., -70.);
     cripple(&mut b.raiders[0]);
     let start = b.raiders[0].body.pos;
     let orders = Orders {
@@ -115,8 +119,17 @@ fn shell_sweeps_and_stops_at_first_contact() {
     for gun in &mut b.wing_guns {
         gun.reload = 100.;
     }
-    b.spawn(EnemyClass::Patrol, Vec2::new(0., -40.), Vec2::ZERO);
-    b.spawn(EnemyClass::Patrol, Vec2::new(0., -15.), Vec2::ZERO);
+    // Both boats lie across the line of fire.
+    b.spawn(
+        EnemyClass::Patrol,
+        Vec2::new(0., -40.),
+        Vec2::new(10., -40.),
+    );
+    b.spawn(
+        EnemyClass::Patrol,
+        Vec2::new(0., -15.),
+        Vec2::new(10., -15.),
+    );
     let e = b.step(
         0.5,
         &Orders {
@@ -802,7 +815,11 @@ fn raider_ahead() -> Battle {
     for gun in &mut b.wing_guns {
         gun.reload = 100.;
     }
-    b.spawn(EnemyClass::Patrol, Vec2::new(0., -22.), Vec2::ZERO);
+    b.spawn(
+        EnemyClass::Patrol,
+        Vec2::new(0., -22.),
+        Vec2::new(10., -22.),
+    );
     b
 }
 #[test]
@@ -1144,8 +1161,11 @@ fn each_gold_mount_takes_independent_swept_hits_before_the_hull_opens() {
             (Some(class), Some(index + 1))
         );
         let before = ship.live_guns();
-        hit(&mut b, eye, aim, 2);
-        assert_eq!(b.raiders[0].live_guns(), before);
+        // A gold turret stands three stock rounds and falls to the fourth.
+        for _ in 0..3 {
+            hit(&mut b, eye, aim, 2);
+            assert_eq!(b.raiders[0].live_guns(), before, "station {index}");
+        }
         hit(&mut b, eye, aim, 2);
         assert_eq!(b.raiders[0].live_guns(), before - 1, "station {index}");
         assert!(!b.raiders[0].guns[index].live());
@@ -1207,11 +1227,89 @@ fn dismantling_the_near_broadside_removes_its_fire_and_preserves_the_opposite_ba
     let ship = &mut b.raiders[0];
     for index in 0..ship.guns.len() {
         if ship.guns[index].base(&ship.body, class.profile()).x >= 0. {
-            ship.hit_gun(index, 5);
+            ship.hit_gun(index, 7);
         }
     }
     assert_eq!(fire_for(&mut b, 1.), 0);
     assert!(fire_for(&mut b, -1.) >= 12);
+}
+
+#[test]
+fn shooting_away_the_flagships_bridge_slows_her_on_her_course_while_her_turrets_stand() {
+    use super::fleet::{CONN_LOST, CONN_PACE};
+    let mut b = battle();
+    b.raiders.clear();
+    b.salvage.clear();
+    let class = EnemyClass::Parliament;
+    let pos = Vec2::new(-230., 75.);
+    let facing = shipvivor_compass::direction(0.73);
+    b.spawn(class, pos, pos + facing);
+    let p = class.profile();
+    let stock = b.raiders[0].hull();
+    // From her beam, over the deck and the secondaries, into the tower amidships.
+    let bridge = pos.extend(p.deck + 2. * p.gun_scale).xzy();
+    let eye = (pos + facing.perp() * 85.).extend(bridge.y + 4.).xzy();
+    let shoot = |b: &mut Battle| {
+        let (shots, effects, serial) = (&mut b.shots, &mut b.effects, &mut b.serial);
+        fire(shots, effects, serial, eye, bridge, Battery::Main, 2);
+        b.advance_shots(1., Vec2::ZERO, &mut Events::default());
+        assert!(b.shots.is_empty());
+    };
+    for _ in 0..2 {
+        shoot(&mut b);
+        assert!(b.raiders[0].bridge_standing());
+        assert_eq!(b.raiders[0].helm_lost(), 0.);
+    }
+    shoot(&mut b);
+    let ship = &b.raiders[0];
+    assert!(!ship.bridge_standing());
+    assert_eq!(ship.helm_lost(), CONN_LOST);
+    // The bridge is a target of its own: her hull and turrets are untouched.
+    assert_eq!((ship.hull(), ship.live_guns()), (stock, 10));
+    assert!(ship.protected() && !ship.is_disabled());
+
+    // The player lies off her beam, so with a helm she would turn towards the player.
+    let player = pos + facing.perp() * 400.;
+    let sail = |b: &mut Battle, seconds: f32| {
+        for _ in 0..(seconds * 60.).round() as usize {
+            b.raiders[0].sail(
+                1. / 60.,
+                player,
+                &b.ports,
+                &b.landmarks,
+                &b.floe.icebergs,
+                Vec2::ZERO,
+            );
+        }
+    };
+    let heading = b.raiders[0].body.heading;
+    sail(&mut b, 10.);
+    assert_eq!(b.raiders[0].body.heading, heading, "she holds her course");
+    let slowed = b.raiders[0].motion().length();
+    assert!(slowed > 0.);
+    sail(&mut b, CONN_LOST - 10. + 0.5);
+    assert_eq!(b.raiders[0].helm_lost(), 0.);
+    // Conned from aft, she gathers way again.
+    sail(&mut b, 15.);
+    let full = b.raiders[0].motion().length();
+    assert!(
+        (slowed / full - CONN_PACE).abs() < 1e-3,
+        "{slowed} of {full}"
+    );
+    sail(&mut b, 5.);
+    assert_ne!(
+        b.raiders[0].body.heading, heading,
+        "she answers the helm again"
+    );
+    // A bridge is shot away only once, and no other class has one to lose.
+    assert!(!b.raiders[0].hit_bridge(100));
+    assert_eq!(b.raiders[0].helm_lost(), 0.);
+    b.spawn(
+        EnemyClass::Battleship,
+        Vec2::new(200., 0.),
+        Vec2::new(200., 10.),
+    );
+    assert!(!b.raiders[1].bridge_standing());
 }
 
 #[test]
@@ -1389,7 +1487,10 @@ fn stock_salvos_leave_dents_and_can_silence_the_battleship_director() {
         shoot(&mut b, MainShell::STOCK, belt, Vec2::NEG_X),
         Impact::Embedded
     );
-    assert_eq!(b.raiders[0].hull(), intact - 4.);
+    // The second shell follows the first through the same plating, worn now, and
+    // does more than its own 2.
+    let lost = intact - b.raiders[0].hull();
+    assert!(lost > 4. && lost < 5., "{lost}");
 }
 
 #[test]
@@ -1587,13 +1688,96 @@ fn one_tow_remembers_its_catch_and_pays_the_entire_package_once() {
 }
 
 #[test]
+fn direct_rewards_float_no_packages_and_pay_for_each_wreck_and_fallen_building() {
+    let mut b = battle().with_rewards(Rewards::Direct);
+    assert_eq!(b.rewards(), Rewards::Direct);
+    assert!(b.salvage.is_empty(), "the loose packages are cleared");
+    b.raiders.clear();
+    let orders = distant_observer();
+    b.spawn(EnemyClass::Freighter, Vec2::new(-75., -125.), Vec2::ZERO);
+    scuttle(&mut b.raiders[0]);
+    let e = b.step(1. / 60., &orders);
+    assert_eq!((e.sunk, e.recovered), (1, 4));
+    assert!(b.salvage.is_empty(), "the wreck leaves nothing to tow");
+
+    // Shell a building until it falls, and total what it paid.
+    let shell = |b: &mut Battle, eye: Vec3, target: Vec3| {
+        fire(
+            &mut b.shots,
+            &mut b.effects,
+            &mut b.serial,
+            eye,
+            target,
+            Battery::Main,
+            2,
+        );
+        let mut events = Events::default();
+        b.advance_shots(0.4, Vec2::ZERO, &mut events);
+        events.recovered
+    };
+    let pos = b.ports[2].factory_position(0);
+    let approach = (pos - b.ports[2].body.pos).normalize();
+    let target = pos.extend(8.5).xzy();
+    let eye = target + (60. * approach).extend(0.).xzy();
+    let paid: u16 = (0..4).map(|_| shell(&mut b, eye, target)).sum();
+    assert!(!b.ports[2].factories()[0].live());
+    assert_eq!(paid, u16::from(FACTORY_STORES));
+
+    // A drydock pays for itself and for the factory that goes down with it.
+    assert_eq!(b.ports[0].live_factories(), 1);
+    let mut paid = 0;
+    for _ in 0..12 {
+        let p = &b.ports[0];
+        let yard = p.yard_position();
+        let target = yard.extend((p.yard_top() + 3.2) * 0.5).xzy();
+        let eye = target + (p.body.forward() * 60.).extend(0.).xzy();
+        paid += shell(&mut b, eye, target);
+    }
+    assert_eq!(b.ports[0].yard_state(), YardState::Ruined);
+    assert_eq!(paid, u16::from(DRYDOCK_STORES + FACTORY_STORES));
+}
+
+#[test]
+fn packages_pay_nothing_until_towed_and_buildings_pay_nothing() {
+    let mut b = battle();
+    assert_eq!(b.rewards(), Rewards::Packages);
+    let loose = b.salvage.len();
+    assert!(loose > 0);
+    b.raiders.clear();
+    b.spawn(EnemyClass::Freighter, Vec2::new(-75., -125.), Vec2::ZERO);
+    scuttle(&mut b.raiders[0]);
+    let e = b.step(1. / 60., &distant_observer());
+    assert_eq!((e.sunk, e.recovered), (1, 0));
+    assert_eq!(b.salvage.len(), loose + 1);
+    for _ in 0..12 {
+        let p = &b.ports[0];
+        let yard = p.yard_position();
+        let target = yard.extend((p.yard_top() + 3.2) * 0.5).xzy();
+        let eye = target + (p.body.forward() * 60.).extend(0.).xzy();
+        fire(
+            &mut b.shots,
+            &mut b.effects,
+            &mut b.serial,
+            eye,
+            target,
+            Battery::Main,
+            2,
+        );
+        let mut events = Events::default();
+        b.advance_shots(0.4, Vec2::ZERO, &mut events);
+        assert_eq!(events.recovered, 0);
+    }
+    assert_eq!(b.ports[0].yard_state(), YardState::Ruined);
+}
+
+#[test]
 fn inbound_cargo_unloads_material_and_repairs_the_surviving_dock() {
     let mut b = battle();
     b.raiders.clear();
     b.next_wave = 1000.;
-    for p in &mut b.ports[1..] {
-        p.damage_yard(100);
-    }
+    b.ports[2].damage_yard(100);
+    // The second yard stands to send the freighter, and wants nothing itself.
+    b.ports[1].convoy_clock = 1000.;
     let observer = distant_observer();
     let port = &mut b.ports[0];
     port.stock = 2;
@@ -1608,18 +1792,25 @@ fn inbound_cargo_unloads_material_and_repairs_the_surviving_dock() {
     port.turrets[0].strength = 0;
     port.convoy_clock = 0.;
     b.step(0.1, &observer);
+    assert_eq!(b.raiders.len(), 1, "no escort comes in from the open sea");
     let freight = &b.raiders[0];
     assert_eq!(freight.class, EnemyClass::Freighter);
-    assert!(freight.body.pos.distance(b.ports[0].berth()) > 450.);
+    assert!(
+        freight.body.pos.distance(b.ports[1].berth()) < 30.,
+        "she casts off from the other yard's slip"
+    );
     let mut before = 0;
-    for _ in 0..900 {
+    for _ in 0..4000 {
         before = b.ports[0].stock;
         let e = b.step(0.1, &observer);
         assert_eq!((e.sunk, e.recovered), (0, 0));
         if b.raiders.is_empty() {
             break;
         }
-        assert!(b.ports[0].stock < 2, "only residual income before delivery");
+        assert!(
+            b.ports[0].stock <= before + 1,
+            "only residual income before delivery"
+        );
     }
     assert!(b.raiders.is_empty(), "freighter failed to dock");
     assert_eq!(b.ports[0].stock, before + 6);
@@ -1729,16 +1920,20 @@ fn inbound_cargo_withdraws_when_its_yard_falls() {
     b.raiders.clear();
     b.next_wave = 1000.;
     let observer = distant_observer();
-    for p in &mut b.ports[1..] {
-        p.damage_yard(99);
-    }
+    b.ports[2].damage_yard(99);
+    b.ports[1].convoy_clock = 1000.;
     b.ports[0].convoy_clock = 0.;
     for _ in 0..160 {
         b.step(0.1, &observer);
     }
-    assert_eq!(b.raiders.len(), 2);
-    assert_eq!(b.raiders[1].class, EnemyClass::Destroyer);
+    assert_eq!(
+        b.raiders.len(),
+        1,
+        "a freighter, and no escort from the open sea"
+    );
     let (index, origin) = b.raiders[0].cargo_run.unwrap();
+    assert_eq!(index, 0);
+    assert!(origin.distance(b.ports[1].berth()) < 30.);
     assert!(origin.distance(b.raiders[0].body.pos) > 90.);
     b.ports[index].damage_yard(99);
     for _ in 0..1500 {
@@ -1750,6 +1945,44 @@ fn inbound_cargo_withdraws_when_its_yard_falls() {
     assert!(b.raiders.iter().all(|r| r.cargo_run.is_none()));
     assert_eq!(b.ports[index].stock, 0);
     assert!(b.ports[index].turrets().iter().all(|g| !g.live()));
+}
+
+#[test]
+fn no_ship_comes_in_from_the_sea_once_the_other_yards_are_wrecked() {
+    let mut b = battle();
+    b.raiders.clear();
+    b.next_wave = 1000.;
+    let observer = distant_observer();
+    for p in &mut b.ports[1..] {
+        p.damage_yard(100);
+    }
+    // The last yard is battered and short of stock, and nothing can bring it any.
+    b.ports[0].damage_yard(17);
+    b.ports[0].convoy_clock = 0.;
+    for _ in 0..1200 {
+        b.step(0.1, &observer);
+    }
+    assert!(b.raiders.is_empty(), "{} ships appeared", b.raiders.len());
+}
+
+#[test]
+fn each_picket_lies_at_one_of_three_stations_the_seed_picks() {
+    let station = Vec2::new(120., -380.);
+    assert_eq!(
+        picket_station(None, 0, station),
+        station,
+        "a hand-set chart"
+    );
+    let mut seen = std::collections::HashSet::new();
+    for seed in 0..64_u64 {
+        for index in 0..4 {
+            let at = picket_station(Some(seed), index, station);
+            assert_eq!(at, picket_station(Some(seed), index, station));
+            assert!(at.length() >= station.length(), "never nearer the entry");
+            seen.insert((at.x.round() as i32, at.y.round() as i32));
+        }
+    }
+    assert_eq!(seen.len(), PICKET_SHIFTS.len());
 }
 
 #[test]
@@ -1875,7 +2108,9 @@ fn fitted_secondaries_add_guns_fire_faster_and_hit_harder() {
         damage: 3,
         ..Secondaries::STOCK
     });
-    assert!((heavy - 3. * hurt).abs() < 0.01, "{heavy} against {hurt}");
+    // Within a few percent: a plate worn by the first rounds lets a little more of the
+    // heavier ones through when they land close together.
+    assert!((heavy / hurt - 3.).abs() < 0.03, "{heavy} against {hurt}");
     let (twin, _) = engage(Secondaries {
         barrels: 2,
         ..Secondaries::STOCK
@@ -2130,9 +2365,13 @@ fn hammering_a_cruisers_stern_stops_her_until_her_crew_restarts_the_engine() {
     let orders = distant_observer();
     let start = Vec2::new(-75., -125.);
     b.spawn(EnemyClass::Cruiser, start, start + Vec2::NEG_Y);
-    // A point on her keel, in metres ahead of her centre. Her engine is under the
+    // A point on her bottom, in metres ahead of her centre and just to `side` of the
+    // keel, so each blow lands on the plate meant for it. Her engine is under the
     // after gun, 7 metres back.
-    let keel = |b: &Battle, ahead: f32| b.raiders[0].body.pos + b.raiders[0].body.forward() * ahead;
+    let keel = |b: &Battle, ahead: f32, side: f32| {
+        let forward = b.raiders[0].body.forward();
+        b.raiders[0].body.pos + forward * ahead + forward.perp() * side * 0.5
+    };
     let run = |b: &mut Battle, seconds: usize| {
         let from = b.raiders[0].body.pos;
         for _ in 0..seconds * 60 {
@@ -2143,20 +2382,23 @@ fn hammering_a_cruisers_stern_stops_her_until_her_crew_restarts_the_engine() {
     let cruising = run(&mut b, 2);
     assert!((cruising - 6.6).abs() < 0.2, "{cruising} m/s");
 
-    let stern = keel(&b, -7.);
+    let stern = keel(&b, -7., -1.);
     b.raiders[0].hit_hull(stern, 2);
     assert!(!b.raiders[0].is_disabled());
+    // She carries her way for a few seconds before the damage tells.
+    run(&mut b, 4);
     let limping = run(&mut b, 2);
     assert!(
         (limping - 3.3).abs() < 0.2,
         "a damaged engine gives half: {limping} m/s"
     );
 
-    let stern = keel(&b, -7.);
+    let stern = keel(&b, -7., 1.);
     b.raiders[0].hit_hull(stern, 2);
     let r = &b.raiders[0];
     assert!(r.is_disabled() && r.afloat());
     assert_eq!(r.live_guns(), 2, "the guns were not touched");
+    run(&mut b, 4);
     let adrift = run(&mut b, 5);
     assert!(adrift < 1., "{adrift} m/s");
 
@@ -2166,7 +2408,7 @@ fn hammering_a_cruisers_stern_stops_her_until_her_crew_restarts_the_engine() {
     assert!(run(&mut b, 2) > 3.);
 
     // A third hit wrecks the module, and the gun standing on it goes with it.
-    let stern = keel(&b, -7.);
+    let stern = keel(&b, -7., -1.);
     b.raiders[0].hit_hull(stern, 2);
     let r = &b.raiders[0];
     assert!(r.vessel().compartments()[4].wrecked());
@@ -2229,6 +2471,9 @@ fn hits_on_the_player_report_where_along_her_hull_they_landed() {
         assert_eq!(blows.len(), 1);
         assert_eq!(blows[0].damage, 7);
         assert!((blows[0].aft - (hull.bow - north)).abs() < 0.01);
+        // It came in from the east, on her starboard beam, five inches across.
+        assert!(blows[0].abeam > 0., "{:?}", blows[0]);
+        assert_eq!(blows[0].calibre.map(f32::round), Some(5.));
     }
     assert!(shell(-21., hull).is_empty());
     let long = Hull {
@@ -2255,6 +2500,85 @@ fn hits_on_the_player_report_where_along_her_hull_they_landed() {
     }
     assert_eq!(blows.len(), 1);
     assert!(blows[0].aft < 3. && blows[0].damage > 0, "{:?}", blows[0]);
+    assert_eq!(blows[0].calibre, None, "no plate turns a ram");
+    assert_eq!(blows[0].reach, shipvivor_shipyard::Reach::Bays);
+}
+
+#[test]
+fn only_a_round_that_gets_below_her_deck_amidships_reaches_her_engine() {
+    use shipvivor_shipyard::{Design, Reach, Ship, State};
+    // A round from her starboard beam at the given height, half a metre abaft her
+    // centre, where the forward funnel stands over the machinery space.
+    let blow = |height: f32| {
+        let mut b = battle();
+        b.keel = (Vec2::NEG_Y, Hull::CRUISER);
+        b.raiders.clear();
+        fire(
+            &mut b.shots,
+            &mut b.effects,
+            &mut b.serial,
+            Vec3::new(60., height + 0.5, 0.5),
+            Vec3::new(0., height, 0.5),
+            Battery::Raider,
+            7,
+        );
+        let mut events = Events::default();
+        b.advance_shots(2., Vec2::ZERO, &mut events);
+        assert_eq!(events.blows.len(), 1, "{height} m up");
+        events.blows[0]
+    };
+    let engine = |blow: Blow| {
+        let mut ship = Ship::new(Design::breakwater());
+        ship.strike_into(blow.aft, blow.abeam, 7., None, blow.reach);
+        let berth = shipvivor_shipyard::Berth {
+            module: 3,
+            index: 2,
+        };
+        ship.state(berth)
+    };
+    let side = blow(0.9);
+    assert!((side.aft - 16.5).abs() < 0.05, "{side:?}");
+    let Reach::Track(Some([(_, from), (_, to)])) = side.reach else {
+        panic!("a round holing her side runs on inside: {side:?}");
+    };
+    assert!(from > 2.5 && to < 0.5, "{side:?}");
+    assert_eq!(engine(side), State::Damaged);
+    let funnel = blow(3.);
+    assert!((funnel.aft - 16.5).abs() < 0.05, "{funnel:?}");
+    assert_eq!(funnel.reach, Reach::Track(None));
+    assert_eq!(engine(funnel), State::Working);
+}
+
+#[test]
+fn each_enemy_gun_fires_rounds_as_wide_as_its_calibre() {
+    let calibre = |battery: Battery, barrel: f32| {
+        let mut b = battle();
+        b.shots.clear();
+        let path = projectile::FlightPath::from_barrel(
+            Vec3::Y * 2.,
+            Vec3::new(100., 1., 0.),
+            battery,
+            barrel,
+        );
+        path.unwrap()
+            .launch(&mut b.shots, &mut b.effects, &mut b.serial, battery, 1);
+        b.shots[0].calibre().round()
+    };
+    // The armor plate cards are pitched against these: 4, 7 and 10 inches.
+    let main = |class: EnemyClass| calibre(Battery::Raider, 3.2 * class.profile().gun_scale);
+    assert_eq!(
+        [
+            EnemyClass::Patrol,
+            EnemyClass::Destroyer,
+            EnemyClass::Cruiser,
+            EnemyClass::Battleship
+        ]
+        .map(main),
+        [5., 6., 8., 12.]
+    );
+    assert_eq!(calibre(Battery::EnemySecondary, 1.8), 3.);
+    assert_eq!(calibre(Battery::Aircraft, 1.8), 3.);
+    assert_eq!(calibre(Battery::Shore, 0.), 13.);
 }
 
 /// Rounds fired and shell hits taken in a minute steaming past one enemy lying abeam.
@@ -2472,7 +2796,8 @@ fn gallery_guns_share_a_compartment_but_train_and_load_independently() {
         shell: main,
         reload: 18.,
     };
-    for _ in 0..400 {
+    // The eighteen-inch gunhouse trains at under half the pace of the wing guns.
+    for _ in 0..800 {
         b.step(1. / 60., &orders);
     }
     assert_eq!(b.main_mounts()[0].status(), MountStatus::Masked);
@@ -2660,4 +2985,174 @@ fn a_regent_turret_keeps_its_warned_aim_when_the_player_changes_course() {
         }
     }
     panic!("the warned salvo never fired");
+}
+
+/// Seconds until the AA guns bring down the spotter over port 0, with the ship lying
+/// `offset` metres from where it starts its circuit. `None` if it is still flying.
+fn spotter_shot_down(fit: AntiAir, offset: Vec2, seconds: f32) -> (Option<f32>, Battle) {
+    let mut b = battle();
+    b.raiders.clear();
+    b.fit_anti_air(fit);
+    let player = b.spotters[0].position + offset;
+    let orders = Orders {
+        player,
+        heading: 0.,
+        speed: 0.,
+        hull: Hull::CRUISER,
+        aim: Aim::Hold,
+        reload: 6.4,
+        shell: MainShell::STOCK,
+    };
+    let dt = 1. / 60.;
+    let mut t = 0.;
+    while t < seconds {
+        b.raiders.clear();
+        b.step(dt, &orders);
+        t += dt;
+        if !b.spotters[0].airborne() {
+            return (Some(t), b);
+        }
+    }
+    (None, b)
+}
+
+#[test]
+fn aa_guns_bring_down_a_spotter_in_reach_and_it_stops_reporting() {
+    let fitted = AntiAir {
+        mounts: 2,
+        ..AntiAir::NONE
+    };
+    // Lying under the far end of its circuit, the guns have it in reach for a while.
+    let under = Vec2::new(200., -180.);
+    let (unarmed, _) = spotter_shot_down(AntiAir::NONE, under, 30.);
+    assert_eq!(unarmed, None);
+    let (downed, mut b) = spotter_shot_down(fitted, under, 30.);
+    let downed = downed.expect("two AA guns bring the spotter down within half a minute");
+    assert!(downed > 1., "it takes more than one burst: {downed:.1} s");
+    assert!(!b.spotters[0].reporting && b.spotters[0].alert_left == 0.);
+    assert!(
+        b.effects()
+            .iter()
+            .any(|fx| fx.kind == EffectKind::Downed(Airframe::Spotter))
+    );
+    assert!(b.effects().iter().any(|fx| fx.kind == EffectKind::Flak));
+    // It falls into the sea and stays down for the rest of the leg.
+    let before = b.spotters[0].position;
+    for _ in 0..60 * 5 {
+        b.advance_effects(1. / 60.);
+    }
+    assert!(
+        b.effects()
+            .iter()
+            .all(|fx| !matches!(fx.kind, EffectKind::Downed(_)))
+    );
+    b.update_lookouts(10., before);
+    assert!(!b.spotters[0].airborne() && !b.spotters[0].reporting);
+    // More guns, heavier bursts and quicker loaders bring it down sooner.
+    let heavy = AntiAir {
+        mounts: 6,
+        damage: 3,
+        reload: 0.6,
+        ..AntiAir::NONE
+    };
+    let (sooner, _) = spotter_shot_down(heavy, under, 30.);
+    assert!(sooner.unwrap() < downed, "{sooner:?} against {downed:.1} s");
+    // Out of reach, the guns hold their fire.
+    let (far, b) = spotter_shot_down(fitted, Vec2::new(900., 0.), 10.);
+    assert_eq!(far, None);
+    assert!(b.shots().iter().all(|s| s.battery != Battery::AntiAir));
+}
+
+#[test]
+fn aa_guns_shoot_down_a_strafer_and_the_station_takes_longer_to_send_another() {
+    let mut b = battle();
+    b.raiders.clear();
+    b.landmarks.clear();
+    b.open_air_station(AirRaid::Strafe);
+    b.fit_anti_air(AntiAir {
+        mounts: 4,
+        damage: 2,
+        ..AntiAir::NONE
+    });
+    let port = &b.ports[0];
+    let player =
+        port.factory_position(0) + port.body.forward() * 185. - port.body.forward().perp() * 55.;
+    let orders = Orders {
+        player,
+        heading: 0.,
+        speed: 0.,
+        hull: Hull::CRUISER,
+        aim: Aim::Hold,
+        reload: 6.4,
+        shell: MainShell::STOCK,
+    };
+    let dt = 1. / 60.;
+    let mut downed = false;
+    for _ in 0..60 * 70 {
+        b.raiders.clear();
+        b.ports[0].has_contact = true;
+        b.step(dt, &orders);
+        if b.effects()
+            .iter()
+            .any(|fx| fx.kind == EffectKind::Downed(Airframe::Attack))
+        {
+            downed = true;
+            break;
+        }
+    }
+    assert!(downed, "four AA guns bring a strafer down on its run");
+    let station = b.air_station().unwrap();
+    assert!(station.aircraft.is_none());
+    assert!(station.rearm > 40.);
+}
+
+#[test]
+fn a_faster_round_flies_farther_and_training_gear_trains_a_heavy_mount_sooner() {
+    let mut b = battle();
+    b.raiders.clear();
+    let far = Vec3::new(0., 0., -1300.);
+    let mount = b.main_mount(Station::Bow);
+    let stock = mount
+        .trajectory(Vec2::ZERO, 0., far, MainShell::STOCK)
+        .unwrap();
+    let fast = MainShell {
+        velocity: 3,
+        ..MainShell::STOCK
+    };
+    let quick = mount.trajectory(Vec2::ZERO, 0., far, fast).unwrap();
+    let carried = |t: &Trajectory| t.end().xz().distance(t.point(0.).xz());
+    assert!((carried(&stock) - MainShell::STOCK.reach()).abs() < 6.);
+    assert!(carried(&quick) > carried(&stock) + 150.);
+    assert!(stock.end().y.abs() < 1e-3 && stock.descends_to(0.).is_some());
+
+    // An eight-inch gunhouse swinging onto the beam, with and without training gear.
+    let heavy = MainShell {
+        bore: 4,
+        ..MainShell::STOCK
+    };
+    let swing = |gear: u16| {
+        let mut b = battle();
+        b.raiders.clear();
+        b.fit_training(gear);
+        let orders = Orders {
+            player: Vec2::ZERO,
+            heading: 0.,
+            speed: 0.,
+            hull: Hull::CRUISER,
+            aim: Aim::Track(Vec3::new(200., 1.7, -20.)),
+            reload: 12.8,
+            shell: heavy,
+        };
+        let dt = 1. / 60.;
+        (1..=60 * 30)
+            .find(|_| {
+                b.step(dt, &orders);
+                b.raiders.clear();
+                b.main_mount(Station::Bow).status() == MountStatus::Ready
+            })
+            .map(|steps| steps as f32 * dt)
+            .unwrap()
+    };
+    let (slow, geared) = (swing(0), swing(4));
+    assert!(geared < 0.6 * slow, "{geared:.2} s against {slow:.2} s");
 }

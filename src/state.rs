@@ -68,6 +68,8 @@ impl Encounter {
             (local.round(), local.turrets)
         });
         self.fit_secondaries(run.fittings.secondaries());
+        self.fit_anti_air(run.fittings.anti_air());
+        self.fit_training(run.fittings.training_gear);
     }
 }
 #[derive(Resource, Default)]
@@ -97,16 +99,33 @@ pub enum Mode {
     Paused,
 }
 
+#[derive(Clone, Copy, Default)]
+pub enum TitlePage {
+    #[default]
+    Menu,
+    Customise,
+    Options,
+    Departure,
+}
+
 /// What the player is looking at: the mode, refined by the run's phase while on patrol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
     Title,
+    /// Opened from the title, over the same cruise: Breakwater's flag, for now.
+    Customise,
+    /// Opened from the title, over the same cruise: how the ship earns experience.
+    Options,
+    /// Choose the first patrol before the campaign clock starts.
+    Departure,
     Trial,
     Sailing,
     Secured,
     Refit,
     Drydock(LegEnd),
     Chart,
+    /// The passage chart consulted from the bridge during a patrol.
+    PassageMap,
     Intercept(LegEnd),
     Paused,
     Won(LegEnd),
@@ -115,15 +134,18 @@ pub enum Screen {
 
 #[derive(Resource, Deref, DerefMut)]
 pub struct Campaign {
+    pub chart_roll: Option<ChartRoll>,
+    pub watch: crate::captain::Watch,
     pub clearance_left: f32,
     /// The refit previewed from the selected section's list. Selecting a section
     /// previews nothing until one of its refits is chosen.
     pub dock_option: Option<usize>,
-    /// The section of the ship selected in the drydock, counted from the bow. The bow
-    /// and the stern stand for the hull as a whole.
+    /// The section of the ship selected in the drydock, counted from the bow.
     pub dock_module: usize,
-    /// The order that would close the dock has been pressed once and awaits a second.
-    pub dock_armed: bool,
+    /// Work previewed from outside the selected section's list: widening the hull, or a
+    /// section from the yard's stock dropped onto the ship. It stands in for the option.
+    pub dock_draft: Option<DockJob>,
+    pub title_page: TitlePage,
     pub hits: u32,
     pub sunk: u32,
     pub mode: Mode,
@@ -131,6 +153,13 @@ pub struct Campaign {
     pub seed: u64,
     #[deref]
     run: Run,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct ChartRoll {
+    pub opening: bool,
+    /// Fraction of the sheet unwound, retained when a tap reverses the roll.
+    pub spread: f32,
 }
 impl Default for Campaign {
     fn default() -> Self {
@@ -142,10 +171,13 @@ impl Campaign {
     pub fn new(mode: Mode) -> Self {
         Self {
             mode,
+            chart_roll: None,
+            watch: Default::default(),
             clearance_left: 0.,
             dock_option: None,
             dock_module: 1,
-            dock_armed: false,
+            dock_draft: None,
+            title_page: TitlePage::Menu,
             hits: 0,
             sunk: 0,
             seed: 0,
@@ -161,28 +193,42 @@ impl Campaign {
     pub fn open_dock(&mut self) {
         let bay = self.turret_bay().unwrap_or(1);
         self.select_section(bay);
-        self.dock_armed = false;
     }
     pub fn select_section(&mut self, at: usize) {
         if at < self.ship.design().modules().len() {
             self.dock_module = at;
             self.dock_option = None;
+            self.dock_draft = None;
         }
+    }
+    /// Preview one of the selected section's refits.
+    pub fn preview_option(&mut self, index: usize) {
+        if index < self.dock_jobs().len() {
+            self.dock_option = Some(index);
+            self.dock_draft = None;
+        }
+    }
+    /// Preview work that is not on the selected section's list.
+    pub fn preview_draft(&mut self, job: DockJob) {
+        self.dock_draft = Some(job);
+        self.dock_option = None;
     }
     pub fn dock_job(&self) -> Option<DockJob> {
         if !matches!(self.screen(), Screen::Drydock(_)) {
             return None;
         }
-        self.dock_jobs().get(self.dock_option?).copied()
+        self.dock_draft
+            .or_else(|| self.dock_jobs().get(self.dock_option?).copied())
     }
     pub fn display_design(&self) -> Cow<'_, Design> {
         self.dock_job()
             .and_then(|job| self.projected_design(job))
             .map_or_else(|| Cow::Borrowed(self.ship.design().as_ref()), Cow::Owned)
     }
-    pub fn preview_section(&self) -> Option<DockModule> {
+    /// A section from the yard's stock being tried in place, and where it would go.
+    pub fn preview_insert(&self) -> Option<(usize, DockModule)> {
         match self.dock_job() {
-            Some(job @ DockJob::Section(kind)) if job.fits(self) => Some(kind),
+            Some(job @ DockJob::Insert { at, module }) if job.fits(self) => Some((at, module)),
             _ => None,
         }
     }
@@ -196,8 +242,14 @@ impl Campaign {
 
     pub fn screen(&self) -> Screen {
         match self.mode {
-            Mode::Title => Screen::Title,
+            Mode::Title => match self.title_page {
+                TitlePage::Menu => Screen::Title,
+                TitlePage::Customise => Screen::Customise,
+                TitlePage::Options => Screen::Options,
+                TitlePage::Departure => Screen::Departure,
+            },
             Mode::Trial => Screen::Trial,
+            Mode::Paused if self.chart_roll.is_some() => Screen::PassageMap,
             Mode::Paused => Screen::Paused,
             Mode::Patrol if self.clearance_left > 0. => Screen::Secured,
             Mode::Patrol => match self.run.phase() {

@@ -18,6 +18,9 @@ fn sea(set: Set, islets: Vec<Islet>, ice: Vec<Ice>) -> Battle {
     };
     let chart = Chart {
         seed: Some(7),
+        course: Course::Circuit,
+        coast: vec![],
+        pickets: PICKETS.map(|(ahead, side)| Vec2::new(side, -ahead)),
         gates: [
             (0., -300.),
             (300., -150.),

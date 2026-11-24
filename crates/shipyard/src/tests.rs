@@ -137,9 +137,12 @@ fn each_enemy_gun_finds_a_berth_on_the_module_under_its_deck_station() {
     }
     assert_eq!((turrets[0], turrets[5]), (berth(1, 0), berth(7, 0)));
 
-    // The flagship's turrets take 3 points each whatever her hull is worth.
+    // The flagship's turrets take 7 points each whatever her hull is worth: four
+    // stock rounds, and three of the heavier ones.
     let mut flagship = Ship::new(Design::flagship());
-    assert_eq!(flagship.strike_fitting(turrets[3], 2.), []);
+    for _ in 0..3 {
+        assert_eq!(flagship.strike_fitting(turrets[3], 2.), []);
+    }
     assert_eq!(
         flagship.strike_fitting(turrets[3], 2.),
         [Loss::Knocked(turrets[3])]
@@ -226,6 +229,38 @@ fn the_dock_inserts_and_removes_modules_and_refuses_what_cannot_be_built() {
 }
 
 #[test]
+fn a_round_reaches_the_engine_only_through_the_middle_of_the_machinery_space() {
+    let engine = berth(3, 2);
+    // Twelve is enough to knock her engine out, and the machinery space runs from 15 m
+    // to 20 m aft of the bow with her engine in its middle.
+    let struck = |aft: f32, abeam: f32, reach: Reach| {
+        let mut ship = Ship::new(Design::breakwater());
+        let hull = ship.hull();
+        let losses = ship.strike_into(aft, abeam, 12., None, reach);
+        assert!(near(ship.hull(), hull - 12.), "the module takes the blow");
+        (losses, ship.state(engine))
+    };
+    let spared = (vec![], State::Working);
+    let knocked = (vec![Loss::Knocked(engine)], State::Out);
+    // Burst in the funnel, above the deck.
+    assert_eq!(struck(16.5, 0., Reach::Track(None)), spared);
+    // Burst in the side passage before getting in to her.
+    let passage = Reach::Track(Some([(17., 2.75), (17., 2.)]));
+    assert_eq!(struck(17., 2.75, passage), spared);
+    // Holed at the bulkhead, clear of her.
+    let bulkhead = Reach::Track(Some([(15.2, 2.75), (15.2, -0.25)]));
+    assert_eq!(struck(15.2, 2.75, bulkhead), spared);
+    // Through the side and on into the engine room.
+    let through = Reach::Track(Some([(17., 2.75), (17., -0.25)]));
+    assert_eq!(struck(17., 2.75, through), knocked);
+    // Plunging through the deck above her.
+    let plunging = Reach::Track(Some([(16.8, 0.5), (17.2, 0.3)]));
+    assert_eq!(struck(16.8, 0.5, plunging), knocked);
+    // A ram, an iceberg or a bomb reaches every bay of the module it lands on.
+    assert_eq!(struck(19.8, 2.7, Reach::Bays), knocked);
+}
+
+#[test]
 fn breakwaters_stock_engine_takes_twelve_damage_to_knock_out() {
     let mut ship = Ship::new(Design::breakwater());
     let engine = berth(3, 2);
@@ -265,6 +300,78 @@ fn a_wrecked_module_soaks_up_fire_and_passes_half_to_its_neighbours() {
     ship.strike_hull(1., 14.);
     ship.strike_hull(1., 10.);
     assert!(near(left(&ship, 1), 13.));
+}
+
+/// A round wider than Breakwater's stock plate.
+const SIX_INCH: Option<f32> = Some(6.);
+
+/// Hits of `damage` on module 1 of a fresh Breakwater, cycling through `points` as
+/// (metres aft, metres abeam), until it floods. Returns how many it took.
+fn hits_to_flood(points: &[(f32, f32)], damage: f32) -> usize {
+    let mut ship = Ship::new(Design::breakwater());
+    (1..100)
+        .find(|hit| {
+            let (aft, abeam) = points[(hit - 1) % points.len()];
+            ship.strike_side(aft, abeam, damage, SIX_INCH);
+            ship.compartments()[1].wrecked()
+        })
+        .unwrap()
+}
+
+#[test]
+fn hammering_one_stretch_of_plating_floods_a_module_sooner_than_spreading_the_same_fire() {
+    let ship = Ship::new(Design::breakwater());
+    // Module 1 runs from 5 to 10 metres aft: its fore half, then its after half.
+    assert_eq!(ship.panel_at(6., -2.), (1, Panel::new(Side::Port, true)));
+    assert_eq!(
+        ship.panel_at(9., 2.),
+        (1, Panel::new(Side::Starboard, false))
+    );
+    let focused = hits_to_flood(&[(6., -2.)], 2.);
+    let spread = hits_to_flood(&[(6., -2.), (9., -2.), (6., 2.), (9., 2.)], 2.);
+    // On sound plate, 18 structure goes in nine hits of 2.
+    assert_eq!((focused, spread), (6, 9));
+}
+
+#[test]
+fn turning_the_other_beam_brings_fresh_plating_to_bear() {
+    let mut ship = Ship::new(Design::breakwater());
+    let port = Panel::new(Side::Port, true);
+    let lost = |ship: &mut Ship, abeam: f32| {
+        let before = ship.compartments()[1].structure();
+        ship.strike_side(6., abeam, 3., SIX_INCH);
+        before - ship.compartments()[1].structure()
+    };
+    // Sound plate holds a shell to its damage, and is worn by all of it.
+    assert!(near(lost(&mut ship, -2.), 3.));
+    assert!(near(ship.compartments()[1].plating(port), 2. / 3.));
+    assert!(near(lost(&mut ship, -2.), 4.));
+    let battered = lost(&mut ship, -2.);
+    assert!(near(battered, 5.));
+    assert_eq!(ship.compartments()[1].plating(port), 0.);
+    for panel in &Panel::ALL[1..] {
+        assert_eq!(ship.compartments()[1].plating(*panel), 1.);
+    }
+    assert!(
+        near(lost(&mut ship, 2.), 3.),
+        "the starboard plate is sound"
+    );
+}
+
+#[test]
+fn plating_mends_with_the_crew_and_the_dock_replates_her() {
+    let mut ship = Ship::new(Design::breakwater());
+    let port = Panel::new(Side::Port, true);
+    for _ in 0..3 {
+        ship.strike_side(6., -2., 3., SIX_INCH);
+    }
+    assert_eq!(ship.compartments()[1].plating(port), 0.);
+    assert!(!ship.compartments()[1].wrecked());
+    // The crew restores 0.2% of the plate each second, the pace it mends the hull at.
+    ship.tend(50.);
+    assert!(near(ship.compartments()[1].plating(port), 0.1));
+    ship.dock(0.);
+    assert_eq!(ship.compartments()[1].plating(port), 1.);
 }
 
 #[test]
@@ -578,4 +685,68 @@ fn extending_a_live_hull_preserves_damage_and_the_repair_partys_berth() {
     ship.strike_hull(22., 12.);
     assert_eq!(ship.state(berth(4, 0)), State::Out);
     assert!(near(ship.propulsion(), 0.5));
+}
+
+#[test]
+fn thick_plate_turns_aside_light_rounds_until_heavy_ones_wear_it_thin() {
+    let armoured = Design::breakwater().protected(Protection {
+        plating: 2.,
+        thickness: 7.,
+        ..Protection::BREAKWATER
+    });
+    let mut ship = Ship::new(armoured.clone());
+    let (module, panel) = ship.panel_at(7.5, 2.);
+    assert!(near(
+        ship.design().plate_strength(module),
+        2. * Design::breakwater().plate_strength(module)
+    ));
+    let lost = |ship: &mut Ship, abeam: f32, calibre: Option<f32>| {
+        let before = ship.compartments()[module].structure();
+        ship.strike_side(7.5, abeam, 4., calibre);
+        before - ship.compartments()[module].structure()
+    };
+    let left = |ship: &Ship| ship.compartments()[module].plating(panel);
+    // Seven inches of sound plate turns a destroyer's six-inch round and is scuffed.
+    assert_eq!(lost(&mut ship, 2., Some(5.9)), 0.);
+    assert!(near(left(&ship), 17. / 18.));
+    // A battleship's twelve-inch round goes through and wears it.
+    assert!(near(lost(&mut ship, 2., Some(12.)), 4. * (1. + 1. / 18.)));
+    assert!(near(left(&ship), 13. / 18.));
+    // What is left still turns a patrol boat's round, but no longer the destroyer's.
+    assert_eq!(lost(&mut ship, 2., Some(4.7)), 0.);
+    assert!(near(lost(&mut ship, 2., Some(5.9)), 4. * (1. + 6. / 18.)));
+    // The other beam is sound and turns it, and nothing turns a ram.
+    assert_eq!(lost(&mut ship, -2., Some(5.9)), 0.);
+    assert!(near(lost(&mut Ship::new(armoured), 2., None), 4.));
+    // Stock plate turns nothing that is fired at her.
+    let mut stock = Ship::new(Design::breakwater());
+    assert!(near(lost(&mut stock, 2., Some(2.8)), 4.));
+}
+
+#[test]
+fn hardening_strengthens_engine_and_fittings_and_keeps_damage_as_a_share() {
+    let mut ship = Ship::new(Design::breakwater());
+    let engine = berth(3, 2);
+    let gun = ship.fitted(MainGun).next().unwrap().0;
+    assert_eq!(ship.design().strength(Engine), Some(12.));
+    ship.strike_hull(17., 6.);
+    ship.strike_fitting(gun, 6.);
+    assert!(near(ship.health(engine), 0.5) && near(ship.health(gun), 0.5));
+    ship.protect(Protection {
+        engine: 1.,
+        fittings: 1.5,
+        ..Protection::BREAKWATER
+    });
+    assert_eq!(ship.design().strength(Engine), Some(18.));
+    assert_eq!(ship.design().strength(MainGun), Some(18.));
+    // Each keeps the share of strength it had left.
+    assert!(near(ship.health(engine), 0.5) && near(ship.health(gun), 0.5));
+    // A fully hardened engine lasts as long as its compartment.
+    let mut fresh = Ship::new(Design::breakwater());
+    fresh.protect(Protection {
+        engine: 1.,
+        ..Protection::BREAKWATER
+    });
+    assert_eq!(fresh.strike_hull(17., 17.), []);
+    assert_eq!(fresh.state(engine), State::Damaged);
 }

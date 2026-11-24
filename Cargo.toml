@@ -33,8 +33,14 @@ bevy = { version = "=0.20.1", default-features = false, features = [
     "std", "async_executor", "multi_threaded", "bevy_log", "bevy_winit", "x11",
     "bevy_pbr", "bevy_ui_render", "default_font", "keyboard", "mouse", "bevy_audio",
 ] }
-# Encodes dev-build captures. Bevy's own `png` feature would rebuild most of Bevy.
+# Encodes dev captures. Bevy's own `png` feature would rebuild most of Bevy.
 png = "0.18"
+
+[features]
+default = ["dev-tools"]
+# The run logbook (`work/runs`) and the ` capture key (`work/screenshots`). On in every
+# build, `--release` included. Build with `--no-default-features` to ship without them.
+dev-tools = []
 
 [profile.dev]
 debug = 1
@@ -45,4 +51,8 @@ opt-level = 3
 
 # The wake transforms its whole patch twice on every fixed step.
 [profile.dev.package.shipvivor-sea]
+opt-level = 3
+
+# A spin of the customise screen's wheel repaints every pattern tile at each turn.
+[profile.dev.package.shipvivor-ensign]
 opt-level = 3

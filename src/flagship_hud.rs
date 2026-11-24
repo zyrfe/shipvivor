@@ -289,7 +289,10 @@ pub fn update(
     }
     let d = ship.body.pos - helm.position;
     let range = (d.length() / 10.).round() as u32 * 10;
-    let state = if ship.protected() {
+    let state = if ship.protected() && ship.helm_lost() > 0. {
+        // Her bridge is gone: how long she holds her course before someone cons her.
+        format!("no helm {:.0} s", ship.helm_lost().ceil())
+    } else if ship.protected() {
         format!("{}/{} turrets", ship.live_guns(), ship.guns().len())
     } else {
         "hull exposed".to_string()

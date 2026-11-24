@@ -4,9 +4,13 @@
 mod battery;
 mod workshop;
 pub use battery::{CALIBRES, ShipBeam};
-use shipvivor_artillery::{MainShell, Secondaries, TurretLayout};
-use shipvivor_shipyard::{Component, Design, Frame, Module, Ship};
-pub use workshop::{DeckModule, DockJob, MAX_GUN_STATIONS, MAX_SECTIONS_PER_KIND};
+use shipvivor_artillery::{
+    AntiAir, MainShell, STOCK_TRAVERSE, Secondaries, TurretLayout, training_rate,
+};
+use shipvivor_shipyard::{Component, Design, Frame, Module, Protection, Ship};
+pub use workshop::{
+    DeckModule, DockJob, MAX_GUN_STATIONS, MAX_LENGTH, MAX_SECTIONS_PER_KIND, Refusal,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Phase {
@@ -36,7 +40,29 @@ pub enum Stage {
     GreywaterSound,
     PilotsCut,
     CrownDeep,
+    LanternBay,
+    BlackcapReach,
 }
+
+pub struct Anchorage {
+    pub stage: Stage,
+    pub pilot_note: &'static str,
+}
+
+pub const ANCHORAGES: [Anchorage; 3] = [
+    Anchorage {
+        stage: Stage::LanternBay,
+        pilot_note: "Calm water behind wooded islands. Patrols are spaced furthest apart.",
+    },
+    Anchorage {
+        stage: Stage::IronNarrows,
+        pilot_note: "Steady patrols in a winding channel between the islands.",
+    },
+    Anchorage {
+        stage: Stage::BlackcapReach,
+        pilot_note: "An exposed coast with heavy swell and the quickest reinforcements.",
+    },
+];
 
 /// The time limit and star goals of one leg.
 #[derive(Clone, Copy)]
@@ -45,24 +71,33 @@ pub struct Mission {
     pub minutes: u16,
     pub kills: u16,
     pub crates: u16,
-    pub gates: u16,
 }
 
 impl Stage {
+    pub fn is_opening(self) -> bool {
+        ANCHORAGES.iter().any(|port| port.stage == self)
+    }
+
+    /// The three-star passage takes the ship into enemy air cover.
+    pub fn enters_air_cover(self) -> bool {
+        self == Self::PilotsCut
+    }
+
     pub fn mission(self) -> Mission {
-        let (name, minutes, kills, crates, gates) = match self {
-            Self::CrownDeep => ("Crown Deep", 15, 0, 0, 0),
-            Self::IronNarrows => ("The Iron Narrows", 10, 4, 2, 3),
-            Self::OuterRoad => ("Outer Road", 12, 7, 3, 3),
-            Self::GreywaterSound => ("Greywater Sound", 12, 6, 4, 4),
-            Self::PilotsCut => ("Pilot's Cut", 15, 8, 3, 5),
+        let (name, minutes, kills, crates) = match self {
+            Self::CrownDeep => ("Crown Deep", 15, 0, 0),
+            Self::IronNarrows => ("The Iron Narrows", 10, 4, 2),
+            Self::LanternBay => ("Lantern Bay", 12, 3, 2),
+            Self::BlackcapReach => ("Blackcap Reach", 9, 5, 2),
+            Self::OuterRoad => ("Outer Road", 12, 7, 3),
+            Self::GreywaterSound => ("Greywater Sound", 12, 6, 4),
+            Self::PilotsCut => ("Pilot's Cut", 15, 8, 3),
         };
         Mission {
             name,
             minutes,
             kills,
             crates,
-            gates,
         }
     }
 }
@@ -72,24 +107,44 @@ pub const MAX_HULL: u16 = 100;
 pub const MAX_STARS: u8 = 3;
 pub const RESERVE_STARS: u8 = 2;
 
+/// A whole section the yard can splice into the hull: a straight frame and what stands on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DockModule {
     Reserve,
     EngineRoom,
+    Turret,
+    Floatplane,
+    Missiles,
 }
 impl DockModule {
+    /// The yard's stock, in the order it is laid out.
+    pub const ALL: [Self; 5] = [
+        Self::Turret,
+        Self::EngineRoom,
+        Self::Floatplane,
+        Self::Missiles,
+        Self::Reserve,
+    ];
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Reserve => "Reserve bay",
             Self::EngineRoom => "Auxiliary engine",
+            Self::Turret => "Centre turret",
+            Self::Floatplane => "Floatplane catapult",
+            Self::Missiles => "Missile rack",
         }
     }
 
-    fn build(self) -> Module {
-        match self {
-            Self::Reserve => Module::new(Frame::Straight, []),
-            Self::EngineRoom => Module::new(Frame::Straight, [Component::Engine]),
-        }
+    pub fn build(self) -> Module {
+        let fit = match self {
+            Self::Reserve => None,
+            Self::EngineRoom => Some(Component::Engine),
+            Self::Turret => Some(Component::MainGun),
+            Self::Floatplane => Some(Component::Catapult),
+            Self::Missiles => Some(Component::MissileRack),
+        };
+        Module::new(Frame::Straight, fit)
     }
 }
 /// Hull restored by each recovered crate.
@@ -97,8 +152,7 @@ pub const CRATE_REPAIR: u16 = 12;
 /// Hull points of repair the dock gives between legs. A badly damaged ship sails with
 /// whatever this does not reach.
 pub const DOCK_REPAIR: u16 = 40;
-/// Extraction opens after this many gate crossings or this long at sea.
-pub const EXTRACT_GATES: u16 = 2;
+/// Time until extraction opens if no drydock has been destroyed.
 pub const EXTRACT_SECONDS: f32 = 60.;
 
 /// What a route grants on arrival.
@@ -156,10 +210,43 @@ pub enum Card {
     SecondaryRange,
     /// A second barrel on every wing gun.
     TwinSecondaries,
+    /// Faster training and elevation for every main gunhouse.
+    TrainingGear,
+    /// Heavier side plating, which wears more slowly and turns aside part of a hit.
+    Armor,
+    /// A stronger engine and stronger deck fittings.
+    Hardening,
+    /// A pair of light anti-aircraft guns.
+    AntiAir,
+    /// Another pair of AA guns.
+    MoreAntiAir,
+    /// More damage from each AA burst.
+    HeavyAntiAir,
+    /// A shorter AA reload.
+    QuickAntiAir,
 }
 
 /// Metres each rangefinder card adds to the secondaries' reach.
 const WING_RANGE_STEP: f32 = 40.;
+/// The most ranks of each refit the ship can take.
+pub mod limits {
+    pub const TRAINING_GEAR: u16 = shipvivor_artillery::MOST_TRAINING_GEAR;
+    /// At the widest beam. A narrower hull carries fewer: see [`crate::ShipBeam::most_armor`].
+    pub const ARMOR: u16 = crate::ShipBeam::Capital.most_armor();
+    pub const HARDENING: u16 = 2;
+    pub const AA_MOUNTS: u16 = 2;
+    pub const AA_SHELLS: u16 = 2;
+    pub const AA_LOADERS: u16 = 3;
+}
+/// Each rank of armor plate adds this share of stock strength to every panel, and
+/// this many inches to its thickness. On sound plate the stock beam's two ranks turn
+/// the enemy's secondaries and aircraft guns, then patrol boats and destroyers. A
+/// cruiser's beam adds cruisers, then battleships and shore guns, and a capital beam
+/// the Parliament's guns. Nothing turns the Regent's.
+const ARMOR_PLATE: f32 = 0.5;
+const ARMOR_INCHES: f32 = 3.;
+/// Each rank of hardening adds this share of stock strength to every deck fitting.
+const HARDENED_FITTINGS: f32 = 0.5;
 
 /// Seconds per inch of calibre for one barrel to reload with stock gear: 6.4 s at four inches.
 const RELOAD_PER_INCH: f32 = 1.6;
@@ -180,6 +267,13 @@ pub struct Fittings {
     pub wing_loaders: u16,
     pub wing_range: u16,
     pub wing_twin: u16,
+    pub training_gear: u16,
+    pub armor: u16,
+    pub hardening: u16,
+    pub anti_air: u16,
+    pub aa_mounts: u16,
+    pub aa_shells: u16,
+    pub aa_loaders: u16,
 }
 impl Fittings {
     /// These fittings with one more rank of `card`.
@@ -200,6 +294,13 @@ impl Fittings {
             Card::QuickSecondaries => &mut self.wing_loaders,
             Card::SecondaryRange => &mut self.wing_range,
             Card::TwinSecondaries => &mut self.wing_twin,
+            Card::TrainingGear => &mut self.training_gear,
+            Card::Armor => &mut self.armor,
+            Card::Hardening => &mut self.hardening,
+            Card::AntiAir => &mut self.anti_air,
+            Card::MoreAntiAir => &mut self.aa_mounts,
+            Card::HeavyAntiAir => &mut self.aa_shells,
+            Card::QuickAntiAir => &mut self.aa_loaders,
             Card::TripleTurrets | Card::QuadTurrets => {
                 self.turrets = match (card, self.turrets) {
                     (Card::TripleTurrets, TurretLayout::Twin) => TurretLayout::Triple,
@@ -232,6 +333,40 @@ impl Fittings {
     pub fn armor_piercing(&self) -> bool {
         self.armor_piercing > 0
     }
+    /// Degrees per second the main battery trains, and elevates in proportion. A larger
+    /// bore trains more slowly, and training gear wins it back.
+    pub fn traverse(&self) -> f32 {
+        STOCK_TRAVERSE * training_rate(self.round().calibre_inches(), self.training_gear)
+    }
+    /// The light AA battery: a pair of guns once fitted and another pair per mounting
+    /// card, one more damage a burst per heavier round, and quick loaders working as
+    /// they do for the main battery.
+    pub fn anti_air(&self) -> AntiAir {
+        if self.anti_air == 0 {
+            return AntiAir::NONE;
+        }
+        AntiAir {
+            mounts: (2 + 2 * usize::from(self.aa_mounts)).min(AntiAir::MOST_MOUNTS),
+            damage: AntiAir::NONE.damage.saturating_add(self.aa_shells),
+            reload: AntiAir::NONE.reload / (1. + 0.25 * f32::from(self.aa_loaders)),
+            range: AntiAir::NONE.range,
+        }
+    }
+    /// The hull's protection with these fittings, on a hull built with `stock`. Armor
+    /// plate strengthens and thickens the side plating, so it wears more slowly and
+    /// turns aside heavier rounds. Hardening brings the engine up to the strength of
+    /// its compartment and toughens every deck fitting.
+    pub fn protection(&self, stock: Protection) -> Protection {
+        let armor = f32::from(self.armor.min(limits::ARMOR));
+        let hardening = f32::from(self.hardening.min(limits::HARDENING));
+        Protection {
+            plating: stock.plating * (1. + ARMOR_PLATE * armor),
+            thickness: stock.thickness + ARMOR_INCHES * armor,
+            engine: stock.engine
+                + (1. - stock.engine).max(0.) * hardening / f32::from(limits::HARDENING),
+            fittings: stock.fittings * (1. + HARDENED_FITTINGS * hardening),
+        }
+    }
     /// The close-range battery: one more gun a beam per mounting card, one more damage a
     /// hit per heavier round, quick loaders working as they do for the main battery, 40 m
     /// more reach per rangefinder and a second barrel on every gun once twinned.
@@ -245,8 +380,9 @@ impl Fittings {
         }
     }
 
-    /// Keep the first draft about ammunition. Later drafts also offer machinery, and every
-    /// fourth draft is for the close-range battery.
+    /// Hands come round in four themes: ammunition first, then the main battery, then
+    /// machinery and protection, then the close-range and anti-aircraft guns. A hand
+    /// that runs out of its own cards is filled from the rest.
     pub fn offers(&self) -> Vec<Card> {
         use Card::*;
         let installed = [
@@ -261,88 +397,120 @@ impl Fittings {
             self.wing_loaders,
             self.wing_range,
             self.wing_twin,
+            self.training_gear,
+            self.armor,
+            self.hardening,
+            self.anti_air,
+            self.aa_mounts,
+            self.aa_shells,
+            self.aa_loaders,
         ]
         .into_iter()
         .map(u32::from)
         .sum::<u32>()
             + (self.turrets.count() - 2) as u32;
-        // Each close-range hand leads with a different secondary card.
-        let mut wing = [
+        // Each close-range hand leads with a different card.
+        let mut close = [
             MoreSecondaries,
+            AntiAir,
             TwinSecondaries,
             HeavySecondaries,
+            MoreAntiAir,
             SecondaryRange,
+            HeavyAntiAir,
             QuickSecondaries,
+            QuickAntiAir,
         ];
-        let turn = (installed / 4) as usize % 5;
-        wing.rotate_left(turn);
-        let [w0, w1, w2, w3, w4] = wing;
-        let deck = match installed % 4 {
-            0 => [
-                ArmorPiercing,
-                Caps,
-                Shells,
-                Velocity,
-                Loader,
-                Turbines,
-                TripleTurrets,
-                QuadTurrets,
-                w0,
-                w1,
-                w2,
-                w3,
-                w4,
-            ],
-            1 => [
-                Loader,
-                TripleTurrets,
-                QuadTurrets,
-                Turbines,
-                Caps,
-                Velocity,
-                Shells,
-                ArmorPiercing,
-                w0,
-                w1,
-                w2,
-                w3,
-                w4,
-            ],
-            2 => [
-                Velocity,
-                Shells,
-                TripleTurrets,
-                QuadTurrets,
-                Turbines,
-                Caps,
-                Loader,
-                ArmorPiercing,
-                w0,
-                w1,
-                w2,
-                w3,
-                w4,
-            ],
-            _ => [
-                w0,
-                w1,
-                w2,
-                w3,
-                w4,
-                ArmorPiercing,
-                Caps,
-                Turbines,
-                Loader,
-                Velocity,
-                Shells,
-                TripleTurrets,
-                QuadTurrets,
-            ],
+        let turn = (installed / 4) as usize % close.len();
+        close.rotate_left(turn);
+        let (lead, rest): (&[Card], &[Card]) = match installed % 4 {
+            0 => (
+                &[ArmorPiercing, Caps, Shells, Velocity],
+                &[
+                    Loader,
+                    TrainingGear,
+                    Turbines,
+                    Armor,
+                    Hardening,
+                    TripleTurrets,
+                    QuadTurrets,
+                ],
+            ),
+            1 => (
+                &[Loader, TripleTurrets, QuadTurrets, TrainingGear],
+                &[
+                    Turbines,
+                    Armor,
+                    Caps,
+                    Velocity,
+                    Shells,
+                    ArmorPiercing,
+                    Hardening,
+                ],
+            ),
+            2 => (
+                &[Armor, Turbines, Hardening],
+                &[
+                    Velocity,
+                    Shells,
+                    TrainingGear,
+                    TripleTurrets,
+                    QuadTurrets,
+                    Caps,
+                    Loader,
+                    ArmorPiercing,
+                ],
+            ),
+            _ => (
+                &close,
+                &[
+                    ArmorPiercing,
+                    Caps,
+                    Turbines,
+                    Hardening,
+                    Loader,
+                    Velocity,
+                    Shells,
+                    Armor,
+                    TrainingGear,
+                    TripleTurrets,
+                    QuadTurrets,
+                ],
+            ),
         };
-        deck.into_iter()
+        let close_after = if installed % 4 == 3 {
+            &[][..]
+        } else {
+            &close[..]
+        };
+        lead.iter()
+            .chain(rest)
+            .chain(close_after)
+            .copied()
             .filter(|card| self.can_fit(*card))
             .take(3)
             .collect()
+    }
+    /// Ranks of `card` fitted, out of the most the ship can ever take, for a card that
+    /// stacks to a limit. `None` for a card that is fitted once and replaced, or that has
+    /// no limit.
+    pub fn ranks(&self, card: Card) -> Option<(u16, u16)> {
+        use Card::*;
+        let most_per_side = Secondaries::MOST_PER_SIDE as u16 - 1;
+        Some(match card {
+            MoreSecondaries => (self.wing_mounts.min(most_per_side), most_per_side),
+            HeavySecondaries => (self.wing_shells, 2),
+            QuickSecondaries => (self.wing_loaders, 3),
+            SecondaryRange => (self.wing_range, 2),
+            TwinSecondaries => (self.wing_twin, 1),
+            TrainingGear => (self.training_gear, limits::TRAINING_GEAR),
+            Armor => (self.armor, limits::ARMOR),
+            Hardening => (self.hardening, limits::HARDENING),
+            MoreAntiAir => (self.aa_mounts, limits::AA_MOUNTS),
+            HeavyAntiAir => (self.aa_shells, limits::AA_SHELLS),
+            QuickAntiAir => (self.aa_loaders, limits::AA_LOADERS),
+            _ => return None,
+        })
     }
     pub fn can_fit(&self, card: Card) -> bool {
         use Card::*;
@@ -358,6 +526,13 @@ impl Fittings {
             QuickSecondaries => self.wing_loaders < 3,
             SecondaryRange => self.wing_range < 2,
             TwinSecondaries => self.wing_twin == 0,
+            TrainingGear => self.training_gear < limits::TRAINING_GEAR,
+            Armor => self.armor < self.beam.most_armor(),
+            Hardening => self.hardening < limits::HARDENING,
+            AntiAir => self.anti_air == 0,
+            MoreAntiAir => self.anti_air > 0 && self.aa_mounts < limits::AA_MOUNTS,
+            HeavyAntiAir => self.anti_air > 0 && self.aa_shells < limits::AA_SHELLS,
+            QuickAntiAir => self.anti_air > 0 && self.aa_loaders < limits::AA_LOADERS,
             TripleTurrets => {
                 self.turrets == TurretLayout::Twin && self.can_carry(TurretLayout::Triple)
             }
@@ -376,13 +551,17 @@ impl Fittings {
 pub struct Objectives {
     pub kills: u16,
     pub crates: u16,
-    pub gates: u16,
+    pub destroyed_drydock: bool,
 }
 pub const CRATE_XP: u32 = 10;
 
 pub struct Run {
     phase: Phase,
     pub stage: Stage,
+    /// Where the ship began her first patrol, retained on subsequent charts.
+    pub origin: Stage,
+    /// The exit actually sailed, retained after the routes meet at Crown Deep.
+    pub passage: Option<Stage>,
     pub elapsed: f32,
     /// Breakwater herself: her modules, what is fitted to them, and their condition.
     pub ship: Ship,
@@ -398,6 +577,8 @@ impl Default for Run {
         Self {
             phase: Phase::Sailing,
             stage: Stage::IronNarrows,
+            origin: Stage::IronNarrows,
+            passage: None,
             elapsed: 0.,
             ship: Ship::new(Design::breakwater()),
             fittings: Fittings::default(),
@@ -429,11 +610,11 @@ impl Run {
         let goals = self.stage.mission();
         u8::from(self.objectives.kills >= goals.kills)
             + u8::from(self.objectives.crates >= goals.crates)
-            + u8::from(self.objectives.gates >= goals.gates)
+            + u8::from(self.objectives.destroyed_drydock)
     }
     pub fn can_extract(&self) -> bool {
         self.stage != Stage::CrownDeep
-            && (self.objectives.gates >= EXTRACT_GATES || self.elapsed >= EXTRACT_SECONDS)
+            && (self.objectives.destroyed_drydock || self.elapsed >= EXTRACT_SECONDS)
     }
     pub fn extract(&mut self) {
         if self.phase == Phase::Sailing && self.can_extract() {
@@ -441,6 +622,7 @@ impl Run {
         }
     }
     /// The installed drydock sections and their compartment indices, from bow to stern.
+    /// A centre turret is not listed: she was built with two of her own.
     pub fn dock_modules(&self) -> impl Iterator<Item = (usize, DockModule)> + '_ {
         let modules = self.ship.design().modules();
         modules
@@ -449,6 +631,8 @@ impl Run {
             .filter_map(|(i, m)| match (m.frame, m.fit.as_slice()) {
                 (Frame::Straight, []) => Some((i, DockModule::Reserve)),
                 (Frame::Straight, [Component::Engine]) => Some((i, DockModule::EngineRoom)),
+                (Frame::Straight, [Component::Catapult]) => Some((i, DockModule::Floatplane)),
+                (Frame::Straight, [Component::MissileRack]) => Some((i, DockModule::Missiles)),
                 _ => None,
             })
     }
@@ -458,7 +642,7 @@ impl Run {
     }
 
     fn finish_leg(&mut self, reason: LegEnd) {
-        if self.stage == Stage::IronNarrows {
+        if self.stage.is_opening() {
             self.ship.dock(f32::from(DOCK_REPAIR));
             for (earned, module) in [
                 (self.stars() >= RESERVE_STARS, DockModule::Reserve),
@@ -534,6 +718,7 @@ impl Run {
         if self.phase != Phase::Sailing {
             return;
         }
+        self.refit_protection();
         let dt = dt.min(self.remaining().max(0.));
         self.elapsed += dt;
         if incoming > 0 {
@@ -557,7 +742,8 @@ impl Run {
         }
         self.objectives.kills = self.objectives.kills.saturating_add(gains.kills);
         self.objectives.crates = self.objectives.crates.saturating_add(gains.crates);
-        self.objectives.gates = self.objectives.gates.saturating_add(gains.gates);
+        self.objectives.destroyed_drydock |=
+            gains.destroyed_drydock || objective == Some(LegEnd::BasesDestroyed);
         self.ship
             .patch(f32::from(gains.crates.saturating_mul(CRATE_REPAIR)));
         self.experience += u32::from(gains.crates) * CRATE_XP;
@@ -580,33 +766,55 @@ impl Run {
             self.phase = Phase::Refit;
         }
     }
-    /// A hit on the hull, `aft` metres behind the bow tip. It lands on the module there.
+    /// A hit on the hull, `aft` metres behind the bow tip, that meets no plating. It
+    /// lands on the module there.
     pub fn strike(&mut self, aft: f32, damage: u16) {
         if self.phase == Phase::Sailing {
             self.ship.strike_hull(aft, f32::from(damage));
+        }
+    }
+    /// A hit on her side, `aft` metres behind the bow tip and `abeam` metres to
+    /// starboard, from a round `calibre` inches across or, with `None`, a blow no plate
+    /// can turn. The plating there takes it first, then the module behind, and `reach`
+    /// says which of its bays the blow got into.
+    pub fn strike_side(
+        &mut self,
+        aft: f32,
+        abeam: f32,
+        damage: u16,
+        calibre: Option<f32>,
+        reach: shipvivor_shipyard::Reach,
+    ) {
+        if self.phase == Phase::Sailing {
+            self.ship
+                .strike_into(aft, abeam, f32::from(damage), calibre, reach);
         }
     }
     /// Total surviving structure, including any drydock sections.
     pub fn hull(&self) -> u16 {
         self.ship.hull().round() as u16
     }
+    /// Plate and harden the hull as her fittings say.
+    pub(crate) fn refit_protection(&mut self) {
+        self.ship
+            .protect(self.fittings.protection(Protection::BREAKWATER));
+    }
     pub fn hull_percent(&self) -> u16 {
         (self.ship.integrity() * 100.).round() as u16
     }
     pub fn install(&mut self, card: Card) {
         if !matches!(self.phase, Phase::Refit | Phase::Drydock(_))
+            || self.pending_cards == 0
             || !self.fittings.offers().contains(&card)
         {
             return;
         }
         self.fittings = self.fittings.with(card);
+        self.refit_protection();
         self.pending_cards -= 1;
-        if self.pending_cards == 0 {
-            self.phase = if matches!(self.phase, Phase::Drydock(_)) {
-                Phase::Chart
-            } else {
-                Phase::Sailing
-            };
+        // A ship in dock stays there until she is sailed, with [`Run::leave_dock`].
+        if self.pending_cards == 0 && self.phase == Phase::Refit {
+            self.phase = Phase::Sailing;
         }
     }
     pub fn depart(&mut self, next: Stage) -> bool {
@@ -617,6 +825,7 @@ impl Run {
             return false;
         }
         self.previous_stars = self.stars();
+        self.passage = Some(next);
         self.stage = next;
         self.elapsed = 0.;
         self.objectives = Objectives::default();
@@ -641,7 +850,7 @@ mod tests {
     use shipvivor_artillery::Ammo;
     #[test]
     fn the_yard_installs_each_earned_section_once_and_it_sails_the_next_leg() {
-        for stars in 0..=MAX_STARS {
+        for combat_stars in 0..=2 {
             for end in [
                 LegEnd::TimeExpired,
                 LegEnd::Extracted,
@@ -650,9 +859,9 @@ mod tests {
                 let mut run = Run::default();
                 let goals = run.stage.mission();
                 let gains = Objectives {
-                    kills: if stars >= 1 { goals.kills } else { 0 },
-                    gates: if stars >= 2 { goals.gates } else { 0 },
-                    crates: if stars >= 3 { goals.crates } else { 0 },
+                    kills: if combat_stars >= 1 { goals.kills } else { 0 },
+                    crates: if combat_stars >= 2 { goals.crates } else { 0 },
+                    ..Default::default()
                 };
                 let time = if end == LegEnd::TimeExpired {
                     run.remaining()
@@ -664,6 +873,8 @@ mod tests {
                     run.extract();
                 }
                 assert_eq!(run.phase(), Phase::Drydock(end));
+                let stars = combat_stars + u8::from(end == LegEnd::BasesDestroyed);
+                assert_eq!(run.stars(), stars);
                 let mut expected = Vec::new();
                 if stars >= RESERVE_STARS {
                     expected.push(DockModule::Reserve);
@@ -687,9 +898,11 @@ mod tests {
                     run.fittings_remaining(),
                     1 + u16::from(end == LegEnd::BasesDestroyed)
                 );
-                while run.phase() == Phase::Drydock(end) {
+                while run.fittings_remaining() > 0 {
                     run.install(run.fittings.offers()[0]);
                 }
+                assert_eq!(run.phase(), Phase::Drydock(end));
+                assert!(run.leave_dock());
                 assert!(run.depart(Stage::OuterRoad));
                 assert_eq!(
                     run.ship.design().count(Component::Engine),
@@ -771,25 +984,21 @@ mod tests {
     fn secondary_cards_mount_arm_and_drill_the_close_range_battery_up_to_their_limits() {
         let stock = Fittings::default();
         assert_eq!(stock.secondaries(), Secondaries::STOCK);
-        // Every fourth hand is for the close-range battery.
+        // Every fourth hand is for the close-range and anti-aircraft guns.
         let fourth = Fittings {
             velocity: 3,
             ..stock
         };
         assert_eq!(
             fourth.offers(),
-            [
-                Card::MoreSecondaries,
-                Card::TwinSecondaries,
-                Card::HeavySecondaries
-            ]
+            [Card::MoreSecondaries, Card::AntiAir, Card::TwinSecondaries]
         );
         // The next close-range hand leads with a different card.
         let eighth = Fittings {
             velocity: 7,
             ..stock
         };
-        assert_eq!(eighth.offers()[0], Card::TwinSecondaries);
+        assert_eq!(eighth.offers()[0], Card::AntiAir);
         let mut full = stock;
         for card in [
             Card::MoreSecondaries,
@@ -822,13 +1031,139 @@ mod tests {
         }
     }
     #[test]
+    fn the_ranks_the_yard_shows_end_where_a_card_stops_fitting() {
+        use Card::*;
+        // The broadest hull carries the most plate, and AA must be aboard to improve.
+        let stock = Fittings {
+            beam: ShipBeam::Capital,
+            anti_air: 1,
+            ..Fittings::default()
+        };
+        for card in [
+            MoreSecondaries,
+            HeavySecondaries,
+            QuickSecondaries,
+            SecondaryRange,
+            TwinSecondaries,
+            TrainingGear,
+            Armor,
+            Hardening,
+            MoreAntiAir,
+            HeavyAntiAir,
+            QuickAntiAir,
+        ] {
+            let (none, most) = stock.ranks(card).unwrap();
+            assert_eq!(none, 0, "{card:?}");
+            let mut fit = stock;
+            for rank in 1..=most {
+                assert!(fit.can_fit(card), "{card:?}");
+                fit = fit.with(card);
+                assert_eq!(fit.ranks(card), Some((rank, most)), "{card:?}");
+            }
+            assert!(!fit.can_fit(card), "{card:?} fits past its last rank");
+        }
+        assert_eq!(stock.ranks(Loader), None);
+    }
+    #[test]
+    fn every_third_hand_is_for_machinery_and_protection_and_each_card_stops_at_its_limit() {
+        use shipvivor_shipyard::Component;
+        let stock = Fittings::default();
+        let third = Fittings {
+            velocity: 2,
+            ..stock
+        };
+        assert_eq!(
+            third.offers(),
+            [Card::Armor, Card::Turbines, Card::Hardening]
+        );
+        // The main battery's hand offers training gear beside the loaders and turrets.
+        let second = Fittings {
+            velocity: 1,
+            ..stock
+        };
+        assert!(second.offers().contains(&Card::TrainingGear));
+        for (card, most) in [
+            (Card::TrainingGear, limits::TRAINING_GEAR),
+            (Card::Armor, stock.beam.most_armor()),
+            (Card::Hardening, limits::HARDENING),
+        ] {
+            let mut fit = stock;
+            for _ in 0..most {
+                assert!(fit.can_fit(card), "{card:?}");
+                fit = fit.with(card);
+            }
+            assert!(!fit.can_fit(card) && fit.with(card) == fit, "{card:?}");
+        }
+        // A larger bore trains more slowly, and training gear wins it back.
+        let heavy = Fittings {
+            shells: 2,
+            beam: ShipBeam::Cruiser,
+            ..stock
+        };
+        assert!((stock.traverse() - 18.).abs() < 1e-4);
+        assert!(heavy.traverse() < stock.traverse());
+        assert!(heavy.with(Card::TrainingGear).traverse() > heavy.traverse());
+        // Armor and hardening reach the ship as soon as they are fitted.
+        let mut run = Run::default();
+        run.tick(
+            0.,
+            Objectives {
+                crates: 3,
+                ..Default::default()
+            },
+            0,
+        );
+        run.fittings.velocity = 2;
+        let plate = run.ship.design().plate_strength(1);
+        run.install(Card::Armor);
+        assert!(run.ship.design().plate_strength(1) > plate);
+        run.fittings = run.fittings.with(Card::Hardening).with(Card::Hardening);
+        run.tick(0.1, Objectives::default(), 0);
+        assert_eq!(
+            run.ship.design().strength(Component::Engine),
+            Some(run.ship.design().module_structure(3))
+        );
+    }
+    #[test]
+    fn aa_guns_come_aboard_in_pairs_and_their_upgrades_wait_for_them() {
+        let stock = Fittings::default();
+        assert_eq!(stock.anti_air().mounts, 0);
+        for upgrade in [Card::MoreAntiAir, Card::HeavyAntiAir, Card::QuickAntiAir] {
+            assert!(!stock.can_fit(upgrade));
+        }
+        let fitted = stock.with(Card::AntiAir);
+        assert!(!fitted.can_fit(Card::AntiAir));
+        assert_eq!(fitted.anti_air().mounts, 2);
+        let full = [
+            Card::MoreAntiAir,
+            Card::MoreAntiAir,
+            Card::HeavyAntiAir,
+            Card::HeavyAntiAir,
+            Card::QuickAntiAir,
+            Card::QuickAntiAir,
+            Card::QuickAntiAir,
+        ]
+        .into_iter()
+        .fold(fitted, Fittings::with);
+        let aa = full.anti_air();
+        assert_eq!((aa.mounts, aa.damage), (AntiAir::MOST_MOUNTS, 3));
+        assert!((aa.reload - AntiAir::NONE.reload / 1.75).abs() < 1e-5);
+        for upgrade in [Card::MoreAntiAir, Card::HeavyAntiAir, Card::QuickAntiAir] {
+            assert!(!full.can_fit(upgrade));
+        }
+    }
+    #[test]
     fn turret_cards_upgrade_both_stations_in_order_and_leave_the_deck_when_spent() {
         let mut run = Run::default();
-        for (stores, card, count) in [
-            (3, Card::Velocity, 2),
-            (4, Card::TripleTurrets, 3),
-            (5, Card::QuadTurrets, 4),
+        for (stores, between, card, count) in [
+            (3, 0, Card::Velocity, 2),
+            (4, 0, Card::TripleTurrets, 3),
+            // Three more fittings bring the main battery's hand round again.
+            (5, 3, Card::QuadTurrets, 4),
         ] {
+            for _ in 0..between {
+                run.fittings = run.fittings.with(Card::Turbines);
+            }
             run.tick(
                 0.,
                 Objectives {
@@ -853,6 +1188,7 @@ mod tests {
         run.tick(60., Objectives::default(), 0);
         run.extract();
         run.install(run.fittings.offers()[0]);
+        assert!(run.leave_dock());
         assert!(run.depart(Stage::OuterRoad));
         assert_eq!(run.fittings.turrets, TurretLayout::Quad);
     }
@@ -888,6 +1224,34 @@ mod tests {
         assert!(run.hull() > 20);
     }
     #[test]
+    fn armor_plate_thickens_only_as_far_as_her_beam_allows() {
+        let most = |beam| {
+            let mut fit = Fittings {
+                beam,
+                ..Fittings::default()
+            };
+            while fit.can_fit(Card::Armor) {
+                fit = fit.with(Card::Armor);
+            }
+            (fit.armor, fit.protection(Protection::BREAKWATER).thickness)
+        };
+        assert_eq!(most(ShipBeam::Escort), (2, 7.));
+        assert_eq!(most(ShipBeam::Cruiser), (4, 13.));
+        assert_eq!(most(ShipBeam::Capital), (limits::ARMOR, 19.));
+        // On her stock beam she can turn a destroyer's round, but not a cruiser's.
+        let mut run = Run::default();
+        while run.fittings.can_fit(Card::Armor) {
+            run.fittings = run.fittings.with(Card::Armor);
+        }
+        run.refit_protection();
+        let hull = run.hull();
+        let bays = shipvivor_shipyard::Reach::Bays;
+        run.strike_side(7.5, 2., 4, Some(5.9), bays);
+        assert_eq!(run.hull(), hull);
+        run.strike_side(7.5, -2., 4, Some(7.6), bays);
+        assert_eq!(run.hull(), hull - 4);
+    }
+    #[test]
     fn the_dock_between_legs_leaves_a_battered_ship_short_of_whole() {
         let mut run = Run::default();
         run.strike(7.5, 18);
@@ -898,19 +1262,20 @@ mod tests {
         assert!(before + DOCK_REPAIR < MAX_HULL, "{before} hull");
         assert_eq!(run.hull(), before + DOCK_REPAIR);
         run.install(run.fittings.offers()[0]);
+        assert!(run.leave_dock());
         assert!(run.depart(Stage::OuterRoad));
         assert_eq!(run.hull(), before + DOCK_REPAIR);
         assert!(run.ship.compartments().iter().all(|hold| !hold.wrecked()));
     }
     #[test]
-    fn gates_unlock_only_earned_routes_and_fittings_travel() {
+    fn patrol_stars_unlock_only_earned_routes_and_fittings_travel() {
         for (goals, stars) in [
             (Objectives::default(), 0),
             (
                 Objectives {
                     kills: 4,
                     crates: 1,
-                    gates: 1,
+                    destroyed_drydock: false,
                 },
                 1,
             ),
@@ -918,7 +1283,7 @@ mod tests {
                 Objectives {
                     kills: 4,
                     crates: 2,
-                    gates: 2,
+                    destroyed_drydock: false,
                 },
                 2,
             ),
@@ -926,7 +1291,7 @@ mod tests {
                 Objectives {
                     kills: 4,
                     crates: 3,
-                    gates: 3,
+                    destroyed_drydock: true,
                 },
                 3,
             ),
@@ -945,6 +1310,7 @@ mod tests {
                 let hull = r.hull();
                 r.extract();
                 r.install(r.fittings.offers()[0]);
+                assert!(r.leave_dock());
                 assert_eq!(r.stars(), stars);
                 assert_eq!(r.depart(dest), stars >= required);
                 if stars >= required {
@@ -996,8 +1362,12 @@ mod tests {
         assert_eq!(r.fittings_remaining(), 3);
         r.install(Card::Velocity);
         assert_eq!(r.phase, Phase::Drydock(LegEnd::TimeExpired));
+        // A card the hand does not offer is not fitted.
         r.install(Card::Turbines);
-        r.install(Card::Velocity);
+        assert_eq!((r.fittings.turbines, r.fittings_remaining()), (0, 2));
+        r.install(Card::Loader);
+        r.install(Card::Turbines);
+        assert!(matches!(r.phase, Phase::Drydock(_)) && r.leave_dock());
         assert_eq!(r.phase, Phase::Chart);
         assert!(r.fittings.round().speed() > Fittings::default().round().speed());
         assert!(r.fittings.speed_factor() > 1.);
@@ -1018,7 +1388,7 @@ mod tests {
         );
         assert_eq!(r.phase(), Phase::Drydock(LegEnd::BasesDestroyed));
         assert_eq!(r.fittings_remaining(), 3); // One level, one dock fitting, one clearance bonus.
-        assert_eq!((r.stars(), r.level), (1, 2));
+        assert_eq!((r.stars(), r.level), (2, 2));
         r.tick_sector(10., Objectives::default(), 100, true);
         r.extract();
         r.install(Card::QuadTurrets);
@@ -1027,6 +1397,7 @@ mod tests {
         for _ in 0..3 {
             r.install(r.fittings.offers()[0]);
         }
+        assert!(r.leave_dock());
         assert_eq!(r.phase(), Phase::Chart);
         assert!(!r.depart(Stage::PilotsCut));
         assert!(r.depart(Stage::OuterRoad));
@@ -1049,6 +1420,7 @@ mod tests {
         );
         run.extract();
         run.install(run.fittings.offers()[0]);
+        assert!(run.leave_dock());
         assert!(run.depart(Stage::OuterRoad));
         run.tick(1., stores(1), 0);
         assert_eq!((run.phase, run.level, run.experience), (Phase::Refit, 2, 0));

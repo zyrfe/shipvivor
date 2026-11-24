@@ -8,7 +8,20 @@ pub enum LandmarkKind {
     Pines,
     /// A large island under an ice cap, its glacier running down to the sea.
     Glacier,
+    /// A piece of the mainland a coastal passage runs along. Pieces overlap into one
+    /// shore of cliffs and crags under snow, and the bigger a piece, the higher it rises.
+    Mainland,
 }
+/// Height of the sea cliff round a piece of the mainland, in metres.
+pub const MAINLAND_CLIFF: f32 = 7.;
+/// Share of a mainland piece's radius under its high ground.
+pub const MAINLAND_CREST: f32 = 0.8;
+/// Height of a mainland piece's high ground: a crag on the shore stands lower than the
+/// broad hills behind it, and the mountains inland stand highest.
+pub fn mainland_top(radius: f32) -> f32 {
+    (14. + 0.12 * radius).min(64.)
+}
+
 pub struct Landmark {
     pub body: Body,
     pub radius: f32,
@@ -54,14 +67,15 @@ impl Landmark {
         chart
     }
     pub fn volumes(&self) -> [(Vec2, f32, f32); 2] {
-        let (width, top) = match self.kind {
-            LandmarkKind::Beacon => (0.12, 19.),
-            LandmarkKind::Stacks => (0.44, 24.),
-            LandmarkKind::Pines => (0.48, 12.),
-            LandmarkKind::Glacier => (0.74, 30.),
+        let (shelf, width, top) = match self.kind {
+            LandmarkKind::Beacon => (3.2, 0.12, 19.),
+            LandmarkKind::Stacks => (3.2, 0.44, 24.),
+            LandmarkKind::Pines => (3.2, 0.48, 12.),
+            LandmarkKind::Glacier => (3.2, 0.74, 30.),
+            LandmarkKind::Mainland => (MAINLAND_CLIFF, MAINLAND_CREST, mainland_top(self.radius)),
         };
         [
-            (self.body.pos, self.radius, 3.2),
+            (self.body.pos, self.radius, shelf),
             (self.body.pos, self.radius * width, top),
         ]
     }

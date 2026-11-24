@@ -1,5 +1,5 @@
 //! North-up chart. All symbols use the simulation's world positions.
-use crate::state::{Campaign, Encounter, PlayerHelm, Screen, TrialCourse};
+use crate::state::{Campaign, Encounter, PlayerHelm, Screen};
 use bevy::{
     asset::RenderAssetUsages,
     image::ImageSampler,
@@ -8,9 +8,12 @@ use bevy::{
 };
 use shipvivor_campaign::Stage;
 use shipvivor_encounter::{Battle, EnemyClass, ISLAND_RADIUS, Sortie};
-use shipvivor_navigation::{Course, Helm};
+use shipvivor_navigation::Helm;
 
 const SIZE: i32 = 192;
+/// The chart is drawn at half again its pixel size, which is three device pixels to one
+/// chart pixel on a Retina display at full UI scale, so the symbols stay crisp.
+pub const SHOWN: f32 = SIZE as f32 * 1.5;
 const METRES_PER_PIXEL: f32 = 12.5;
 type Ink = [u8; 4];
 const WATER: Ink = [25, 57, 68, 255];
@@ -19,7 +22,7 @@ const LAND: Ink = [178, 190, 192, 255];
 /// Land under an ice cap, and ice adrift.
 const GLACIER: Ink = [224, 236, 240, 255];
 const ICE: Ink = [168, 226, 240, 255];
-const GATE: Ink = [93, 226, 213, 255];
+const CLEARED: Ink = [93, 226, 213, 255];
 const ENEMY: Ink = [255, 111, 93, 255];
 const GOLD: Ink = [255, 200, 94, 255];
 const WHITE: Ink = [246, 248, 229, 255];
@@ -139,8 +142,22 @@ impl Chart<'_> {
                 }
             }
             if clear {
-                self.line(center + IVec2::new(1, 0), center + IVec2::new(3, 2), GATE);
-                self.line(center + IVec2::new(3, 2), center + IVec2::new(5, -2), GATE);
+                self.line(
+                    center + IVec2::new(1, 0),
+                    center + IVec2::new(3, 2),
+                    CLEARED,
+                );
+                self.line(
+                    center + IVec2::new(3, 2),
+                    center + IVec2::new(5, -2),
+                    CLEARED,
+                );
+            }
+            if let Some(base) = battle.air_station().filter(|base| base.port == index) {
+                let ink = if base.operational(port) { ENEMY } else { GRID };
+                let p = center + IVec2::new(0, 7);
+                self.line(p - IVec2::X * 4, p + IVec2::X * 4, ink);
+                self.line(p - IVec2::Y, p + IVec2::Y * 2, ink);
             }
         }
     }
@@ -192,7 +209,7 @@ impl Chart<'_> {
         self.line(p + IVec2::new(-6, 4), p + IVec2::new(6, 4), ENEMY);
     }
 
-    fn draw(&mut self, helm: &Helm, battle: &Battle, course: &Course) {
+    fn draw(&mut self, helm: &Helm, battle: &Battle) {
         self.pixels.as_chunks_mut::<4>().0.fill(WATER);
         let origin = self.project(Vec2::ZERO);
         // Sixteen pixels to one 200-metre grid square.
@@ -256,22 +273,6 @@ impl Chart<'_> {
                 self.dot(self.project(gun.position(&port.body)), ENEMY);
             }
         }
-        for (i, gate) in course.gates().iter().enumerate() {
-            let active = i == course.active();
-            let mut p = self.project(gate.center);
-            if active {
-                // Keep the next bearing visible even after sailing off the plotted course.
-                p = self.keep_on_chart(p, 5);
-            }
-            let r = if active { 4 } else { 2 };
-            let ink = if active { GATE } else { [115, 164, 162, 255] };
-            for sign in [-1, 1] {
-                let mid = p + IVec2::X * sign * r;
-                self.line(mid - IVec2::Y * r, mid + IVec2::Y * r, ink);
-                self.dot(mid - IVec2::Y * r - IVec2::X * sign, ink);
-                self.dot(mid + IVec2::Y * r - IVec2::X * sign, ink);
-            }
-        }
         for cargo in battle.salvage() {
             let p = self.project(cargo.body.pos);
             let width = if cargo.stores >= 3 { 2 } else { 1 };
@@ -279,7 +280,7 @@ impl Chart<'_> {
             self.line(p - IVec2::Y, p + IVec2::Y, GOLD);
         }
         for (plane, port) in battle.spotters().iter().zip(battle.ports()) {
-            if port.yard_state() == shipvivor_encounter::YardState::Ruined {
+            if port.yard_state() == shipvivor_encounter::YardState::Ruined || !plane.airborne() {
                 continue;
             }
             let p = self.project(plane.position);
@@ -292,6 +293,15 @@ impl Chart<'_> {
                 p + (nose * 2.).round().as_ivec2(),
                 ink,
             );
+        }
+        if let Some(plane) = battle.air_station().and_then(|base| base.aircraft.as_ref()) {
+            let p = self.keep_on_chart(self.project(plane.body.pos), 6);
+            let nose = plane.body.forward();
+            let wing = (nose.perp() * 5.).round().as_ivec2();
+            let tip = p + (nose * 2.).round().as_ivec2();
+            self.line(p - wing, tip, ENEMY);
+            self.line(tip, p + wing, ENEMY);
+            self.line(tip, p - (nose * 4.).round().as_ivec2(), ENEMY);
         }
         for raider in battle.raiders() {
             let boss = raider.class.is_flagship();
@@ -361,7 +371,6 @@ pub fn update(
     run: Res<Campaign>,
     helm: Res<PlayerHelm>,
     battle: Res<Encounter>,
-    course: Res<TrialCourse>,
     mut last: Local<Option<(Stage, f32)>>,
 ) {
     if run.screen() != Screen::Sailing {
@@ -381,6 +390,6 @@ pub fn update(
             pixels,
             center: helm.position,
         }
-        .draw(&helm, &battle, &course);
+        .draw(&helm, &battle);
     }
 }

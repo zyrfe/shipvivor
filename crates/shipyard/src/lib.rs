@@ -4,7 +4,9 @@
 //! compartment with components fitted on its deck and in its bays, so the dock edits
 //! the same thing a shell lands on. A [`Ship`] is one hull built to a design: it takes
 //! each hit where it lands, loses what stood behind it, floods, founders, and is
-//! mended by its crew.
+//! mended by its crew. Each module's sides are plated in four [`Panel`]s, port and
+//! starboard, fore and aft, and each wears on its own, so fire kept on one spot gets
+//! through sooner than the same fire spread along her.
 //!
 //! Distances along a hull are metres aft of the bow tip.
 mod battery;
@@ -14,9 +16,13 @@ mod ship;
 mod stock;
 
 pub use battery::GunStation;
-pub use design::{Berth, Component, Design, Fault, Fitting, Frame, FrameSpec, Module, Sheet, Slot};
+pub use design::{
+    BOMB_DAMAGE, Berth, Component, Design, FLOATPLANE_REACH, Fault, Fitting, Frame, FrameSpec,
+    MISSILE_DAMAGE, MISSILE_RANGE, MISSILE_RELOAD, MISSILE_SALVO, Module, Protection,
+    SORTIE_SECONDS, Sheet, Slot,
+};
 pub use repair::{Mend, Task};
-pub use ship::{Compartment, Loss, Ship, State};
+pub use ship::{Compartment, Loss, Panel, Reach, Ship, Side, State};
 pub use shipvivor_artillery::ArmorGrade;
 
 #[cfg(test)]

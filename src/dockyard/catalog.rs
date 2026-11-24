@@ -23,12 +23,38 @@ pub(super) fn slot_name(design: &Design, at: usize) -> &'static str {
         }
     } else if parts.contains(&Director) {
         "Bridge"
+    } else if parts.contains(&Catapult) {
+        "Floatplane"
+    } else if parts.contains(&MissileRack) {
+        DockModule::Missiles.name()
     } else {
         match parts.iter().filter(|&&part| part == MainGun).count() {
             0 => DeckModule::Reserve.name(),
             1 => DeckModule::CentreBattery.name(),
             _ => DeckModule::WingBattery.name(),
         }
+    }
+}
+
+/// The pictogram for a section in the yard's stock.
+pub(super) fn stock_art(module: DockModule, art: &Insignia) -> Handle<Image> {
+    match module {
+        DockModule::Turret => art.centre_turret.clone(),
+        DockModule::EngineRoom => art.fitting(Card::Turbines),
+        DockModule::Floatplane => art.floatplane.clone(),
+        DockModule::Missiles => art.missile.clone(),
+        DockModule::Reserve => art.add_bay.clone(),
+    }
+}
+
+/// One word under a stock tile.
+pub(super) fn stock_caption(module: DockModule) -> &'static str {
+    match module {
+        DockModule::Turret => "Turret",
+        DockModule::EngineRoom => "Engine",
+        DockModule::Floatplane => "Plane",
+        DockModule::Missiles => "Missiles",
+        DockModule::Reserve => "Bay",
     }
 }
 
@@ -51,9 +77,11 @@ fn row_of(job: DockJob) -> Row {
         | DockJob::Fitting(
             TripleTurrets | QuadTurrets | ArmorPiercing | Caps | Velocity | Loader | Shells,
         ) => Row::Guns,
-        DockJob::Fitting(Turbines) => Row::Machinery,
+        DockJob::Fitting(TrainingGear) => Row::Guns,
+        DockJob::Fitting(Turbines | Hardening) => Row::Machinery,
+        DockJob::Fitting(Armor) => Row::Hull,
         DockJob::Fitting(_) => Row::Secondaries,
-        DockJob::Section(_) | DockJob::WidenBeam => Row::Hull,
+        DockJob::Insert { .. } | DockJob::WidenBeam => Row::Hull,
     }
 }
 /// Bore, barrels and shells are the same in every turret.
@@ -79,8 +107,7 @@ fn tile_art(job: DockJob, run: &Campaign, art: &Insignia) -> Handle<Image> {
         },
         DockJob::Move { from, to } if to < from => art.fore.clone(),
         DockJob::Move { .. } => art.aft.clone(),
-        DockJob::Section(DockModule::Reserve) => art.add_bay.clone(),
-        DockJob::Section(DockModule::EngineRoom) => art.fitting(Card::Turbines),
+        DockJob::Insert { module, .. } => stock_art(module, art),
         DockJob::WidenBeam => art.beam.clone(),
         DockJob::TwinTurrets => art.twin.clone(),
         DockJob::Fitting(card) => art.fitting(card),
@@ -89,7 +116,7 @@ fn tile_art(job: DockJob, run: &Campaign, art: &Insignia) -> Handle<Image> {
 }
 
 /// One word under a tile. The full name heads the preview once the tile is chosen.
-fn caption(job: DockJob, run: &Campaign) -> &'static str {
+pub(super) fn caption(job: DockJob, run: &Campaign) -> &'static str {
     use Card::*;
     match job {
         DockJob::Replace { at, with } => match exchange_name(run, at, with) {
@@ -101,8 +128,7 @@ fn caption(job: DockJob, run: &Campaign) -> &'static str {
         },
         DockJob::Move { from, to } if to < from => "Fwd",
         DockJob::Move { .. } => "Aft",
-        DockJob::Section(DockModule::Reserve) => "Bay",
-        DockJob::Section(DockModule::EngineRoom) => "Engine",
+        DockJob::Insert { module, .. } => stock_caption(module),
         DockJob::WidenBeam => "Widen",
         DockJob::TwinTurrets => "Twin",
         DockJob::Calibre(_) => "",
@@ -119,6 +145,13 @@ fn caption(job: DockJob, run: &Campaign) -> &'static str {
             HeavySecondaries => "Heavy",
             Turbines => "Turbines",
             Shells => "Bore",
+            TrainingGear => "Train",
+            Armor => "Armor",
+            Hardening => "Harden",
+            AntiAir => "AA",
+            MoreAntiAir => "More AA",
+            HeavyAntiAir => "Flak",
+            QuickAntiAir => "Reload",
         },
     }
 }
@@ -174,9 +207,10 @@ pub(super) fn options(
             }
         };
         let selected = run.dock_option == Some(i);
+        // Cyan is what the ship carries now: the bore mounted, or a fitting at its last rank.
         let tint = if selected {
             brass()
-        } else if job == DockJob::Calibre(mounted) {
+        } else if job == DockJob::Calibre(mounted) || fully_fitted(job, run) {
             cyan()
         } else if job.fits(run) {
             paper()
@@ -221,5 +255,59 @@ pub(super) fn options(
         );
         icon(cmd, tile, tile_art(job, run, art), tint, 22.);
         text(cmd, tile, caption(job, run), 10., tint);
+        if let DockJob::Fitting(card) = job {
+            rank_pips(cmd, tile, run, card, selected);
+        }
+    }
+}
+
+/// A fitting fitted to its last rank: done, rather than refused.
+pub(super) fn fully_fitted(job: DockJob, run: &Campaign) -> bool {
+    match job {
+        DockJob::Fitting(card) => run
+            .fittings
+            .ranks(card)
+            .is_some_and(|(fitted, most)| fitted >= most),
+        _ => false,
+    }
+}
+
+/// The ranks of a stacking fitting along the top of its tile: cyan for each one fitted,
+/// brass for the one being previewed.
+fn rank_pips(cmd: &mut Commands, tile: Entity, run: &Campaign, card: Card, previewed: bool) {
+    let Some((fitted, most)) = run.fittings.ranks(card) else {
+        return;
+    };
+    let row = node(
+        cmd,
+        tile,
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(3),
+            right: px(3),
+            column_gap: px(2),
+            ..default()
+        },
+        Color::NONE,
+    );
+    for rank in 0..most {
+        let color = if rank < fitted {
+            Some(cyan())
+        } else if previewed && rank == fitted {
+            Some(brass())
+        } else {
+            None
+        };
+        cmd.spawn((
+            Node {
+                width: px(4),
+                height: px(4),
+                border: UiRect::all(px(1)),
+                ..default()
+            },
+            BackgroundColor(color.unwrap_or(Color::NONE)),
+            BorderColor::all(color.unwrap_or(rule())),
+            ChildOf(row),
+        ));
     }
 }

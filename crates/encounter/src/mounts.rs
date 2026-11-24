@@ -1,11 +1,14 @@
 //! Deck-relative training for Breakwater's mounts, with each barrel loaded on its own.
-use super::{Ammo, Orders, Secondaries, TurretLayout, projectile::FlightPath};
+use super::{
+    Ammo, MainShell, Orders, Secondaries, TurretLayout,
+    projectile::{FlightPath, Trajectory},
+};
 use glam::{FloatExt, Vec2, Vec3, Vec3Swizzles};
 use shipvivor_compass::direction;
 use shipvivor_shipyard::GunStation;
 use std::f32::consts::{PI, TAU};
 
-const CRUISER_TRAVERSE: f32 = 18_f32.to_radians();
+const CRUISER_TRAVERSE: f32 = shipvivor_artillery::STOCK_TRAVERSE.to_radians();
 const ELEVATION_RATE: f32 = 12_f32.to_radians();
 const RECOIL: f32 = 0.22;
 
@@ -79,6 +82,8 @@ pub struct MainMount {
     pub position: GunStation,
     pub(super) in_service: bool,
     pub(super) fitted_bore: Option<u16>,
+    /// Ranks of training gear fitted to the gunhouse.
+    pub(super) gear: u16,
     // Signed displacement from the mount's home stop, in deck coordinates.
     train: f32,
     pitch: f32,
@@ -98,6 +103,7 @@ impl MainMount {
             position,
             in_service: true,
             fitted_bore: None,
+            gear: 0,
             train: 0.,
             pitch: 0.,
             scale: super::MainShell::STOCK.mount_scale(),
@@ -130,11 +136,31 @@ impl MainMount {
             self.status = self.settle();
         }
     }
-    pub fn round(&self, round: super::MainShell) -> super::MainShell {
-        super::MainShell {
+    pub fn round(&self, round: MainShell) -> MainShell {
+        MainShell {
             bore: self.fitted_bore.unwrap_or(round.bore),
             ..round
         }
+    }
+    /// Radians per second this gunhouse trains at full power. A heavier bore trains
+    /// more slowly, and training gear wins it back.
+    pub fn traverse(&self, round: MainShell) -> f32 {
+        CRUISER_TRAVERSE
+            * shipvivor_artillery::training_rate(self.round(round).calibre_inches(), self.gear)
+    }
+    /// The flight a round from this mount would take to `target`, from the centre of
+    /// the gunhouse: the same flight the mount trains on and launches. A target beyond
+    /// the round's reach draws it down at its reach instead.
+    pub fn trajectory(
+        &self,
+        player: Vec2,
+        heading: f32,
+        target: Vec3,
+        round: MainShell,
+    ) -> Option<Trajectory> {
+        let shell = self.round(round);
+        let pivot = self.pivot(player, heading);
+        FlightPath::main(pivot, target, shell).map(|path| path.trajectory())
     }
     pub fn pitch(&self) -> f32 {
         self.pitch
@@ -224,12 +250,13 @@ impl MainMount {
         } else {
             wanted.clamp(-self.position.half_arc, self.position.half_arc)
         };
-        let motion_dt = dt * train_rate;
+        let motion_dt =
+            dt * train_rate * shipvivor_artillery::training_rate(shell.calibre_inches(), self.gear);
         self.train = self.train.move_towards(stop, CRUISER_TRAVERSE * motion_dt);
         self.pitch = self
             .pitch
             .move_towards(path.pitch, ELEVATION_RATE * motion_dt);
-        self.range = (pivot.xz().distance(target.xz())).min(super::projectile::MAIN_RANGE);
+        self.range = (pivot.xz().distance(target.xz())).min(shell.reach());
         self.mark_height = target.y + self.range * (self.pitch - path.pitch).sin();
         self.status = if masked {
             MountStatus::Masked

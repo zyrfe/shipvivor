@@ -1,8 +1,34 @@
-//! Each yard owns its stock. Freighters physically cross the roadstead to unload it.
+//! Each yard owns its stock. Freighters sail from one standing yard to another to
+//! unload it, so every ship in the sector comes from somewhere the player can see.
 use super::{Battle, Body, EnemyClass, Vec2, YardState, entry};
 
 const CROSSING: f32 = 490.;
 pub const TOW_RANGE: f32 = 96.;
+/// Stores a factory pays when it falls, under direct rewards.
+pub const FACTORY_STORES: u8 = 1;
+/// Stores a drydock pays when it falls, under direct rewards. It is three factories'
+/// worth of building, and any factories still standing go down with it.
+pub const DRYDOCK_STORES: u8 = 3;
+
+/// How the stores of a sunk ship come aboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rewards {
+    /// The moment she sinks, and a wrecked yard building pays its stores too. No
+    /// packages float.
+    Direct,
+    /// She leaves a package that drifts until the winch tows it alongside. Loose
+    /// packages also lie ahead and off each berth when the sector opens.
+    Packages,
+}
+impl Rewards {
+    /// The stores a fallen ship or building pays at once.
+    pub(super) fn at_once(self, stores: u8) -> u16 {
+        match self {
+            Self::Direct => u16::from(stores),
+            Self::Packages => 0,
+        }
+    }
+}
 
 pub struct Package {
     pub body: Body,
@@ -51,7 +77,8 @@ impl Package {
 }
 
 impl Battle {
-    /// Where a freighter for this yard can start, best first: clear water all the way in.
+    /// The approaches to this yard from the open sea with clear water all the way in,
+    /// best first. The chart survey counts them.
     pub(super) fn convoy_lanes(&self, index: usize) -> impl Iterator<Item = Vec2> + '_ {
         let port = &self.ports[index];
         let berth = port.berth();
@@ -69,47 +96,29 @@ impl Battle {
                         .all(|p| entry(start, berth, p.body.pos, p.radius + 9.).is_none())
             })
     }
-    fn crossing(&self, index: usize, player: Vec2) -> Option<Vec2> {
-        self.convoy_lanes(index).find(|&start| {
-            start.distance_squared(player) >= super::SPAWN_STANDOFF.powi(2)
-                && self
-                    .raiders
-                    .iter()
-                    .all(|r| r.body.pos.distance_squared(start) > 48_f32.powi(2))
-        })
-    }
-    /// Escorts sweep in via a second charted approach. Prefer the bearing least
-    /// covered by ships already closing so successive convoys threaten different flanks.
-    fn convoy_escort(&mut self, port: usize, player: Vec2) {
-        if self.ports[port].live_factories() == 0 || self.combatants() >= super::COMBATANT_LIMIT {
-            return;
-        }
-        let class = if self.at_sea >= super::RAID_TIERS[1] {
-            EnemyClass::Cruiser
-        } else {
-            EnemyClass::Destroyer
-        };
-        let coverage = |at: Vec2| {
-            let bearing = (at - player).normalize_or_zero();
-            self.raiders
-                .iter()
-                .filter(|r| r.class != EnemyClass::Freighter)
-                .map(|r| bearing.dot((r.body.pos - player).normalize_or_zero()))
-                .fold(-1., f32::max)
-        };
-        let station = self
-            .convoy_lanes(port)
-            .filter(|&p| {
-                p.distance(player) >= super::SPAWN_STANDOFF
+    /// Where a freighter for this yard casts off: the slip of the nearest other yard
+    /// still standing, clear of shipping and of the player. Nothing comes in from the
+    /// open sea, so a sector whose other yards are wrecked gets no more deliveries.
+    fn sender(&self, index: usize, player: Vec2) -> Option<Vec2> {
+        let class = EnemyClass::Freighter.profile().hull;
+        let target = self.ports[index].berth();
+        self.ports
+            .iter()
+            .enumerate()
+            .filter(|&(j, port)| j != index && port.yard_state() != YardState::Ruined)
+            .map(|(_, port)| {
+                port.berth() + port.body.forward() * (class.stern - super::Hull::RAIDER.stern)
+            })
+            .filter(|&slip| {
+                slip.distance(player) >= super::SPAWN_STANDOFF
                     && self.raiders.iter().all(|r| {
-                        r.body.pos.distance(p)
-                            > r.class.profile().hull.bow + class.profile().hull.bow + 5.
+                        r.body.pos.distance(slip) > r.class.profile().hull.bow + class.bow + 2.
                     })
             })
-            .min_by(|a, b| coverage(*a).total_cmp(&coverage(*b)));
-        if let Some(station) = station {
-            self.spawn(class, station, player);
-        }
+            .min_by(|a, b| {
+                a.distance_squared(target)
+                    .total_cmp(&b.distance_squared(target))
+            })
     }
     pub(super) fn send_convoys(&mut self, dt: f32, player: Vec2) {
         for i in 0..self.ports.len() {
@@ -129,10 +138,9 @@ impl Battle {
             }
             let target = port.berth();
             port.convoy_clock = 5.;
-            if let Some(start) = self.crossing(i, player) {
+            if let Some(start) = self.sender(i, player) {
                 self.spawn(EnemyClass::Freighter, start, target);
                 self.raiders.last_mut().unwrap().cargo_run = Some((i, start));
-                self.convoy_escort(i, player);
                 self.ports[i].convoy_clock = 77.;
             }
         }

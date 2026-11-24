@@ -89,8 +89,10 @@ const STUMBLE: (f32, f32, f32) = (0.008, 0.03, 1.5);
 const FITS: (f32, f32, f32) = (0.008, 0.07, 12.);
 /// A bang in the exhaust: its level against a firing, the seconds it takes to die
 /// away, and how much of it is one push of pressure, the rest being the roar of the
-/// flame. The push is what makes it a bang and not a hiss.
-const BANG: (f32, f32, f32) = (7., 0.009, 0.5);
+/// flame. The push is what makes it a bang and not a hiss. It is nearly as loud from
+/// an engine that is idling as from one worked hard, and the last number is the power
+/// of the load by which it grows.
+const BANG: (f32, f32, f32, f32) = (7., 0.009, 0.5, 0.3);
 /// What the trunk and the funnel do to it: the two frequencies above which it falls
 /// off, and the hertz below which none of it gets out.
 const VENT: (f32, f32, f32) = (250., 900., 90.);
@@ -258,7 +260,7 @@ impl Diesel {
         let chain = if self.hot > 0. { FITS.2 } else { 1. };
         if self.unburnt >= 1. && self.rng.unit() * rate.max(1.) < bangs * fits * chain {
             let weight = self.rng.within(0.4, 1.) * (self.unburnt / 3.).min(1.).sqrt();
-            self.bang += weight * load;
+            self.bang += weight * load.powf(BANG.3);
             // It goes off against the pistons too, and the whole block feels it.
             for (press, (_, _, level)) in self.press.iter_mut().zip(PATH) {
                 *press += JOLT * weight * load * level * self.rng.noise();

@@ -17,6 +17,12 @@ pub struct Spotter {
     /// Time remaining on the exclamation mark for this acquisition.
     pub alert_left: f32,
     pub reporting: bool,
+    /// Metres per second over the water, as it last flew.
+    pub way: Vec2,
+    /// Hits it can still take before it goes down.
+    pub(super) health: u16,
+    /// Shot down, and gone from the base's lookout for the rest of the leg.
+    downed: bool,
     // Once a contact drops, a brief gap in cover cannot repeatedly raise the alarm.
     lost_for: f32,
     center: Vec2,
@@ -41,6 +47,9 @@ impl Spotter {
             bank: 0.,
             alert_left: 0.,
             reporting: false,
+            way: Vec2::ZERO,
+            health: super::flak::SPOTTER_STRENGTH,
+            downed: false,
             lost_for: LOST_SECONDS,
         };
         flight.fly_circuit(0.);
@@ -53,6 +62,7 @@ impl Spotter {
         self.position = self.center + self.axis * (self.span.x * c) + side * (self.span.y * s);
         let tangent = side * (self.span.y * c) - self.axis * (self.span.x * s);
         self.heading = bearing(tangent * self.rate);
+        self.way = tangent * self.rate;
         self.altitude = 43. + 6. * (2. * self.phase).sin();
         self.bank = -self.rate.signum() * (0.12 + 0.29 * c * c);
     }
@@ -70,6 +80,17 @@ impl Spotter {
     }
     pub fn position_3d(&self) -> glam::Vec3 {
         glam::Vec3::new(self.position.x, self.altitude, self.position.y)
+    }
+    /// Still flying. A floatplane shot down stays down for the rest of the leg.
+    pub fn airborne(&self) -> bool {
+        !self.downed
+    }
+    pub(super) fn shoot_down(&mut self) {
+        self.downed = true;
+        self.health = 0;
+        self.reporting = false;
+        self.alert_left = 0.;
+        self.way = Vec2::ZERO;
     }
 }
 
@@ -105,9 +126,13 @@ impl Battle {
 
     pub(super) fn update_lookouts(&mut self, dt: f32, player: Vec2) {
         for (plane, port) in self.spotters.iter_mut().zip(&self.ports) {
+            if plane.downed {
+                continue;
+            }
             if port.yard_state() == YardState::Ruined {
                 // The patrol leaves on its present heading when its home signal goes dark.
-                plane.position += shipvivor_compass::direction(plane.heading) * 35. * dt;
+                plane.way = shipvivor_compass::direction(plane.heading) * 35.;
+                plane.position += plane.way * dt;
                 plane.bank = 0.;
                 plane.altitude = (plane.altitude + 2. * dt).min(94.);
                 plane.alert_left = 0.;

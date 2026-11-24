@@ -1,8 +1,8 @@
 //! Deterministic arcade encounters. The renderer reads these actors and effects.
 mod chart;
-pub use chart::{Chart, HarbourSite, Ice, Islet, STRAIT, Waters, leg_seed};
+pub use chart::{Chart, Course, HarbourSite, Ice, Islet, STRAIT, Waters, leg_seed};
 mod coast;
-pub use coast::{Landmark, LandmarkKind};
+pub use coast::{Landmark, LandmarkKind, MAINLAND_CLIFF, MAINLAND_CREST, mainland_top};
 mod current;
 pub use current::{Currents, MAX_CURRENT, Set};
 mod iceberg;
@@ -10,28 +10,35 @@ pub use iceberg::{AVOIDED_RADIUS, IceShape, Iceberg};
 mod survey;
 pub use survey::{Defect, GATE_HALF_WIDTH, Metrics, Survey};
 mod supply;
-pub use supply::{Package, TOW_RANGE};
+pub use supply::{DRYDOCK_STORES, FACTORY_STORES, Package, Rewards, TOW_RANGE};
 mod fleet;
 pub use fleet::{EnemyClass, EnemyGun, Profile, Raider};
+mod flak;
+pub use flak::{AaMount, Airframe, BURST_RADIUS};
 mod mounts;
+mod pilot;
 mod plating;
 mod port;
 pub use mounts::{DeckOffsets, MainMount, MountStatus, Station, WingGun};
 pub use plating::{HULL_OUTLINE, Scar, breakwater_outline};
+mod air_station;
 mod projectile;
 mod ram;
 mod recon;
+pub use air_station::{AirRaid, AirStation, AttackPlane};
 pub use recon::{AIR_SIGHT, ALERT_SECONDS, BASE_SIGHT, Spotter};
+mod aviation;
 mod torpedo;
+pub use aviation::{Bomb, CATAPULT_DECK, Flight, Floatplane, Launcher, Missile};
 use glam::{Vec2, Vec3, Vec3Swizzles};
 pub use port::{
     Factory, ISLAND_RADIUS, Port, SHORE_RANGE, SPAWN_STANDOFF, ShoreTurret, YARD_CAPACITY,
     YardState,
 };
-pub use projectile::{SIGHT_LIMIT, Shot, Sighting};
+pub use projectile::{SIGHT_LIMIT, Shot, Sighting, Trajectory};
 use projectile::{fire, footprint};
 pub use ram::Hull;
-pub use shipvivor_artillery::{Ammo, Impact, MainShell, Secondaries, TurretLayout};
+pub use shipvivor_artillery::{AntiAir, Ammo, Impact, MainShell, Secondaries, TurretLayout};
 use shipvivor_compass::heading as bearing;
 pub use torpedo::{RACK_HALF_ARC, Rack, SPREAD_HALF_ARC, TORPEDO_RANGE, TORPEDO_SPEED, Torpedo};
 
@@ -53,8 +60,11 @@ pub enum Battery {
     Main,
     Secondary,
     EnemySecondary,
+    Aircraft,
     Raider,
     Shore,
+    /// Breakwater's light anti-aircraft guns. Their rounds burst on a time fuse.
+    AntiAir,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectKind {
@@ -74,6 +84,11 @@ pub enum EffectKind {
     Splash,
     /// Two hulls striking hard enough to do damage.
     Crunch,
+    /// A time-fused anti-aircraft round bursting in the air.
+    Flak,
+    /// An enemy aircraft shot down, falling from where it was hit. It glides on along
+    /// its heading as it drops, and throws up a splash where it meets the water.
+    Downed(Airframe),
 }
 impl EffectKind {
     /// Seconds before the effect is removed.
@@ -95,6 +110,8 @@ impl EffectKind {
             Self::Burst => 0.85,
             Self::Splash => 0.85,
             Self::Crunch => 0.9,
+            Self::Flak => 1.6,
+            Self::Downed(_) => 3.4,
         }
     }
 }
@@ -109,7 +126,15 @@ pub struct Effect {
 pub struct Blow {
     /// Metres aft of the bow tip.
     pub aft: f32,
+    /// Metres to starboard of the centreline. Negative is to port.
+    pub abeam: f32,
     pub damage: u16,
+    /// Inches across the round that struck, or `None` for a blow no plate can turn:
+    /// a ram, an iceberg or a bomb through the deck.
+    pub calibre: Option<f32>,
+    /// How far in it got. A round reaches only the bays its path crosses below the
+    /// deck. A ram, an iceberg or a bomb reaches every bay of the module it lands on.
+    pub reach: shipvivor_shipyard::Reach,
 }
 #[derive(Default, Debug)]
 pub struct Events {
@@ -118,6 +143,8 @@ pub struct Events {
     pub hits: u16,
     pub sunk: u16,
     pub regent_sunk: bool,
+    /// Stores brought aboard: packages towed alongside, or under direct rewards the
+    /// stores of each ship sunk and each yard building wrecked.
     pub recovered: u16,
     pub damage: u16,
     /// Change in the player's position from hulls pushing apart.
@@ -125,9 +152,33 @@ pub struct Events {
     /// Change in the player's signed speed from ramming or being rammed.
     pub jolt: f32,
 }
-/// Range ahead and offset to starboard of the patrol screen when a sector opens.
-const PICKETS: [(f32, f32); 4] = [(310., 38.), (390., -126.), (-96., -279.), (32., 297.)];
+/// Range ahead and offset to starboard of the patrol screen when a classic sector opens.
+/// The destroyers lie abeam, where their shells land amidships on the engine room, so they
+/// start well outside their own gun range and give the player time to come round. A
+/// coastal passage sets its own screen along the course (see `Chart::pickets`).
+const PICKETS: [(f32, f32); 4] = [(310., 38.), (390., -126.), (-153., -444.), (50., 467.)];
+/// Each boat on patrol when a sector opens lies at her charted station or at one of
+/// these others, in metres farther out from where the player enters and to starboard
+/// across that line. Never nearer, so none starts inside her standoff.
+const PICKET_SHIFTS: [(f32, f32); 3] = [(0., 0.), (60., 80.), (60., -80.)];
 const COMBATANT_LIMIT: usize = 16;
+
+/// Where picket `index` is on patrol: her charted `station`, or one of the others the
+/// chart's seed picks for her, so a seed always meets the same screen. A hand-set chart
+/// keeps its stations.
+fn picket_station(seed: Option<u64>, index: usize, station: Vec2) -> Vec2 {
+    let Some(seed) = seed else {
+        return station;
+    };
+    // A splitmix step, so neighbouring seeds and pickets choose independently.
+    let mut z = seed.wrapping_add((index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    let (out, across) = PICKET_SHIFTS[(z % PICKET_SHIFTS.len() as u64) as usize];
+    let ahead = station.normalize_or(Vec2::NEG_Y);
+    station + ahead * out + ahead.perp() * across
+}
 /// Seconds into a sector when destroyers, then cruisers, then battleships join the raids.
 pub const RAID_TIERS: [f32; 3] = [65., 160., 310.];
 /// Seconds into a sector when the flagship puts to sea, between the cruisers and the
@@ -182,13 +233,19 @@ pub struct Orders {
 }
 pub struct Battle {
     ports: [Port; 3],
+    air_station: Option<AirStation>,
     raiders: Vec<Raider>,
     spotters: [Spotter; 3],
     patrol_center: Vec2,
     shots: Vec<Shot>,
     torpedoes: Vec<Torpedo>,
     racks: [f32; 2],
+    floatplane: Option<Floatplane>,
+    bombs: Vec<Bomb>,
+    launchers: Vec<Launcher>,
+    missiles: Vec<Missile>,
     salvage: Vec<Package>,
+    rewards: Rewards,
     landmarks: Vec<Landmark>,
     effects: Vec<Effect>,
     main_mounts: Vec<MainMount>,
@@ -202,6 +259,10 @@ pub struct Battle {
     next_mount: usize,
     wing_guns: Vec<WingGun>,
     secondaries: Secondaries,
+    aa_mounts: Vec<AaMount>,
+    anti_air: AntiAir,
+    /// Ranks of training gear on every main gunhouse.
+    training_gear: u16,
     last_strike: Option<(Impact, f32)>,
     /// The player's heading and hull this tick, for placing hits along her length.
     keel: (Vec2, Hull),
@@ -236,18 +297,20 @@ impl Battle {
     /// checks hundreds of these and needs neither the current nor the ice.
     pub(crate) fn patrolled(wave_interval: f32, chart: &Chart) -> Self {
         let mut b = Self::chart_sector(wave_interval, chart);
-        let ahead = chart.gates[0].normalize_or(Vec2::NEG_Y);
         // These boats are already on patrol when the player enters the sector.
-        for ((range, lateral), class) in PICKETS.into_iter().zip([
-            EnemyClass::Patrol,
-            EnemyClass::Patrol,
-            EnemyClass::Destroyer,
-            EnemyClass::Destroyer,
-        ]) {
-            let at = b.navigable_position(
-                ahead * range + ahead.perp() * lateral,
-                class.profile().hull.bow,
-            );
+        for (index, (station, class)) in chart
+            .pickets
+            .into_iter()
+            .zip([
+                EnemyClass::Patrol,
+                EnemyClass::Patrol,
+                EnemyClass::Destroyer,
+                EnemyClass::Destroyer,
+            ])
+            .enumerate()
+        {
+            let station = picket_station(chart.seed, index, station);
+            let at = b.navigable_position(station, class.profile().hull.bow);
             b.spawn(class, at, Vec2::ZERO);
         }
         b
@@ -260,6 +323,7 @@ impl Battle {
         let landmarks = chart
             .islets
             .iter()
+            .chain(&chart.coast)
             .map(|islet| Landmark {
                 body: body(&mut serial, islet.pos, islet.heading),
                 radius: islet.radius,
@@ -267,6 +331,7 @@ impl Battle {
             })
             .collect();
         let mut b = Self {
+            air_station: None,
             spotters: std::array::from_fn(|i| Spotter::patrol(&ports[i], i)),
             patrol_center: chart.gates.iter().sum::<Vec2>() / chart.gates.len() as f32,
             landmarks,
@@ -275,7 +340,12 @@ impl Battle {
             shots: vec![],
             torpedoes: vec![],
             racks: [0.; 2],
+            floatplane: None,
+            bombs: vec![],
+            launchers: vec![],
+            missiles: vec![],
             salvage: vec![],
+            rewards: Rewards::Packages,
             effects: vec![],
             deck: DeckOffsets::for_design(&shipvivor_shipyard::Design::breakwater()),
             gun_train_rate: 1.,
@@ -289,6 +359,9 @@ impl Battle {
             next_mount: 0,
             wing_guns: WingGun::battery(Secondaries::STOCK.per_side),
             secondaries: Secondaries::STOCK,
+            aa_mounts: Vec::new(),
+            anti_air: AntiAir::NONE,
+            training_gear: 0,
             last_strike: None,
             keel: (Vec2::NEG_Y, Hull::CRUISER),
             next_wave: wave_interval,
@@ -318,6 +391,18 @@ impl Battle {
             }
         }
         b
+    }
+    /// Pay stores the moment their ship or building falls, or leave packages to tow in.
+    /// A sector is charted with its loose packages, and direct rewards clear them.
+    pub fn with_rewards(mut self, rewards: Rewards) -> Self {
+        self.rewards = rewards;
+        if rewards == Rewards::Direct {
+            self.salvage.clear();
+        }
+        self
+    }
+    pub fn rewards(&self) -> Rewards {
+        self.rewards
     }
     /// The flagship is fitting out in one of the yards and puts to sea partway through.
     pub fn with_flagship(mut self) -> Self {
@@ -506,14 +591,27 @@ impl Battle {
                 self.main_mounts.push(MainMount::new(position));
             }
             self.main_mounts[i].fitted_bore = Some(shell.bore);
+            self.main_mounts[i].gear = self.training_gear;
             self.main_mounts[i].fit(layout);
         }
+        self.fit_strike_craft(design);
     }
     pub fn update_mount_service(&mut self, ship: &shipvivor_shipyard::Ship) {
         self.gun_train_rate = ship.gun_train_rate();
         for mount in &mut self.main_mounts {
             mount.in_service = ship.ready(mount.position.berth);
         }
+        self.strike_craft_service(ship);
+    }
+    /// Training gear on every main gunhouse, now and as the yard adds them.
+    pub fn fit_training(&mut self, gear: u16) {
+        self.training_gear = gear;
+        for mount in &mut self.main_mounts {
+            mount.gear = gear;
+        }
+    }
+    pub fn training_gear(&self) -> u16 {
+        self.training_gear
     }
     pub fn fit_turrets(&mut self, layout: TurretLayout) {
         for mount in &mut self.main_mounts {
@@ -628,13 +726,31 @@ impl Battle {
     }
     /// Let effects already in flight finish while the sector clock and combat are stopped.
     pub fn advance_effects(&mut self, dt: f32) {
+        let mut landed = Vec::new();
         self.effects.retain_mut(|fx| {
             fx.age += dt;
-            if matches!(fx.kind, EffectKind::Wreck(_)) {
-                fx.body.pos += fx.body.forward() * dt * 1.4;
+            match fx.kind {
+                EffectKind::Wreck(_) => fx.body.pos += fx.body.forward() * dt * 1.4,
+                EffectKind::Downed(_) if fx.height > 0. => {
+                    // A stricken aircraft glides on, slowing, and falls ever faster.
+                    fx.body.pos += fx.body.forward() * dt * (34. - 8. * fx.age).max(6.);
+                    fx.height = (fx.height - (5. + 26. * fx.age) * dt).max(0.);
+                    if fx.height == 0. {
+                        landed.push((fx.body.pos, fx.body.heading));
+                    }
+                }
+                _ => {}
             }
             fx.age < fx.kind.lifetime()
         });
+        for (pos, heading) in landed {
+            self.effects.push(Effect {
+                body: body(&mut self.serial, pos, heading),
+                height: 0.,
+                kind: EffectKind::Splash,
+                age: 0.,
+            });
+        }
     }
 
     pub fn step(&mut self, dt: f32, orders: &Orders) -> Events {
@@ -662,6 +778,7 @@ impl Battle {
         // Every enemy gun leads the player by her present course and speed, and the set.
         let way = shipvivor_compass::direction(orders.heading) * orders.speed
             + self.floe.currents.at(orders.player);
+        self.fly_air_raid(dt, orders.player, way);
         for port in &mut self.ports {
             port.fire_turrets(
                 dt,
@@ -834,8 +951,12 @@ impl Battle {
                 gun.reload = self.secondaries.reload;
             }
         }
+        self.fire_anti_air(dt, orders);
         self.advance_shots(dt, orders.player, &mut events);
         self.advance_torpedoes(dt, &mut events);
+        self.fly_floatplane(dt, orders.player, orders.heading, &mut events);
+        self.fire_missiles(dt, orders.player, orders.heading);
+        self.advance_missiles(dt, &mut events);
         self.raiders.retain(|r| {
             if r.afloat() {
                 return true;
@@ -849,10 +970,13 @@ impl Battle {
                 age: 0.,
             });
             let stores = r.class.profile().stores;
-            self.salvage.push(Package::new(
-                body(&mut self.serial, r.body.pos, r.body.heading),
-                stores,
-            ));
+            match self.rewards {
+                Rewards::Direct => events.recovered += u16::from(stores),
+                Rewards::Packages => self.salvage.push(Package::new(
+                    body(&mut self.serial, r.body.pos, r.body.heading),
+                    stores,
+                )),
+            }
             false
         });
         self.receive_convoys();

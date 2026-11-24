@@ -388,6 +388,24 @@ impl Port {
         ]
     }
 
+    /// The quay's root and outer end along the slip, and its half-width. The foundry's
+    /// occupied berth has wider quays ending closer to shore.
+    fn quay(&self) -> (f32, f32, f32) {
+        if self.factories.len() == 3 {
+            (20., 30., 4.8)
+        } else {
+            (20., 44., 3.)
+        }
+    }
+
+    /// A circle round the quay, for ships steering clear of it: centre and radius.
+    pub(super) fn pier(&self) -> (Vec2, f32) {
+        let (root, end, width) = self.quay();
+        let forward = self.body.forward();
+        let centre = self.body.pos + forward.perp() * 6. + forward * (root + end) * 0.5;
+        (centre, (end - root) * 0.5 + width)
+    }
+
     /// A ship appears in the water alongside the outer end of the quay.
     pub fn berth(&self) -> Vec2 {
         self.body.pos + self.body.forward() * 46. + self.body.forward().perp() * 14.
@@ -409,13 +427,8 @@ impl Port {
         }
         let side = forward.perp();
         let pier_root = self.body.pos + side * 6.;
-        // The foundry's occupied berth has wider quays ending closer to shore.
-        let (end, width) = if self.factories.len() == 3 {
-            (30., 4.8)
-        } else {
-            (44., 3.)
-        };
-        let nearest = pier_root + forward * (pos - pier_root).dot(forward).clamp(20., end);
+        let (root, end, width) = self.quay();
+        let nearest = pier_root + forward * (pos - pier_root).dot(forward).clamp(root, end);
         clear_circle(pos, nearest, width + clearance, side)
     }
 }

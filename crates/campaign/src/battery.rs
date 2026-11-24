@@ -6,7 +6,8 @@ use shipvivor_shipyard::GunStation;
 
 pub const CALIBRES: [u16; 6] = [4, 6, 8, 12, 15, 18];
 
-#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+/// Classes of beam, narrowest first.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ShipBeam {
     #[default]
     Escort,
@@ -19,8 +20,26 @@ impl ShipBeam {
     pub fn metres(self) -> f32 {
         match self {
             Self::Escort => 5.5,
-            Self::Cruiser => 9.,
-            Self::Capital => 14.,
+            Self::Cruiser => 7.5,
+            Self::Capital => 9.5,
+        }
+    }
+    /// The shortest hull that may carry this beam. Each keeps her at least 4.2 beams
+    /// long, so her bow stays fine enough to part the water at speed.
+    pub fn min_length(self) -> f32 {
+        match self {
+            Self::Escort => 0.,
+            Self::Cruiser => 35.,
+            Self::Capital => 40.,
+        }
+    }
+    /// The most ranks of armor plate a hull this broad can carry. Each step of beam
+    /// gives her the stability for two more ranks of heavier side plate.
+    pub const fn most_armor(self) -> u16 {
+        match self {
+            Self::Escort => 2,
+            Self::Cruiser => 4,
+            Self::Capital => 6,
         }
     }
     pub fn name(self) -> &'static str {

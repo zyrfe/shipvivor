@@ -1,6 +1,6 @@
-//! Dev builds only: the backquote key (` and ~) saves the window as a PNG in
-//! `work/screenshots`, along with a Markdown note on the game state, so a screen can be
-//! discussed with an agent without first describing it.
+//! With the `dev-tools` feature (on by default, release builds too): the backquote key
+//! (` and ~) saves the window as a PNG in `work/screenshots`, along with a Markdown note on
+//! the game state, so a screen can be discussed with an agent without first describing it.
 use crate::camera::ShipView;
 use crate::state::{Campaign, Encounter, Guns, PlayerHelm, Screen};
 use bevy::prelude::*;
@@ -18,7 +18,7 @@ const TOAST_SECS: f32 = 2.5;
 pub struct SnapshotPlugin;
 impl Plugin for SnapshotPlugin {
     fn build(&self, app: &mut App) {
-        if cfg!(debug_assertions) {
+        if cfg!(feature = "dev-tools") {
             app.add_systems(Update, (capture, fade_toasts));
         }
     }
@@ -38,6 +38,7 @@ fn capture(
         Res<Encounter>,
     ),
     mut commands: Commands,
+    log: Option<ResMut<crate::telemetry::Logbook>>,
 ) {
     if !keys.just_pressed(KeyCode::Backquote) {
         return;
@@ -49,8 +50,15 @@ fn capture(
     }
     let (run, helm, view, guns, battle) = game;
     let (stamp, when) = timestamp(SystemTime::now());
-    let note = describe(&when, &window, &run, &helm, &view, &guns, &battle);
+    let mut note = describe(&when, &window, &run, &helm, &view, &guns, &battle);
     let png = folder.join(format!("{stamp}.png"));
+    // A capture during a run is noted in its log, and the note names the run.
+    if let Some(mut log) = log {
+        if let Some(code) = log.code() {
+            let _ = writeln!(note, "- Run {code}, logged in work/runs/{code}.log");
+        }
+        log.note_capture(&format!("work/screenshots/{stamp}.png"));
+    }
     // The note goes first so it is there by the time the image appears.
     if let Err(err) = std::fs::write(folder.join(format!("{stamp}.md")), note) {
         warn!("Couldn't write the capture note: {err}");
@@ -122,7 +130,7 @@ fn shrink(rgb: &[u8], width: u32, height: u32, scale: u32) -> (Vec<u8>, u32, u32
 }
 
 /// A note along the bottom centre, clear of the HUD panels in the corners.
-fn show_toast(commands: &mut Commands, message: String) {
+pub(crate) fn show_toast(commands: &mut Commands, message: String) {
     commands.spawn((
         Toast(TOAST_SECS),
         Node {
@@ -161,7 +169,7 @@ fn fade_toasts(
 }
 
 /// A sortable file stem and a readable time, both in UTC.
-fn timestamp(now: SystemTime) -> (String, String) {
+pub(crate) fn timestamp(now: SystemTime) -> (String, String) {
     let since = now.duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = since.as_secs();
     let (year, month, day) = civil_date(secs / 86_400);
@@ -265,11 +273,11 @@ fn describe(
     if let Screen::Drydock(_) = screen {
         let _ = writeln!(
             s,
-            "- Drydock: section {}, option {:?} = {:?}, armed {}",
+            "- Drydock: section {}, option {:?} = {:?}, {} work orders left",
             run.dock_module,
             run.dock_option,
             run.dock_job(),
-            run.dock_armed
+            run.fittings_remaining()
         );
     }
     let _ = writeln!(
@@ -293,15 +301,22 @@ fn describe(
         degrees(view.bearing),
         view.zoom
     );
-    if let Some(target) = view.target(battle) {
+    if let Some(quarry) = view.quarry(battle)
+        && let Some((at, _)) = quarry.frame(battle)
+    {
+        let what = match (quarry, view.target(battle)) {
+            (_, Some(ship)) => format!("{:?} #{}", ship.class, ship.body.id),
+            (crate::camera::Quarry::Battery(port, gun), _) => {
+                format!("base {} gun {}", crate::mission_hud::letter(port), gun + 1)
+            }
+            _ => "contact".to_string(),
+        };
         let _ = writeln!(
             s,
-            "- {}: {:?} #{} at {:.0} m, bearing {:03} deg",
+            "- {}: {what} at {:.0} m, bearing {:03} deg",
             if view.locked() { "Pinned" } else { "Marked" },
-            target.class,
-            target.body.id,
-            helm.position.distance(target.body.pos),
-            degrees(shipvivor_compass::heading(target.body.pos - helm.position))
+            helm.position.distance(at),
+            degrees(shipvivor_compass::heading(at - helm.position))
         );
     }
     let mut afloat: Vec<_> = battle.raiders().iter().filter(|r| r.afloat()).collect();
@@ -309,7 +324,10 @@ fn describe(
         let near = |r: &&shipvivor_encounter::Raider| helm.position.distance(r.body.pos);
         near(a).total_cmp(&near(b))
     });
-    if matches!(screen, Screen::Sailing | Screen::Paused | Screen::Secured) {
+    if matches!(
+        screen,
+        Screen::Sailing | Screen::Paused | Screen::PassageMap | Screen::Secured
+    ) {
         let _ = writeln!(s, "- Contacts afloat: {}", afloat.len());
         for r in afloat.iter().take(5) {
             let _ = writeln!(

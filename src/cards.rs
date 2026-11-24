@@ -1,10 +1,15 @@
 //! Fitting cards for the refit: each card is a face of data (category, rank, before and
 //! after stats) drawn as a framed card that deals in, lifts and glows under the cursor.
 use crate::{insignia::Insignia, ui::Action};
-use bevy::{prelude::*, ui::RelativeCursorPosition};
-use shipvivor_campaign::{CALIBRES, Card, Fittings};
+use bevy::{
+    prelude::*,
+    ui::{RelativeCursorPosition, UiGlobalTransform},
+    window::{CursorGrabMode, CursorOptions},
+};
+use shipvivor_campaign::{CALIBRES, Card, Fittings, limits};
 use shipvivor_encounter::{Ammo, MainShell};
 use shipvivor_navigation::Helm;
+use shipvivor_shipyard::{Component, Design, Protection};
 
 const KNOTS_PER_MPS: f32 = 1.94384;
 const WIDTH: f32 = 268.;
@@ -12,13 +17,17 @@ const HEIGHT: f32 = 380.;
 /// Seconds between one card landing and the next.
 const STAGGER: f32 = 0.09;
 const DEAL: f32 = 0.38;
+/// How far under the cards a fresh hand leaves the pointer, in UI pixels.
+const PARK_GAP: f32 = 24.;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Ammunition,
     Gunnery,
     Machinery,
+    Protection,
     Secondaries,
+    AntiAir,
 }
 impl Kind {
     fn label(self) -> &'static str {
@@ -26,7 +35,9 @@ impl Kind {
             Self::Ammunition => "AMMUNITION",
             Self::Gunnery => "MAIN BATTERY",
             Self::Machinery => "MACHINERY",
+            Self::Protection => "PROTECTION",
             Self::Secondaries => "SECONDARIES",
+            Self::AntiAir => "ANTI-AIRCRAFT",
         }
     }
     fn color(self) -> Color {
@@ -34,7 +45,9 @@ impl Kind {
             Self::Ammunition => Color::srgb_u8(255, 176, 74),
             Self::Gunnery => Color::srgb_u8(240, 104, 88),
             Self::Machinery => Color::srgb_u8(88, 204, 214),
+            Self::Protection => Color::srgb_u8(200, 208, 218),
             Self::Secondaries => Color::srgb_u8(132, 224, 120),
+            Self::AntiAir => Color::srgb_u8(150, 158, 255),
         }
     }
 }
@@ -90,12 +103,34 @@ impl Face {
                     | Card::TwinSecondaries
                     | Card::TripleTurrets
                     | Card::QuadTurrets
+                    | Card::AntiAir
             )
     }
 }
 
 fn seconds(s: f32) -> String {
     format!("{s:.2} s")
+}
+fn metres(m: f32) -> String {
+    format!("{m:.0} m")
+}
+/// Degrees per second, spelled out: the default font has no degree sign.
+fn traverse(f: Fittings) -> String {
+    format!("{:.0} deg/s", f.traverse())
+}
+fn share(part: f32) -> String {
+    format!("{:.0}%", 100. * part)
+}
+/// The widest round a sound plate turns aside.
+fn inches(calibre: f32) -> String {
+    format!("{calibre:.0} in")
+}
+/// Damage the first such fitting aboard takes before it fails, with these fittings.
+fn strength(design: &Design, f: Fittings, part: Component) -> String {
+    design
+        .protected(f.protection(Protection::BREAKWATER))
+        .strength(part)
+        .map_or_else(String::new, |points| format!("{points:.0}"))
 }
 fn knots(f: Fittings) -> String {
     format!(
@@ -110,10 +145,11 @@ fn ap(f: Fittings) -> MainShell {
     }
 }
 
-pub(crate) fn face(card: Card, now: Fittings) -> Face {
+pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
     use Change::*;
     let next = now.with(card);
     let (wing, wing_next) = (now.secondaries(), next.secondaries());
+    let (flak, flak_next) = (now.anti_air(), next.anti_air());
     match card {
         Card::Loader => Face {
             kind: Kind::Gunnery,
@@ -158,8 +194,9 @@ pub(crate) fn face(card: Card, now: Fittings) -> Face {
                     seconds(next.reload()),
                     Cost,
                 ),
+                stat("Traverse", traverse(now), traverse(next), Cost),
             ],
-            flavour: "A larger shell takes longer to load. Each mount uses the largest bore its deck can carry.",
+            flavour: "A heavier shell loads and trains more slowly.",
         },
         Card::Caps => {
             let (before, after) = (ap(now).penetration(), ap(next).penetration());
@@ -189,13 +226,21 @@ pub(crate) fn face(card: Card, now: Fittings) -> Face {
             kind: Kind::Ammunition,
             name: "Shell Velocity",
             rank: (now.velocity, None),
-            stats: vec![stat(
-                "Speed",
-                format!("{:.0} m/s", now.round().speed()),
-                format!("{:.0} m/s", next.round().speed()),
-                Gain,
-            )],
-            flavour: "A flatter arc and a shorter lead.",
+            stats: vec![
+                stat(
+                    "Speed",
+                    format!("{:.0} m/s", now.round().speed()),
+                    format!("{:.0} m/s", next.round().speed()),
+                    Gain,
+                ),
+                stat(
+                    "Range",
+                    metres(now.round().reach()),
+                    metres(next.round().reach()),
+                    Gain,
+                ),
+            ],
+            flavour: "A flatter arc, a shorter lead and a longer reach.",
         },
         Card::Turbines => Face {
             kind: Kind::Machinery,
@@ -281,6 +326,86 @@ pub(crate) fn face(card: Card, now: Fittings) -> Face {
             stats: vec![stat("Barrels", wing.barrels, wing_next.barrels, Gain)],
             flavour: "Every wing gun becomes a twin mount. Both barrels fire.",
         },
+        Card::TrainingGear => Face {
+            kind: Kind::Gunnery,
+            name: "Training Gear",
+            rank: (now.training_gear, Some(limits::TRAINING_GEAR)),
+            stats: vec![stat("Traverse", traverse(now), traverse(next), Gain)],
+            flavour: "Stronger motors swing every gunhouse onto a new bearing, and lay its guns, sooner.",
+        },
+        Card::Armor => {
+            let (a, b) = (
+                now.protection(Protection::BREAKWATER),
+                next.protection(Protection::BREAKWATER),
+            );
+            Face {
+                kind: Kind::Protection,
+                name: "Armor Plate",
+                rank: (now.armor, Some(limits::ARMOR)),
+                stats: vec![
+                    stat("Plate", share(a.plating), share(b.plating), Gain),
+                    stat("Stops", inches(a.thickness), inches(b.thickness), Gain),
+                ],
+                flavour: "Thicker side plate wears more slowly, and turns aside smaller guns until it is battered thin. A broader beam carries more of it.",
+            }
+        }
+        Card::Hardening => Face {
+            kind: Kind::Protection,
+            name: "Hardened Systems",
+            rank: (now.hardening, Some(limits::HARDENING)),
+            stats: vec![
+                stat(
+                    "Engine",
+                    strength(design, now, Component::Engine),
+                    strength(design, next, Component::Engine),
+                    Gain,
+                ),
+                stat(
+                    "Turret",
+                    strength(design, now, Component::MainGun),
+                    strength(design, next, Component::MainGun),
+                    Gain,
+                ),
+            ],
+            flavour: "Splinter shields and stiffer seatings. Engine, guns and gear take more before they fail.",
+        },
+        Card::AntiAir => Face {
+            kind: Kind::AntiAir,
+            name: "AA Guns",
+            rank: (now.anti_air, Some(1)),
+            stats: vec![
+                stat("Guns", "", flak_next.mounts, New),
+                stat("Reach", "", metres(flak_next.range), New),
+                stat("Reload", "", seconds(flak_next.reload), New),
+            ],
+            flavour: "Quick-firing guns that burst their rounds among aircraft.",
+        },
+        Card::MoreAntiAir => Face {
+            kind: Kind::AntiAir,
+            name: "More AA Guns",
+            rank: (now.aa_mounts, Some(limits::AA_MOUNTS)),
+            stats: vec![stat("Guns", flak.mounts, flak_next.mounts, Gain)],
+            flavour: "Another pair of guns, on the bridge wings and then between the funnels.",
+        },
+        Card::HeavyAntiAir => Face {
+            kind: Kind::AntiAir,
+            name: "Heavier Flak",
+            rank: (now.aa_shells, Some(limits::AA_SHELLS)),
+            stats: vec![stat("Damage", flak.damage, flak_next.damage, Gain)],
+            flavour: "A heavier burst tears up whatever it catches.",
+        },
+        Card::QuickAntiAir => Face {
+            kind: Kind::AntiAir,
+            name: "AA Loaders",
+            rank: (now.aa_loaders, Some(limits::AA_LOADERS)),
+            stats: vec![stat(
+                "Reload",
+                seconds(flak.reload),
+                seconds(flak_next.reload),
+                Gain,
+            )],
+            flavour: "Clips passed up hand to hand keep the guns firing.",
+        },
     }
 }
 
@@ -291,6 +416,25 @@ pub struct Dealt {
     color: Color,
     age: f32,
     lift: f32,
+}
+impl Dealt {
+    /// How far the card has come in, from 0 still in the deck to 1 landed.
+    fn progress(&self) -> f32 {
+        ((self.age - self.slot as f32 * STAGGER) / DEAL).clamp(0., 1.)
+    }
+    /// A card takes a click only once it has landed, not while it sweeps in under the pointer.
+    pub(crate) fn landed(&self) -> bool {
+        self.progress() >= 1.
+    }
+}
+
+/// The row a hand is dealt into. Once its layout holds still, the pointer is moved to
+/// just under the cards, so a click still meant for the guns lands on none of them.
+#[derive(Component, Default)]
+pub struct Hand {
+    /// Where the pointer goes, as measured last frame, in physical pixels.
+    settling: Option<Vec2>,
+    parked: bool,
 }
 
 fn mix(a: Color, b: Color, t: f32) -> Color {
@@ -323,9 +467,10 @@ fn text(
 }
 
 /// Lay the offered cards in a row under `parent`.
-pub fn hand(cmd: &mut Commands, parent: Entity, now: Fittings, art: &Insignia) {
+pub fn hand(cmd: &mut Commands, parent: Entity, now: Fittings, design: &Design, art: &Insignia) {
     let row = cmd
         .spawn((
+            Hand::default(),
             Node {
                 width: percent(100),
                 justify_content: JustifyContent::Center,
@@ -337,7 +482,7 @@ pub fn hand(cmd: &mut Commands, parent: Entity, now: Fittings, art: &Insignia) {
         ))
         .id();
     for (slot, card) in now.offers().into_iter().enumerate() {
-        spawn_card(cmd, row, slot, card, now, art);
+        spawn_card(cmd, row, slot, face(card, now, design), card, art);
     }
 }
 
@@ -345,11 +490,10 @@ fn spawn_card(
     cmd: &mut Commands,
     row: Entity,
     slot: usize,
+    face: Face,
     card: Card,
-    now: Fittings,
     art: &Insignia,
 ) {
-    let face = face(card, now);
     let tint = face.kind.color();
     let root = cmd
         .spawn((
@@ -539,7 +683,8 @@ fn spawn_card(
                 flex_direction: FlexDirection::Column,
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
-                row_gap: px(7),
+                // Four figures close up so the art window keeps its height.
+                row_gap: px(if face.stats.len() >= 4 { 2 } else { 7 }),
                 padding: UiRect::horizontal(px(16)),
                 ..default()
             },
@@ -622,7 +767,7 @@ pub fn animate(
     let dt = time.delta_secs().min(0.05);
     for (mut card, cursor, mut pose, mut shadow, mut border, mut shown) in &mut cards {
         card.age += dt;
-        let t = ((card.age - card.slot as f32 * STAGGER) / DEAL).clamp(0., 1.);
+        let t = card.progress();
         if t > 0. {
             shown.set_if_neq(Visibility::Inherited);
         }
@@ -643,5 +788,34 @@ pub fn animate(
             glow.y_offset = px(6. + 8. * lift);
         }
         *border = BorderColor::all(mix(card.color, Color::WHITE, 0.4 * lift));
+    }
+}
+
+/// Move the pointer to just under a freshly dealt hand, clear of every card, so the captain
+/// has to move up onto the one they want. It waits until the row has held still for a
+/// frame, the pointer is free and the window has focus, so it never takes a pointer that
+/// is working somewhere else.
+pub fn park_pointer(
+    mut window: Single<(&mut Window, &CursorOptions)>,
+    mut hands: Query<(&mut Hand, &ComputedNode, &UiGlobalTransform)>,
+) {
+    let (window, cursor) = &mut *window;
+    if !window.focused || cursor.grab_mode != CursorGrabMode::None {
+        return;
+    }
+    for (mut hand, row, place) in &mut hands {
+        if hand.parked || row.size().y <= 0. {
+            continue;
+        }
+        // Layout works in physical pixels. The cards end at the row's bottom padding.
+        let below = 0.5 * row.size().y - row.padding.max_inset.y;
+        let spot = place.translation + Vec2::Y * (below + PARK_GAP / row.inverse_scale_factor());
+        if hand.settling != Some(spot) {
+            hand.settling = Some(spot);
+            continue;
+        }
+        hand.parked = true;
+        let edge = window.physical_size().as_vec2() - 1.;
+        window.set_physical_cursor_position(Some(spot.clamp(Vec2::ZERO, edge).as_dvec2()));
     }
 }

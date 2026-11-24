@@ -193,3 +193,31 @@ fn he_stays_light_whatever_the_bore_and_ap_starts_a_grade_heavier() {
         ShellClass::Heavy
     );
 }
+
+#[test]
+fn a_heavier_gunhouse_trains_more_slowly_and_training_gear_wins_it_back() {
+    let rates: Vec<f32> = [4., 6., 8., 12., 15., 18.]
+        .into_iter()
+        .map(|inches| training_rate(inches, 0))
+        .collect();
+    assert!((rates[0] - 1.).abs() < 1e-6, "stock four-inch mount");
+    assert!(rates.windows(2).all(|pair| pair[1] < pair[0]));
+    // Four ranks bring a sixteen-inch mount back to the stock pace, and no more ranks fit.
+    assert!((training_rate(16., MOST_TRAINING_GEAR) - 1.).abs() < 1e-6);
+    assert_eq!(
+        training_rate(8., MOST_TRAINING_GEAR + 3),
+        training_rate(8., MOST_TRAINING_GEAR)
+    );
+}
+
+#[test]
+fn a_faster_round_carries_farther() {
+    let stock = MainShell::STOCK;
+    assert!((stock.reach() - 780.).abs() < 1e-3);
+    let reaches: Vec<f32> = (0..5)
+        .map(|velocity| MainShell { velocity, ..stock }.reach())
+        .collect();
+    assert!(reaches.windows(2).all(|pair| pair[1] > pair[0]));
+    // A heavier bore alone does not change the reach.
+    assert_eq!(MainShell { bore: 8, ..stock }.reach(), stock.reach());
+}

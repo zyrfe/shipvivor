@@ -1,6 +1,9 @@
 //! Authored ammunition for the compressed game sea. Plate grades are game tiers.
 use crate::ShellClass;
 
+/// Metres a stock round carries.
+const STOCK_REACH: f32 = 780.;
+
 /// What a round is filled with. HE bursts on whatever it strikes and opens only light
 /// plate. AP is built to go through armour, and caps and a larger bore drive it harder.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -39,6 +42,11 @@ impl MainShell {
     pub fn speed(self) -> f32 {
         let rank = f32::from(self.velocity);
         360. + 220. * rank / (3. + rank)
+    }
+    /// Metres the round carries before it comes down. A faster round carries farther,
+    /// in step with its muzzle speed.
+    pub fn reach(self) -> f32 {
+        STOCK_REACH * self.speed() / Self::STOCK.speed()
     }
     /// Bore relative to the six-inch barrel model.
     pub fn scale(self) -> f32 {

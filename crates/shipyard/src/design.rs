@@ -103,12 +103,28 @@ pub enum Component {
     Engine,
     /// Detonates when destroyed, wrecking its module and blasting those beside it.
     Magazine,
+    /// A trainable catapult and crane with a floatplane that hunts on its own.
+    Catapult,
+    /// A trainable box launcher that fires guided missiles at the nearest enemy.
+    MissileRack,
 }
+
+/// Missiles a rack fires together, the damage each does, how far they reach and the
+/// seconds before the rack is loaded again.
+pub const MISSILE_SALVO: usize = 2;
+pub const MISSILE_DAMAGE: u16 = 8;
+pub const MISSILE_RANGE: f32 = 1000.;
+pub const MISSILE_RELOAD: f32 = 20.;
+/// How far from the ship the floatplane hunts, the damage of the bomb it drops on
+/// each pass, and the seconds between passes while it rearms.
+pub const FLOATPLANE_REACH: f32 = 700.;
+pub const BOMB_DAMAGE: u16 = 5;
+pub const SORTIE_SECONDS: f32 = 16.;
 
 impl Component {
     pub fn slot(self) -> Slot {
         match self {
-            Self::MainGun | Self::Director => Slot::Centre,
+            Self::MainGun | Self::Director | Self::Catapult | Self::MissileRack => Slot::Centre,
             Self::CloseGun | Self::TorpedoRack => Slot::Side,
             Self::Engine | Self::Magazine => Slot::Bay,
         }
@@ -120,7 +136,10 @@ impl Component {
     }
 
     pub fn weapon(self) -> bool {
-        matches!(self, Self::MainGun | Self::CloseGun | Self::TorpedoRack)
+        matches!(
+            self,
+            Self::MainGun | Self::CloseGun | Self::TorpedoRack | Self::MissileRack
+        )
     }
 
     pub fn mass(self) -> f32 {
@@ -131,13 +150,16 @@ impl Component {
             Self::Director => 0.15,
             Self::Engine => 1.1,
             Self::Magazine => 0.3,
+            Self::Catapult => 0.2,
+            Self::MissileRack => 0.3,
         }
     }
 
-    /// Damage the component absorbs before it is knocked out. Deck fittings are struck
-    /// directly and have their own strength. Bay fittings share every hit on their
-    /// module, so their strength is a share of its structure.
-    pub(crate) fn health(self, structure: f32, design: &Design) -> f32 {
+    /// Damage the component absorbs before it is knocked out, on a module of this
+    /// structure. Deck fittings are struck directly and have their own strength. Bay
+    /// fittings share every hit on their module, so their strength is a share of its
+    /// structure.
+    pub fn health(self, structure: f32, design: &Design) -> f32 {
         let strength = design.toughness * design.fittings;
         match self {
             Self::MainGun => 12. * strength,
@@ -146,6 +168,8 @@ impl Component {
             Self::Director => 8. * strength,
             Self::Engine => design.engine_strength * structure,
             Self::Magazine => 0.6 * structure,
+            Self::Catapult => 6. * strength,
+            Self::MissileRack => 7. * strength,
         }
     }
 }
@@ -163,6 +187,21 @@ impl Module {
             fit: fit.into_iter().collect(),
         }
     }
+}
+
+/// How well a hull is protected: her side plating, and the strength of what she carries.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Protection {
+    /// Strength of the side plating as a multiple of stock.
+    pub plating: f32,
+    /// Inches of side plate. A round no wider than what is left of it on a panel is
+    /// turned aside: a sound panel stops rounds up to its full thickness, and one worn
+    /// to half stops rounds up to half of it.
+    pub thickness: f32,
+    /// Engine durability as a share of the surrounding compartment's structure.
+    pub engine: f32,
+    /// Strength of deck fittings as a multiple of the hull's toughness.
+    pub fittings: f32,
 }
 
 /// The address of one fitted component.
@@ -229,6 +268,10 @@ pub struct Design {
     pub(crate) engine_strength: f32,
     /// Auxiliary machinery can drive the ship and train the guns with every engine out.
     pub(crate) auxiliary_drive: bool,
+    /// Strength of the side plating as a multiple of stock.
+    pub(crate) plating: f32,
+    /// Inches of side plate. Zero on a new design, which turns nothing aside.
+    pub(crate) thickness: f32,
     /// Seconds the weapons can draw from the battery without a running power supply.
     pub reserve: f32,
     /// She founders once this share of her vital length is wrecked.
@@ -275,6 +318,8 @@ impl Design {
             fittings: 1.,
             repair: 1.,
             engine_strength: 0.5,
+            plating: 1.,
+            thickness: 0.,
             auxiliary_drive: false,
             reserve: 20.,
             sinks_at: 0.5,
@@ -363,6 +408,11 @@ impl Design {
         self.modules[module].frame.spec().length * self.scale
     }
 
+    /// Beam of one module in metres, widened as the whole hull is.
+    pub fn module_beam(&self, module: usize) -> f32 {
+        self.modules[module].frame.spec().beam * self.scale * self.beam_factor
+    }
+
     /// Where a module starts and ends, in metres aft of the bow tip.
     pub fn span(&self, module: usize) -> (f32, f32) {
         let fore: f32 = (0..module).map(|i| self.module_length(i)).sum();
@@ -396,6 +446,39 @@ impl Design {
 
     pub fn beam_factor(&self) -> f32 {
         self.beam_factor
+    }
+
+    /// Her side plating and the strength of what she carries.
+    pub fn protection(&self) -> Protection {
+        Protection {
+            plating: self.plating,
+            thickness: self.thickness,
+            engine: self.engine_strength,
+            fittings: self.fittings,
+        }
+    }
+    /// Plate and harden the design. A [`crate::Ship`] built to it is refitted with
+    /// [`crate::Ship::protect`].
+    pub fn protect(&mut self, p: Protection) {
+        self.plating = p.plating.max(0.);
+        self.thickness = p.thickness.max(0.);
+        self.engine_strength = p.engine.max(0.);
+        self.fittings = p.fittings.max(0.);
+    }
+    /// This design plated and hardened as given.
+    #[must_use]
+    pub fn protected(&self, p: Protection) -> Self {
+        let mut design = self.clone();
+        design.protect(p);
+        design
+    }
+    /// Damage the first `component` aboard absorbs before it is knocked out.
+    pub fn strength(&self, component: Component) -> Option<f32> {
+        let module = self
+            .modules
+            .iter()
+            .position(|m| m.fit.contains(&component))?;
+        Some(component.health(self.module_structure(module), self))
     }
 
     /// Widen all frames across the waterline without lengthening the vessel.

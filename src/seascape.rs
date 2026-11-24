@@ -301,7 +301,10 @@ pub fn follow(
     }
 }
 
-fn keel(id: u64, pos: Vec2, heading: f32, hull: &Hull, afloat: f32) -> Keel {
+/// Metres of water a hull draws for each metre of her half beam as she was built.
+const DRAUGHT_PER_RADIUS: f32 = 0.32;
+
+fn keel(id: u64, pos: Vec2, heading: f32, hull: &Hull, draught: f32) -> Keel {
     Keel {
         id,
         pos,
@@ -309,7 +312,7 @@ fn keel(id: u64, pos: Vec2, heading: f32, hull: &Hull, afloat: f32) -> Keel {
         half_beam: hull.radius,
         bow: hull.bow,
         stern: hull.stern,
-        draught: 0.32 * hull.radius * afloat,
+        draught,
     }
 }
 
@@ -321,18 +324,27 @@ pub fn churn(
     battle: Res<Encounter>,
     mut sea: ResMut<Sea>,
 ) {
+    // The yard widens Breakwater by adding frame weight in step with the waterplane, so
+    // she floats no deeper than she was built. Drawing more water in proportion to her
+    // new beam would raise a bow wave over her forecastle at speed.
     let mut keels = vec![keel(
         FLAGSHIP,
         helm.position,
         helm.heading,
         &run.hull_shape(),
-        1.,
+        DRAUGHT_PER_RADIUS * Hull::CRUISER.radius,
     )];
     if run.screen() == Screen::Sailing {
         for raider in battle.raiders() {
             let body = raider.body;
             let hull = &raider.class.profile().hull;
-            keels.push(keel(body.id, body.pos, body.heading, hull, 1.));
+            keels.push(keel(
+                body.id,
+                body.pos,
+                body.heading,
+                hull,
+                DRAUGHT_PER_RADIUS * hull.radius,
+            ));
         }
         for effect in battle.effects() {
             let body = effect.body;
@@ -341,7 +353,8 @@ pub fn churn(
                 EffectKind::Wreck(class) => {
                     let afloat = 1. - effect.age / effect.kind.lifetime();
                     let hull = &class.profile().hull;
-                    keels.push(keel(body.id, body.pos, body.heading, hull, afloat));
+                    let draught = DRAUGHT_PER_RADIUS * hull.radius * afloat;
+                    keels.push(keel(body.id, body.pos, body.heading, hull, draught));
                 }
                 // An effect made on this tick has not aged yet.
                 EffectKind::Splash if effect.age == 0. => sea.wake.splash(body.pos, 2.2),

@@ -1,11 +1,15 @@
+pub(crate) mod customise;
+pub(crate) mod options;
+pub(crate) mod passage_chart;
 mod title;
 use crate::state::{Campaign, Encounter, PlayerHelm, Screen, TrialCourse};
 use bevy::{prelude::*, ui::RelativeCursorPosition};
 use shipvivor_campaign::{
-    Card, EXITS, EXTRACT_GATES, EXTRACT_SECONDS, Fittings, LegEnd, MAX_STARS, Perk, Stage,
+    ANCHORAGES, Card, EXITS, EXTRACT_SECONDS, Fittings, LegEnd, MAX_STARS, Perk, Stage,
 };
 
 const KNOTS_PER_MPS: f32 = 1.94384;
+const CHART_TABLE_WIDTH: f32 = 964.;
 
 /// Whole compass degrees, 0 to 359.
 fn degrees(heading: f32) -> i32 {
@@ -17,7 +21,7 @@ fn knots(metres_per_second: f32) -> f32 {
 fn extraction_rule() -> String {
     let seconds = EXTRACT_SECONDS as u32;
     format!(
-        "Exit at {EXTRACT_GATES} gates or {:02}:{:02} elapsed",
+        "Extract at {:02}:{:02} or first drydock",
         seconds / 60,
         seconds % 60
     )
@@ -55,15 +59,32 @@ pub(crate) enum Action {
     Title,
     Resume,
     Pause,
+    ToggleChart,
     Extract,
     Card(Card),
     /// Select a section of the ship in the drydock, counted from the bow.
     Module(usize),
     Preview(usize),
+    /// Preview work from the hull panel or the yard's stock.
+    Draft(shipvivor_campaign::DockJob),
     Confirm,
+    /// Leave the drydock for the chart once every work order is spent.
+    Sail,
     Continue,
     Depart(Stage),
     Engage,
+    /// Open the customise screen from the title.
+    Customise,
+    /// On the customise screen: fly a pattern, choose which of its slots to colour,
+    /// colour it, or spin the wheel for a pattern and its colours together.
+    Pattern(shipvivor_ensign::Pattern),
+    Slot(usize),
+    Tincture(shipvivor_ensign::Tincture),
+    Spin,
+    /// Open the options screen from the title.
+    Options,
+    /// On the options screen: how the ship earns experience.
+    Rewards(shipvivor_encounter::Rewards),
 }
 #[derive(Component)]
 pub struct ScreenRoot;
@@ -73,6 +94,7 @@ pub enum Instrument {
     Flagship,
     Target,
     Spotting,
+    AirRaid,
     Impact,
     Engine,
     Orders,
@@ -84,10 +106,17 @@ pub fn intent(
     mouse: Res<ButtonInput<MouseButton>>,
     run: Res<Campaign>,
     pointer: Res<crate::dockyard::Pointer>,
-    buttons: Query<(&Action, &RelativeCursorPosition)>,
+    buttons: Query<(
+        &Action,
+        &RelativeCursorPosition,
+        Option<&crate::cards::Dealt>,
+    )>,
 ) -> Option<Action> {
+    // A fitting card still dealing in can sweep under the pointer. It is not a choice yet.
     if mouse.just_pressed(MouseButton::Left)
-        && let Some((action, _)) = buttons.iter().find(|(_, p)| p.cursor_over())
+        && let Some((action, ..)) = buttons
+            .iter()
+            .find(|(_, p, card)| p.cursor_over() && card.is_none_or(|c| c.landed()))
     {
         return Some(*action);
     }
@@ -98,15 +127,44 @@ pub fn intent(
     match run.screen() {
         Screen::Title if key(KeyCode::Enter) => Some(Action::Start),
         Screen::Title if key(KeyCode::KeyT) => Some(Action::Trial),
+        Screen::Title if key(KeyCode::KeyC) => Some(Action::Customise),
+        Screen::Title if key(KeyCode::KeyO) => Some(Action::Options),
+        Screen::Options if key(KeyCode::Escape) || key(KeyCode::Enter) => Some(Action::Title),
+        Screen::Options => choice
+            .and_then(|i| options::REWARDS.get(i))
+            .map(|&(rewards, ..)| Action::Rewards(rewards)),
+        Screen::Departure if key(KeyCode::Escape) => Some(Action::Title),
+        Screen::Departure => choice.map(|i| Action::Depart(ANCHORAGES[i].stage)),
+        Screen::Customise if key(KeyCode::Escape) || key(KeyCode::Enter) => Some(Action::Title),
+        Screen::Customise if key(KeyCode::KeyR) => Some(Action::Spin),
+        Screen::Customise => [
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
+            KeyCode::Digit6,
+        ]
+        .into_iter()
+        .position(key)
+        .map(Action::Slot),
         Screen::Trial if key(KeyCode::KeyR) => Some(Action::RestartTrial),
         Screen::Trial | Screen::Won(_) | Screen::Lost if key(KeyCode::Escape) => {
             Some(Action::Title)
         }
         Screen::Secured if key(KeyCode::Enter) => Some(Action::Continue),
         Screen::Sailing if key(KeyCode::Escape) => Some(Action::Pause),
-        Screen::Sailing if key(KeyCode::KeyE) => Some(Action::Extract),
+        Screen::Sailing | Screen::PassageMap if key(KeyCode::Tab) => Some(Action::ToggleChart),
+        Screen::PassageMap
+            if key(KeyCode::Escape) && run.chart_roll.is_some_and(|roll| roll.opening) =>
+        {
+            Some(Action::ToggleChart)
+        }
         Screen::Paused if key(KeyCode::Escape) || key(KeyCode::Enter) => Some(Action::Resume),
         Screen::Paused if key(KeyCode::KeyM) => Some(Action::Title),
+        // Extraction ends the leg, so it waits behind the pause menu rather than sitting
+        // one key away from the helm.
+        Screen::Paused if key(KeyCode::KeyE) && run.can_extract() => Some(Action::Extract),
         Screen::Drydock(_) => {
             // The ship is the menu: a click on her selects the section under the cursor.
             let count = run.dock_jobs().len();
@@ -120,10 +178,25 @@ pub fn intent(
                     })
                 })
             };
-            if mouse.just_pressed(MouseButton::Left) && !pointer.over_panel {
+            if let Some((at, module)) = pointer.dropped {
+                // A section from the yard's stock let go over a seam is tried there.
+                Some(Action::Draft(shipvivor_campaign::DockJob::Insert {
+                    at,
+                    module,
+                }))
+            } else if pointer.carrying.is_some() {
+                None
+            } else if mouse.just_pressed(MouseButton::Left) && !pointer.over_panel {
                 pointer.hovered.map(Action::Module)
             } else if key(KeyCode::Enter) {
-                Some(Action::Confirm)
+                // With nothing previewed and every order spent, Enter sails.
+                Some(
+                    if run.dock_job().is_none() && run.fittings_remaining() == 0 {
+                        Action::Sail
+                    } else {
+                        Action::Confirm
+                    },
+                )
             } else if key(KeyCode::Escape) {
                 Some(Action::Module(run.dock_module))
             } else if key(KeyCode::BracketLeft) {
@@ -160,10 +233,28 @@ pub fn intent(
         _ => None,
     }
 }
-pub fn scale(window: Single<&Window>, mut scale: ResMut<UiScale>) {
-    let size = (window.width() / 1000.)
+fn shows_chart_table(screen: Screen) -> bool {
+    matches!(
+        screen,
+        Screen::Departure | Screen::Chart | Screen::Intercept(_) | Screen::Paused
+    )
+}
+
+pub fn scale(window: Single<&Window>, run: Res<Campaign>, mut scale: ResMut<UiScale>) {
+    let screen = run.screen();
+    let bridge_scale = (window.width() / 1000.)
         .min(window.height() / 650.)
         .clamp(0.45, 1.);
+    let size = if screen == Screen::PassageMap {
+        passage_chart::reading_scale(window.size())
+    } else if shows_chart_table(screen) {
+        // Leave the table its usual side margins and room for the longest set of orders.
+        (window.width() * 0.92 / CHART_TABLE_WIDTH)
+            .min(window.height() / 600.)
+            .max(bridge_scale)
+    } else {
+        bridge_scale
+    };
     if scale.0 != size {
         scale.0 = size;
     }
@@ -250,11 +341,28 @@ type Buttons = (
 
 pub fn hover(
     run: Res<Campaign>,
-    mut buttons: Query<(&Action, &RelativeCursorPosition, &mut BackgroundColor), Buttons>,
+    mut buttons: Query<
+        (
+            &Action,
+            &RelativeCursorPosition,
+            &mut BackgroundColor,
+            Has<passage_chart::ChartName>,
+        ),
+        Buttons,
+    >,
 ) {
-    for (action, cursor, mut bg) in &mut buttons {
-        let desired = if run.screen() == Screen::Title {
+    for (action, cursor, mut bg, chart_name) in &mut buttons {
+        let desired = if matches!(
+            run.screen(),
+            Screen::Title | Screen::Customise | Screen::Options
+        ) {
             title::fill(*action, cursor.cursor_over())
+        } else if chart_name {
+            if cursor.cursor_over() {
+                brass()
+            } else {
+                passage_chart::PAPER.with_alpha(0.92)
+            }
         } else {
             button_color(cursor.cursor_over())
         };
@@ -279,10 +387,19 @@ fn menu_panel(cmd: &mut Commands, root: Entity, width: f32) -> Entity {
     .id()
 }
 // Everything a menu screen is built from. The HUD updates its own text every frame.
-type ScreenKey = (Screen, Stage, Fittings, u16, Option<usize>, usize, bool);
+type ScreenKey = (
+    Screen,
+    Stage,
+    Fittings,
+    u16,
+    Option<usize>,
+    usize,
+    Option<shipvivor_campaign::DockJob>,
+);
 
 pub fn rebuild_screen(
     art: Res<crate::insignia::Insignia>,
+    captain: Res<crate::captain::CaptainArt>,
     chart: Res<crate::minimap::ChartImage>,
     plans: (Local<crate::gunnery::DeckPlan>, ResMut<Assets<Image>>),
     mut cmd: Commands,
@@ -298,7 +415,7 @@ pub fn rebuild_screen(
         run.fittings_remaining(),
         run.dock_option,
         run.dock_module,
-        run.dock_armed,
+        run.dock_draft,
     );
     if *last == Some(key) {
         return;
@@ -323,6 +440,13 @@ pub fn rebuild_screen(
             },
         ))
         .id();
+    if let Some(roll) = run
+        .chart_roll
+        .filter(|_| run.screen() == Screen::PassageMap)
+    {
+        passage_chart::unfurl(&mut cmd, root, &run, &art, roll);
+        return;
+    }
     if sailing {
         let (mut plan, mut images) = plans;
         let deck = (run.screen() == Screen::Sailing).then(|| plan.image(&run, &mut images));
@@ -333,6 +457,7 @@ pub fn rebuild_screen(
             chart.0.clone(),
             art.contact.clone(),
             deck,
+            &captain,
         );
         return;
     }
@@ -348,15 +473,53 @@ pub fn rebuild_screen(
         title::show(&mut cmd, root, &art.display_face);
         return;
     }
+    if run.screen() == Screen::Customise {
+        customise::show(&mut cmd, root, &art);
+        return;
+    }
+    if run.screen() == Screen::Options {
+        options::show(&mut cmd, root, &art.display_face);
+        return;
+    }
     cmd.entity(root)
         .insert(BackgroundColor(Color::srgba_u8(6, 18, 26, 145)));
-    let width = if run.screen() == Screen::Refit {
+    let nautical = shows_chart_table(run.screen());
+    let width = if nautical {
+        CHART_TABLE_WIDTH
+    } else if run.screen() == Screen::Refit {
         900.
     } else {
         560.
     };
     let panel = menu_panel(&mut cmd, root, width);
+    let panel = if nautical {
+        passage_chart::table(&mut cmd, panel, &run, &art)
+    } else {
+        panel
+    };
     match run.screen() {
+        Screen::Departure => {
+            text(&mut cmd, panel, "Choose your anchorage", 25., ink());
+            for (i, port) in ANCHORAGES.iter().enumerate() {
+                let mission = port.stage.mission();
+                action(
+                    &mut cmd,
+                    panel,
+                    Some(Action::Depart(port.stage)),
+                    &format!("[{}]  {}", i + 1, mission.name),
+                    &format!("{} min. {}", mission.minutes, port.pilot_note),
+                    false,
+                );
+            }
+            action(
+                &mut cmd,
+                panel,
+                Some(Action::Title),
+                "Back to title     [Esc]",
+                "",
+                false,
+            );
+        }
         Screen::Refit => {
             text(
                 &mut cmd,
@@ -377,55 +540,36 @@ pub fn rebuild_screen(
                 16.,
                 pale(),
             );
-            crate::cards::hand(&mut cmd, panel, run.fittings, &art);
+            crate::cards::hand(&mut cmd, panel, run.fittings, run.ship.design(), &art);
         }
         Screen::Chart => {
-            text(&mut cmd, panel, "PASSAGE CHART   /   LEG 02", 14., brass());
-            text(&mut cmd, panel, "Choose your exit", 34., ink());
+            text(&mut cmd, panel, "Choose your passage", 26., ink());
             text(
                 &mut cmd,
                 panel,
                 format!(
-                    "{} / {MAX_STARS} stars earned in the Iron Narrows",
+                    "{}   /   {} / {MAX_STARS} stars",
+                    run.origin.mission().name,
                     run.stars()
                 ),
-                18.,
+                16.,
                 brass(),
             );
-            let stars = cmd
-                .spawn((
-                    Node {
-                        column_gap: px(5),
-                        ..default()
-                    },
-                    ChildOf(panel),
-                ))
-                .id();
-            for n in 0..MAX_STARS {
-                cmd.spawn((
-                    ImageNode {
-                        image: art.star.clone(),
-                        color: if n < run.stars() { brass() } else { trim() },
-                        ..default()
-                    },
-                    Node {
-                        width: px(24),
-                        height: px(24),
-                        ..default()
-                    },
-                    ChildOf(stars),
-                ));
-            }
             for (i, exit) in EXITS.into_iter().enumerate() {
                 let (stage, required) = (exit.stage, exit.stars);
                 let open = run.stars() >= required;
                 let description = match exit.perk {
-                    Perk::None => "Wide channels, frequent patrols".to_string(),
-                    Perk::Repair(_) => "Hull repairs on arrival".to_string(),
-                    Perk::FreeFitting => "Tight turns, free fitting on arrival".to_string(),
+                    Perk::None => "Frequent patrols".to_string(),
+                    Perk::Repair(hull) => format!("Repair up to {hull} hull"),
+                    Perk::FreeFitting => "Free fitting on arrival".to_string(),
+                };
+                let air = if stage.enters_air_cover() {
+                    "\nStrafers here, bombers at Crown Deep"
+                } else {
+                    ""
                 };
                 let detail = format!(
-                    "{}   /   {}",
+                    "{}   /   {}{air}",
                     if open {
                         "Open".into()
                     } else {
@@ -437,12 +581,7 @@ pub fn rebuild_screen(
                     &mut cmd,
                     panel,
                     open.then_some(Action::Depart(stage)),
-                    &format!(
-                        "{}   {}     {} stars",
-                        i + 1,
-                        stage.mission().name,
-                        required
-                    ),
+                    &format!("[{}]  {}", i + 1, stage.mission().name),
                     &detail,
                     false,
                 );
@@ -501,7 +640,7 @@ pub fn rebuild_screen(
                 38.,
                 ink(),
             );
-            let tally = if run.stage == Stage::IronNarrows {
+            let tally = if run.stage.is_opening() {
                 format!("{} / {MAX_STARS} stars", run.stars())
             } else {
                 format!(
@@ -525,6 +664,15 @@ pub fn rebuild_screen(
                 17.,
                 pale(),
             );
+            if run.passage.is_some_and(Stage::enters_air_cover) {
+                text(
+                    &mut cmd,
+                    panel,
+                    "Enemy bombers and strafers fly from hangar A.",
+                    15.,
+                    brass(),
+                );
+            }
             action(
                 &mut cmd,
                 panel,
@@ -543,7 +691,20 @@ pub fn rebuild_screen(
             );
         }
         Screen::Paused => {
-            text(&mut cmd, panel, "At the helm", 34., ink());
+            text(&mut cmd, panel, run.stage.mission().name, 26., ink());
+            text(
+                &mut cmd,
+                panel,
+                if run.passage.is_none() {
+                    "Outer Road is always open. Two stars unlock Greywater Sound. Three unlock Pilot's Cut and its enemy air cover."
+                } else if run.passage.is_some_and(Stage::enters_air_cover) {
+                    "Pilot's Cut brings strafers. At Crown Deep the air station also launches bombers."
+                } else {
+                    "Your passage leads to the Iron Regent at Crown Deep."
+                },
+                16.,
+                pale(),
+            );
             action(
                 &mut cmd,
                 panel,
@@ -552,6 +713,21 @@ pub fn rebuild_screen(
                 "",
                 false,
             );
+            if run.stage != Stage::CrownDeep {
+                let open = run.can_extract();
+                action(
+                    &mut cmd,
+                    panel,
+                    open.then_some(Action::Extract),
+                    "Extract     [E]",
+                    &if open {
+                        "Ends the leg now.".to_string()
+                    } else {
+                        extraction_rule()
+                    },
+                    false,
+                );
+            }
             action(
                 &mut cmd,
                 panel,
@@ -571,6 +747,7 @@ fn hud(
     chart: Handle<Image>,
     contact_icon: Handle<Image>,
     deck: Option<Handle<Image>>,
+    captain: &crate::captain::CaptainArt,
 ) {
     if run.screen() == Screen::Sailing {
         crate::mission_hud::spawn(cmd, root, run.stage);
@@ -596,8 +773,8 @@ fn hud(
         cmd.spawn((
             ImageNode::new(chart),
             Node {
-                width: px(192),
-                height: px(192),
+                width: px(crate::minimap::SHOWN),
+                height: px(crate::minimap::SHOWN),
                 ..default()
             },
             ChildOf(panel),
@@ -605,7 +782,7 @@ fn hud(
         text(
             cmd,
             panel,
-            "200 m grid     [ ] Next gate\nA B C   Enemy drydocks",
+            "200 m grid     A B C   Enemy drydocks",
             12.,
             pale(),
         );
@@ -613,7 +790,11 @@ fn hud(
         cmd.entity(target).insert(Instrument::Target);
         let spotted = text(cmd, panel, "", 12., ink());
         cmd.entity(spotted).insert(Instrument::Spotting);
-        if run.stage != shipvivor_campaign::Stage::IronNarrows {
+        if run.passage.is_some_and(Stage::enters_air_cover) {
+            let raid = text(cmd, panel, "", 13., brass());
+            cmd.entity(raid).insert(Instrument::AirRaid);
+        }
+        if !run.stage.is_opening() {
             let report = text(cmd, panel, "", 13., brass());
             cmd.entity(report).insert(Instrument::Flagship);
         }
@@ -717,11 +898,27 @@ fn hud(
         } else {
             title.to_uppercase()
         };
-        text(cmd, panel, title, 16., brass());
-        let e = text(cmd, panel, "", 14., ink());
+        let heading = if matches!(inst, Instrument::Engine) {
+            let row = cmd
+                .spawn((
+                    Node {
+                        align_items: AlignItems::Center,
+                        column_gap: px(10),
+                        ..default()
+                    },
+                    ChildOf(panel),
+                ))
+                .id();
+            crate::captain::portrait(cmd, row, captain);
+            cmd.spawn((column(3.), ChildOf(row))).id()
+        } else {
+            panel
+        };
+        text(cmd, heading, title, 16., brass());
+        let e = text(cmd, heading, "", 14., ink());
         if matches!(inst, Instrument::Navigation)
             && run.screen() == Screen::Sailing
-            && run.stage == Stage::IronNarrows
+            && run.stage.is_opening()
         {
             text(
                 cmd,
@@ -833,9 +1030,9 @@ pub fn instruments(
         let value = match inst {
             Instrument::Navigation => {
                 let goal = run.stage.mission();
-                let p = course.next_gate().center - helm.position;
-                let bearing = degrees(shipvivor_compass::heading(p));
                 if run.screen() == Screen::Trial {
+                    let p = course.next_gate().center - helm.position;
+                    let bearing = degrees(shipvivor_compass::heading(p));
                     format!(
                         "Lap {}   Gate {} / {}\nGold buoys   {bearing:03} deg   {:.0} m",
                         course.lap(),
@@ -851,28 +1048,46 @@ pub fn instruments(
                 } else {
                     let g = run.objectives;
                     format!(
-                        "Raiders {} / {}     Stores  {} / {}\nGates  {} / {}     {:03} deg / {:.0} m\nShip hits {}     Sunk {}\n{}",
+                        "Raiders {} / {}     Stores  {} / {}\nDrydock destroyed  {} / 1\nShip hits {}     Sunk {}\n{}",
                         g.kills,
                         goal.kills,
                         g.crates,
                         goal.crates,
-                        g.gates,
-                        goal.gates,
-                        bearing,
-                        p.length(),
+                        u8::from(g.destroyed_drydock),
                         run.hits,
                         run.sunk,
                         if run.can_extract() {
-                            "[E]  Extract".to_string()
+                            "Extraction open     [Esc]".to_string()
                         } else {
                             extraction_rule()
                         }
                     )
                 }
             }
-            Instrument::Target => view.target(&battle).map_or_else(String::new, |r| {
-                let selection = if view.locked() { "LOCK" } else { "AUTO" };
-                format!("{selection}   {:.0} m", helm.position.distance(r.body.pos))
+            Instrument::Target => (view.quarry(&battle))
+                .and_then(|quarry| quarry.frame(&battle))
+                .map_or_else(String::new, |(at, _)| {
+                    let selection = if view.locked() { "LOCK" } else { "AUTO" };
+                    format!("{selection}   {:.0} m", helm.position.distance(at))
+                }),
+            Instrument::AirRaid => battle.air_station().map_or_else(String::new, |base| {
+                let port = &battle.ports()[base.port];
+                if let Some(plane) = base.aircraft.as_ref().filter(|plane| plane.inbound()) {
+                    let offset = plane.body.pos - helm.position;
+                    let raid = match plane.raid {
+                        shipvivor_encounter::AirRaid::Strafe => "Strafing run",
+                        shipvivor_encounter::AirRaid::Bomb => "Bomber inbound",
+                    };
+                    format!(
+                        "{raid}   {:03} deg   {:.0} m",
+                        degrees(shipvivor_compass::heading(offset)),
+                        offset.length()
+                    )
+                } else if !base.operational(port) {
+                    "Air station A / Silenced".into()
+                } else {
+                    "Air station A / Hangar active".into()
+                }
             }),
             Instrument::Spotting => {
                 let contact = view.sight(helm.position, &battle);
@@ -894,17 +1109,30 @@ pub fn instruments(
                     }
                 } else if let Some((base, factory)) = contact.factory {
                     let port = &battle.ports()[base];
-                    let condition = if port.factories()[factory].live() {
+                    let condition = if port.factories()[factory].live()
+                        && port.yard_state() != shipvivor_encounter::YardState::Ruined
+                    {
                         "Online"
                     } else {
                         "Offline"
                     };
-                    format!(
-                        "Factory {}{}  /  {condition}\nBase output   {:.0} steel/min",
-                        crate::mission_hud::letter(base),
-                        factory + 1,
-                        port.production_per_minute()
-                    )
+                    if factory == 0
+                        && battle
+                            .air_station()
+                            .is_some_and(|station| station.port == base)
+                    {
+                        format!(
+                            "Seaplane hangar {}  /  {condition}",
+                            crate::mission_hud::letter(base)
+                        )
+                    } else {
+                        format!(
+                            "Factory {}{}  /  {condition}\nBase output   {:.0} steel/min",
+                            crate::mission_hud::letter(base),
+                            factory + 1,
+                            port.production_per_minute()
+                        )
+                    }
                 } else if let Some((base, index)) = contact.shore_turret {
                     let gun = &battle.ports()[base].turrets()[index];
                     let id = crate::mission_hud::letter(base);
@@ -1057,7 +1285,7 @@ pub fn instruments(
                         ""
                     };
                     format!(
-                        "W/S  Engine   A/D  Rudder   C  Astern\nX  Pin / release   T  Gun / torpedo\nMouse  Look   RMB + drag  Trim lock\n{weapon}\nShift  Scope{ammo}   Esc  Pause"
+                        "W/S  Engine   A/D  Rudder   C  Astern\nX  Pin / release   T  Gun / torpedo\nMouse  Look   RMB + drag  Trim lock\n{weapon}\nShift  Scope{ammo}   Tab  Chart   Esc  Pause"
                     )
                 }
             }

@@ -21,6 +21,8 @@ perf.data.old
 # --- Dev captures -------------------------------------------------------------
 # The ` key in a debug build writes PNG + state notes here (plus hook markers).
 /work/screenshots/
+# A debug build logs each patrol run here, one <CODE>.log per run, for /recap.
+/work/runs/
 
 # --- macOS --------------------------------------------------------------------
 .DS_Store

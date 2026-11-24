@@ -3,7 +3,7 @@ use super::{Facets, Hull, paint};
 use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 
-pub(super) fn deck_height(z: f32) -> f32 {
+pub(crate) fn deck_height(z: f32) -> f32 {
     // The sheer starts ahead of the forward gun and lifts the stem clear of the bow wave.
     1.55 + ((-z - 7.) / 9.).clamp(0., 1.).powi(2) * 1.15
 }

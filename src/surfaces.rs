@@ -7,6 +7,28 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
+pub(crate) fn painted_image(bytes: &[u8]) -> Image {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::ALPHA | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info().expect("embedded PNG header");
+    let mut rgba = vec![0; reader.output_buffer_size().expect("embedded PNG size")];
+    let info = reader.next_frame(&mut rgba).expect("embedded PNG");
+    assert_eq!(info.color_type, png::ColorType::Rgba);
+    let mut image = Image::new(
+        Extent3d {
+            width: info.width,
+            height: info.height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        rgba,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::linear();
+    image
+}
+
 pub(super) fn hash(mut n: u32) -> u32 {
     n ^= n >> 16;
     n = n.wrapping_mul(0x7feb352d);

@@ -35,6 +35,189 @@ fn fixed_step_navigation_reaches_the_next_gate_in_the_hud() {
     );
 }
 
+#[test]
+fn gates_and_their_bearings_only_appear_in_the_helm_trial() {
+    let mut app = headless_game();
+    let w = app.world_mut();
+    let mut buoys = w.query_filtered::<&Visibility, With<scene::Buoy>>();
+    let mut lamps = w.query_filtered::<&Visibility, With<scene::Signal>>();
+    let mut text = w.query::<&Text>();
+    press(w, KeyCode::KeyT);
+    assert_eq!(
+        buoys
+            .iter(w)
+            .filter(|v| **v == Visibility::Inherited)
+            .count(),
+        10
+    );
+    assert_eq!(
+        lamps
+            .iter(w)
+            .filter(|v| **v == Visibility::Inherited)
+            .count(),
+        2
+    );
+    assert!(text.iter(w).any(|t| t.contains("Gate 1 / 5")));
+    press(w, KeyCode::Escape);
+    start_in_narrows(w);
+    assert!(
+        buoys
+            .iter(w)
+            .chain(lamps.iter(w))
+            .all(|v| *v == Visibility::Hidden)
+    );
+    assert!(text.iter(w).all(|t| !t.to_lowercase().contains("gate")));
+
+    // Sail through the trial's first gate while on patrol.
+    let gate = *w.resource::<TrialCourse>().next_gate();
+    let mut helm = w.resource_mut::<PlayerHelm>();
+    helm.heading = gate.bearing;
+    helm.position = gate.center - helm.forward() * 0.05;
+    helm.speed = 10.;
+    w.run_schedule(FixedUpdate);
+    assert_eq!(w.resource::<TrialCourse>().active(), 0);
+    assert_eq!(w.resource::<Campaign>().stars(), 0);
+    assert!(!w.resource::<Campaign>().can_extract());
+}
+
+#[test]
+fn the_passage_chart_and_enemy_air_cover_follow_the_exit_actually_sailed() {
+    use shipvivor_campaign::{ANCHORAGES, EXITS, Objectives, Stage};
+    let keys = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3];
+    for ((anchorage, exit), key) in ANCHORAGES.iter().zip(EXITS.iter()).zip(keys) {
+        let mut app = headless_game();
+        let w = app.world_mut();
+        press(w, KeyCode::Enter);
+        assert_eq!(w.resource::<Campaign>().screen(), Screen::Departure);
+        let mut pins = w.query_filtered::<(&ui::Action, &mut bevy::ui::RelativeCursorPosition), With<ui::passage_chart::ChartName>>();
+        assert_eq!(pins.iter(w).count(), ANCHORAGES.len());
+        for (action, mut cursor) in pins.iter_mut(w) {
+            cursor.cursor_over = *action == ui::Action::Depart(anchorage.stage);
+        }
+        w.resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        w.run_schedule(PreUpdate);
+        w.resource_mut::<ButtonInput<MouseButton>>().reset_all();
+        w.run_schedule(Update);
+        assert_eq!(w.resource::<Campaign>().screen(), Screen::Sailing);
+        assert_eq!(w.resource::<Campaign>().stage, anchorage.stage);
+        assert_eq!(w.resource::<Campaign>().seed, TEST_SEED);
+        let chart = Passage::of(anchorage.stage).chart(TEST_SEED);
+        assert_eq!(
+            w.resource::<Encounter>().ports()[0].body.pos,
+            chart.harbours[0].pos
+        );
+        assert!(w.resource::<Encounter>().flagship().is_none());
+        assert!(w.resource::<Encounter>().air_station().is_none());
+        press(w, KeyCode::Escape);
+        let mut labels = w.query::<&Text>();
+        for stage in [anchorage.stage, Stage::CrownDeep]
+            .into_iter()
+            .chain(EXITS.map(|route| route.stage))
+        {
+            assert!(labels.iter(w).any(|label| label.0 == stage.mission().name));
+        }
+        press(w, KeyCode::Escape);
+        {
+            let mut run = w.resource_mut::<Campaign>();
+            run.objectives = Objectives {
+                kills: anchorage.stage.mission().kills,
+                crates: anchorage.stage.mission().crates,
+                destroyed_drydock: true,
+            };
+            run.extract();
+            let order = run.fittings.offers()[0];
+            run.install(order);
+            assert!(run.leave_dock());
+        }
+        w.run_schedule(Update);
+        assert_eq!(w.resource::<Campaign>().screen(), Screen::Chart);
+        press(w, key);
+        let air = exit.stage == Stage::PilotsCut;
+        assert_eq!(w.resource::<Campaign>().passage, Some(exit.stage));
+        assert_eq!(w.resource::<Encounter>().air_station().is_some(), air);
+        if w.resource::<Campaign>().screen() == Screen::Refit {
+            press(w, KeyCode::Digit1);
+        }
+        w.resource_mut::<Campaign>()
+            .tick(1000., Objectives::default(), 0);
+        w.run_schedule(Update);
+        press(w, KeyCode::Enter);
+        assert_eq!(w.resource::<Campaign>().stage, Stage::CrownDeep);
+        assert_eq!(w.resource::<Campaign>().origin, anchorage.stage);
+        assert_eq!(w.resource::<Encounter>().air_station().is_some(), air);
+        if air {
+            // Check the finale's first real launch, including the shore's contact report.
+            let mut sea = w.resource_mut::<Encounter>();
+            let port = &sea.ports()[0];
+            let orders = shipvivor_encounter::Orders {
+                player: port.berth() + port.body.forward() * 120.,
+                heading: 0.,
+                speed: 0.,
+                hull: shipvivor_encounter::Hull::CRUISER,
+                aim: shipvivor_encounter::Aim::Hold,
+                reload: 3.,
+                shell: shipvivor_encounter::MainShell::STOCK,
+            };
+            let raid = (0..60 * 45).find_map(|_| {
+                sea.step(1. / 60., &orders);
+                sea.air_station()?.aircraft.as_ref().map(|plane| plane.raid)
+            });
+            assert_eq!(raid, Some(shipvivor_encounter::AirRaid::Bomb));
+        }
+        press(w, KeyCode::Escape);
+        let mut plotted = w.query_filtered::<&Text, With<ui::passage_chart::ChartName>>();
+        for port in &ANCHORAGES {
+            assert_eq!(
+                plotted
+                    .iter(w)
+                    .any(|name| name.0 == port.stage.mission().name),
+                port.stage == anchorage.stage
+            );
+        }
+        press(w, KeyCode::KeyM);
+        start_in_narrows(w);
+        assert_eq!(w.resource::<Campaign>().passage, None);
+        assert!(w.resource::<Encounter>().air_station().is_none());
+    }
+}
+
+#[test]
+fn the_departure_chart_waits_for_a_choice_on_new_and_replayed_runs() {
+    let mut app = headless_game();
+    let w = app.world_mut();
+    press(w, KeyCode::Enter);
+    press(w, KeyCode::Enter);
+    for _ in 0..60 {
+        w.run_schedule(FixedUpdate);
+    }
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Departure);
+    assert_eq!(w.resource::<Campaign>().elapsed, 0.);
+    assert_eq!(w.resource::<ChartSeeds>().peek(), TEST_SEED);
+    press(w, KeyCode::Escape);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Title);
+    press(w, KeyCode::Enter);
+    press(w, KeyCode::Digit3);
+    assert_eq!(w.resource::<Campaign>().stage, Stage::BlackcapReach);
+    w.resource_mut::<Campaign>()
+        .tick(1., Objectives::default(), 1000);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Lost);
+    press(w, KeyCode::Enter);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Departure);
+    press(w, KeyCode::Digit1);
+    let run = w.resource::<Campaign>();
+    assert_eq!(run.stage, Stage::LanternBay);
+    assert_eq!(run.screen(), Screen::Sailing);
+    assert_ne!(run.seed, TEST_SEED);
+    assert!(run.ship.afloat());
+}
+
+fn start_in_narrows(world: &mut World) {
+    press(world, KeyCode::Enter);
+    assert_eq!(world.resource::<Campaign>().screen(), Screen::Departure);
+    press(world, KeyCode::Digit2);
+}
+
 fn press(world: &mut World, key: KeyCode) {
     world.resource_mut::<ButtonInput<KeyCode>>().press(key);
     world.run_schedule(PreUpdate);
@@ -42,6 +225,138 @@ fn press(world: &mut World, key: KeyCode) {
     keys.release(key);
     keys.clear();
     world.run_schedule(Update);
+}
+
+#[test]
+fn the_options_screen_sets_whether_the_next_sector_floats_packages() {
+    use shipvivor_encounter::Rewards;
+    let mut app = headless_game();
+    let w = app.world_mut();
+    start_in_narrows(w);
+    // A new player gets experience straight from what she sinks.
+    assert_eq!(w.resource::<Encounter>().rewards(), Rewards::Direct);
+    assert!(w.resource::<Encounter>().salvage().is_empty());
+
+    press(w, KeyCode::Escape);
+    press(w, KeyCode::KeyM);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Title);
+    press(w, KeyCode::KeyO);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Options);
+    assert!(
+        w.query::<&ui::Action>()
+            .iter(w)
+            .any(|a| *a == ui::Action::Rewards(Rewards::Packages))
+    );
+    press(w, KeyCode::Digit2);
+    assert_eq!(
+        w.resource::<options::GameOptions>().rewards,
+        Rewards::Packages
+    );
+    press(w, KeyCode::Escape);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Title);
+    start_in_narrows(w);
+    assert_eq!(w.resource::<Encounter>().rewards(), Rewards::Packages);
+    assert!(!w.resource::<Encounter>().salvage().is_empty());
+}
+
+#[test]
+fn open_charts_resize_with_the_window_and_stowing_restores_the_bridge_scale() {
+    let mut app = headless_game();
+    let w = app.world_mut();
+    let mut windows = w.query::<&mut Window>();
+    windows.single_mut(w).unwrap().resolution.set(1000., 650.);
+    press(w, KeyCode::Enter);
+    let compact = w.resource::<UiScale>().0;
+    windows.single_mut(w).unwrap().resolution.set(1920., 1080.);
+    w.run_schedule(Update);
+    let full_hd = w.resource::<UiScale>().0;
+    assert!(full_hd > compact * 1.5);
+    windows.single_mut(w).unwrap().resolution.set(3840., 2160.);
+    w.run_schedule(Update);
+    assert_eq!(w.resource::<UiScale>().0, full_hd * 2.);
+
+    press(w, KeyCode::Digit2);
+    assert_eq!(w.resource::<UiScale>().0, 1.);
+    press(w, KeyCode::Tab);
+    let at_sea = w.resource::<UiScale>().0;
+    assert!(at_sea > full_hd * 2.);
+    windows.single_mut(w).unwrap().resolution.set(1920., 1080.);
+    w.run_schedule(Update);
+    assert_eq!(w.resource::<UiScale>().0, at_sea / 2.);
+    windows.single_mut(w).unwrap().resolution.set(3440., 1080.);
+    w.run_schedule(Update);
+    assert_eq!(w.resource::<UiScale>().0, at_sea / 2.);
+    w.resource_mut::<Time>()
+        .advance_by(std::time::Duration::from_secs(1));
+    press(w, KeyCode::Tab);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Sailing);
+    assert_eq!(w.resource::<UiScale>().0, 1.);
+}
+
+#[test]
+fn tab_unrolls_and_stows_the_chart_with_the_patrol_held_and_paper_audible() {
+    use shipvivor_acoustics::Sound;
+    use std::time::Duration;
+    use ui::passage_chart::RollPart;
+
+    let mut app = headless_game();
+    let w = app.world_mut();
+    let mut mixer = w.resource::<sound::Soundboard>().claim().unwrap();
+    press(w, KeyCode::Tab);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Title);
+    start_in_narrows(w);
+    let elapsed = w.resource::<Campaign>().elapsed;
+    w.resource_mut::<Time>()
+        .advance_by(Duration::from_millis(40));
+    press(w, KeyCode::Tab);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::PassageMap);
+    assert!(
+        w.query::<&ui::Action>()
+            .iter(w)
+            .all(|a| !matches!(a, ui::Action::Depart(_)))
+    );
+    let mut frames = [[0.; 2]; 1024];
+    mixer.render(&mut frames);
+    assert_eq!(mixer.making(Sound::UnrollChart).0, 1);
+    let width = |w: &mut World| {
+        let node = w
+            .query::<(&RollPart, &Node)>()
+            .iter(w)
+            .find(|(part, _)| matches!(part, RollPart::Sheet))
+            .unwrap()
+            .1;
+        let Val::Px(width) = node.width else {
+            panic!("chart clip should be in pixels")
+        };
+        width
+    };
+    let first = width(w);
+    w.run_schedule(Update);
+    let opening = width(w);
+    assert!(opening > first);
+    press(w, KeyCode::Tab);
+    let closing = width(w);
+    assert!(closing < opening && closing > 0.);
+    mixer.render(&mut frames);
+    assert_eq!(mixer.making(Sound::UnrollChart).0, 0);
+    assert_eq!(mixer.making(Sound::RollChart).0, 1);
+    assert!(frames.iter().flatten().any(|s| s.abs() > 0.01));
+    press(w, KeyCode::Tab);
+    assert!(width(w) > closing);
+    for _ in 0..10 {
+        w.run_schedule(FixedUpdate);
+        w.run_schedule(Update);
+    }
+    assert_eq!(w.resource::<Campaign>().chart_roll.unwrap().spread, 1.);
+    assert_eq!(w.resource::<Campaign>().elapsed, elapsed);
+    press(w, KeyCode::Escape);
+    for _ in 0..6 {
+        w.run_schedule(Update);
+    }
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Sailing);
+    assert_eq!(w.query::<&RollPart>().iter(w).count(), 0);
+    w.run_schedule(FixedUpdate);
+    assert!(w.resource::<Campaign>().elapsed > elapsed);
 }
 
 /// Step the drydock selection to a section of the ship with the bracket keys.
@@ -74,6 +389,14 @@ fn choose(w: &mut World, job: shipvivor_campaign::DockJob) {
     panic!("{job:?} is not offered by the selected section");
 }
 
+/// Preview work from the hull panel or a section dropped from the yard's stock, as a
+/// click on the panel or a drop on the ship would.
+fn draft(w: &mut World, job: shipvivor_campaign::DockJob) {
+    w.run_system_cached_with(apply_action, Some(ui::Action::Draft(job)))
+        .unwrap();
+    w.run_schedule(Update);
+}
+
 /// The next shell fitting offered on the selected turret bay.
 fn shell_refit(w: &World) -> shipvivor_campaign::DockJob {
     use shipvivor_campaign::{Card, DockJob};
@@ -89,7 +412,9 @@ fn shell_refit(w: &World) -> shipvivor_campaign::DockJob {
         .expect("a turret bay is selected")
 }
 
-const TEST_SEED: u64 = 1;
+/// A run seed whose charts the scripted runs below can sail. Charts depend on where the
+/// opening patrol screen lies, so moving `PICKETS` can call for another sweep.
+const TEST_SEED: u64 = 4;
 
 /// The turn from one bearing to another, the short way, in radians.
 fn turned(from: f32, to: f32) -> f32 {
@@ -121,11 +446,61 @@ fn headless_game() -> App {
 }
 
 #[test]
+fn captain_leaves_the_prow_for_the_bridge_and_reacts_to_the_run() {
+    use captain::{Face, ProwCaptain};
+    use shipvivor_encounter::Events;
+    let mut app = headless_game();
+    let w = app.world_mut();
+    let mut figure = w.query_filtered::<(&ChildOf, &Visibility), With<ProwCaptain>>();
+    let (parent, visible) = figure.single(w).unwrap();
+    assert!(w.get::<scene::Ship>(parent.parent()).is_some());
+    assert_eq!(*visible, Visibility::Inherited);
+    let mut face = w.query_filtered::<&ImageNode, With<Face>>();
+    assert_eq!(face.iter(w).count(), 0);
+    start_in_narrows(w);
+    assert_eq!(*figure.single(w).unwrap().1, Visibility::Hidden);
+    let calm = face.single(w).unwrap().rect.unwrap();
+    let size = calm.width();
+    assert_eq!(calm.min, Vec2::ZERO);
+    let sink = Events {
+        sunk: 1,
+        ..default()
+    };
+    w.resource_mut::<Campaign>().watch.observe(0., &sink);
+    w.run_schedule(Update);
+    assert_eq!(face.single(w).unwrap().rect.unwrap().min, Vec2::splat(size));
+    w.resource_mut::<Campaign>().watch.observe(
+        0.,
+        &Events {
+            damage: 1,
+            ..default()
+        },
+    );
+    w.run_schedule(Update);
+    assert_eq!(face.single(w).unwrap().rect.unwrap().min, Vec2::X * size);
+    let mut run = w.resource_mut::<Campaign>();
+    run.ship.strike_hull(17., 12.);
+    run.watch.observe(2., &Events::default());
+    w.run_schedule(Update);
+    assert_eq!(face.single(w).unwrap().rect.unwrap().min, Vec2::Y * size);
+    press(w, KeyCode::Escape);
+    assert_eq!(face.iter(w).count(), 0);
+    press(w, KeyCode::KeyM);
+    assert_eq!(*figure.single(w).unwrap().1, Visibility::Inherited);
+    press(w, KeyCode::KeyT);
+    assert_eq!(face.single(w).unwrap().rect, Some(calm));
+    w.resource_mut::<Time>()
+        .advance_by(std::time::Duration::from_millis(4640));
+    w.run_schedule(Update);
+    assert_eq!(face.single(w).unwrap().rect, None);
+}
+
+#[test]
 fn reserve_power_reaches_the_helm_and_damage_control_until_the_engine_restarts() {
     use shipvivor_shipyard::Component;
     let mut app = headless_game();
     let w = app.world_mut();
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     let mut run = w.resource_mut::<Campaign>();
     let engine = run.ship.fitted(Component::Engine).next().unwrap().0;
     let top_speed = run.ship.design().top_speed() * run.fittings.speed_factor();
@@ -172,7 +547,7 @@ fn a_run_reaches_the_regent_through_the_helm_and_keeps_its_refits() {
             .iter(w)
             .any(|a| *a == ui::Action::Start)
     );
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     w.resource_mut::<ButtonInput<KeyCode>>()
         .press(KeyCode::Space);
     w.run_schedule(PreUpdate);
@@ -232,8 +607,11 @@ fn a_run_reaches_the_regent_through_the_helm_and_keeps_its_refits() {
     assert_eq!(w.resource::<Campaign>().elapsed, time);
     press(w, KeyCode::Digit2);
     assert_eq!(w.resource::<Campaign>().fittings.shells, 1);
-    // Sail the base exit on both legs using the same early-extraction input as the player.
+    // Take the drydock exit on the first leg and the timed exit on the second.
     for leg in 0..2 {
+        if leg == 0 {
+            destroy_drydock(&mut w.resource_mut::<Encounter>(), 0);
+        }
         for _ in 0..3700 {
             w.run_schedule(FixedUpdate);
             if w.resource::<Campaign>().screen() == Screen::Refit {
@@ -243,6 +621,15 @@ fn a_run_reaches_the_regent_through_the_helm_and_keeps_its_refits() {
                 break;
             }
         }
+        if leg == 0 {
+            assert!(w.resource::<Campaign>().objectives.destroyed_drydock);
+            assert!(w.resource::<Campaign>().elapsed < shipvivor_campaign::EXTRACT_SECONDS);
+        }
+        // E at the helm does nothing. Extraction waits in the pause menu.
+        press(w, KeyCode::KeyE);
+        assert_eq!(w.resource::<Campaign>().screen(), Screen::Sailing);
+        press(w, KeyCode::Escape);
+        assert_eq!(w.resource::<Campaign>().screen(), Screen::Paused);
         press(w, KeyCode::KeyE);
         if leg == 0 {
             assert_eq!(
@@ -252,8 +639,14 @@ fn a_run_reaches_the_regent_through_the_helm_and_keeps_its_refits() {
             visit(w, 1);
             let shells = shell_refit(w);
             choose(w, shells);
-            // The only order is the last one, so it takes a second press.
+            // The only order is fitted at once, and the next Enter, with nothing
+            // previewed, sails.
             press(w, KeyCode::Enter);
+            assert_eq!(w.resource::<Campaign>().fittings_remaining(), 0);
+            assert_eq!(
+                w.resource::<Campaign>().screen(),
+                Screen::Drydock(LegEnd::Extracted)
+            );
             press(w, KeyCode::Enter);
             assert_eq!(w.resource::<Campaign>().screen(), Screen::Chart);
             let tally = (w.resource::<Campaign>().hits, w.resource::<Campaign>().sunk);
@@ -291,7 +684,11 @@ fn a_run_reaches_the_regent_through_the_helm_and_keeps_its_refits() {
     );
     w.resource_mut::<Campaign>()
         .tick_sector(61., Objectives::default(), 0, true);
+    // There is no extracting from Crown Deep, even from the pause menu.
+    press(w, KeyCode::Escape);
     press(w, KeyCode::KeyE);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Paused);
+    press(w, KeyCode::Escape);
     assert_eq!(w.resource::<Campaign>().screen(), Screen::Sailing);
     w.resource_mut::<Campaign>().tick_engagement(
         0.1,
@@ -305,7 +702,7 @@ fn a_run_reaches_the_regent_through_the_helm_and_keeps_its_refits() {
     );
     press(w, KeyCode::Escape);
     assert_eq!(w.resource::<Campaign>().screen(), Screen::Title);
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     assert_eq!(w.resource::<Campaign>().fittings.shells, 0);
     assert_eq!(
         (w.resource::<Campaign>().hits, w.resource::<Campaign>().sunk),
@@ -313,45 +710,52 @@ fn a_run_reaches_the_regent_through_the_helm_and_keeps_its_refits() {
     );
 }
 
+/// Fire on the selected yard from its open-water approach.
+fn destroy_drydock(battle: &mut Encounter, index: usize) {
+    use shipvivor_encounter::YardState;
+    let yard = battle.ports()[index].yard_position();
+    let approach = battle.ports()[index].body.forward();
+    for _ in 0..600 {
+        if battle.ports()[index].yard_state() == YardState::Ruined {
+            break;
+        }
+        let mark = yard
+            .extend((3.2 + battle.ports()[index].yard_top()) * 0.5)
+            .xzy();
+        battle.step(
+            1. / 30.,
+            &Orders {
+                player: yard + 90. * approach,
+                heading: shipvivor_compass::heading(-approach),
+                hull: Hull::CRUISER,
+                speed: 0.,
+                aim: Aim::Sight(mark),
+                shell: MainShell::STOCK,
+                reload: 0.5,
+            },
+        );
+    }
+    assert_eq!(battle.ports()[index].yard_state(), YardState::Ruined);
+}
+
 #[test]
 fn destroying_the_yards_or_timing_out_brings_the_ship_through_drydock() {
-    use shipvivor_encounter::YardState;
     for reason in [LegEnd::BasesDestroyed, LegEnd::TimeExpired] {
         let mut app = headless_game();
         let w = app.world_mut();
-        press(w, KeyCode::Enter);
+        start_in_narrows(w);
         if reason == LegEnd::BasesDestroyed {
             // Fire on each yard from the fairway. Between bases, let the game read the
             // resulting port states and update its mission HUD.
             for i in 0..w.resource::<Encounter>().ports().len() {
-                let mut battle = w.resource_mut::<Encounter>();
-                let yard = battle.ports()[i].yard_position();
-                let approach = battle.ports()[i].body.forward();
-                for _ in 0..600 {
-                    if battle.ports()[i].yard_state() == YardState::Ruined {
-                        break;
-                    }
-                    let mark = yard
-                        .extend((3.2 + battle.ports()[i].yard_top()) * 0.5)
-                        .xzy();
-                    battle.step(
-                        1. / 30.,
-                        &Orders {
-                            player: yard + 90. * approach,
-                            heading: shipvivor_compass::heading(-approach),
-                            hull: Hull::CRUISER,
-                            speed: 0.,
-                            aim: Aim::Sight(mark),
-                            shell: MainShell::STOCK,
-                            reload: 0.5,
-                        },
-                    );
-                }
-                assert_eq!(battle.ruined_yards(), i + 1);
+                destroy_drydock(&mut w.resource_mut::<Encounter>(), i);
+                assert_eq!(w.resource::<Encounter>().ruined_yards(), i + 1);
                 w.run_schedule(FixedUpdate);
                 w.run_schedule(Update);
                 if i < 2 {
                     assert_eq!(w.resource::<Campaign>().screen(), Screen::Sailing);
+                    assert!(w.resource::<Campaign>().objectives.destroyed_drydock);
+                    assert!(w.resource::<Campaign>().can_extract());
                     let count = format!("{} / 3", i + 1);
                     assert!(
                         w.query::<(&mission_hud::Reading, &Text)>()
@@ -397,8 +801,9 @@ fn destroying_the_yards_or_timing_out_brings_the_ship_through_drydock() {
             choose(w, shells);
             press(w, KeyCode::Enter);
         }
-        // The last order waits for a second press before the dock closes.
-        assert!(w.resource::<Campaign>().dock_armed);
+        // Every order is fitted, and she waits in dock until she is sailed.
+        assert_eq!(w.resource::<Campaign>().fittings_remaining(), 0);
+        assert_eq!(w.resource::<Campaign>().screen(), Screen::Drydock(reason));
         press(w, KeyCode::Enter);
         assert_eq!(w.resource::<Campaign>().screen(), Screen::Chart);
         press(w, KeyCode::Digit3);
@@ -445,7 +850,7 @@ fn helm_mouse_look_drives_render_and_fire_then_releases_to_menus() {
     let clearance = eye.y - w.resource::<seascape::Sea>().height(eye.xz());
     assert!((0.4..1.8).contains(&clearance));
     assert_eq!(w.resource::<Campaign>().elapsed, 0.);
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     assert_eq!(w.resource::<PlayerHelm>().position, Vec2::ZERO);
     assert_eq!(
         w.get::<CursorOptions>(window).unwrap().grab_mode,
@@ -541,13 +946,14 @@ fn helm_mouse_look_drives_render_and_fire_then_releases_to_menus() {
 fn chart_and_telegraph_follow_the_playable_sector() {
     use shipvivor_campaign::EXITS;
     use shipvivor_encounter::SPAWN_STANDOFF;
-    for (stage, seed) in std::iter::once(Stage::IronNarrows)
+    for (stage, seed) in shipvivor_campaign::ANCHORAGES
+        .map(|port| port.stage)
+        .into_iter()
         .chain(EXITS.map(|exit| exit.stage))
         .flat_map(|stage| [TEST_SEED, 2, 3].map(|seed| (stage, seed)))
     {
         let passage = Passage::of(stage);
         let chart = passage.chart(seed);
-        let course = Passage::course(&chart);
         let battle = passage.battle(&chart);
         // Past the first leg the flagship is fitting out, not yet at sea.
         assert!(
@@ -558,18 +964,11 @@ fn chart_and_telegraph_follow_the_playable_sector() {
         );
         assert_eq!(
             battle.flagship(),
-            (stage != Stage::IronNarrows).then_some(shipvivor_encounter::Sortie::Due(
+            (!stage.is_opening()).then_some(shipvivor_encounter::Sortie::Due(
                 shipvivor_encounter::FLAGSHIP_SORTIE
             ))
         );
-        assert!(
-            course
-                .gates()
-                .iter()
-                .map(|g| g.center.length())
-                .fold(0., f32::max)
-                > 390.
-        );
+        assert!(chart.gates.iter().map(|p| p.length()).fold(0., f32::max) > 390.);
         assert!(
             battle
                 .raiders()
@@ -578,8 +977,8 @@ fn chart_and_telegraph_follow_the_playable_sector() {
         );
         for port in battle.ports() {
             assert_eq!(battle.navigable_position(port.berth(), 3.), port.berth());
-            for gate in course.gates() {
-                assert_eq!(battle.navigable_position(gate.center, 15.), gate.center);
+            for point in chart.gates {
+                assert_eq!(battle.navigable_position(point, 15.), point);
             }
         }
     }
@@ -605,7 +1004,7 @@ fn chart_and_telegraph_follow_the_playable_sector() {
     }
     let mut app = headless_game();
     let w = app.world_mut();
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     assert_eq!(w.resource::<PlayerHelm>().order_label(), "HALF AHEAD");
     for _ in 0..5 {
         press(w, KeyCode::KeyS);
@@ -645,6 +1044,82 @@ fn chart_and_telegraph_follow_the_playable_sector() {
 }
 
 #[test]
+fn gun_rings_go_grey_and_arcs_drop_while_the_mark_is_beyond_reach_or_the_guns_train() {
+    use shipvivor_compass::direction;
+    let mut app = headless_game();
+    let w = app.world_mut();
+    start_in_narrows(w);
+    let (at, heading) = {
+        let helm = w.resource::<PlayerHelm>();
+        (helm.position, helm.heading)
+    };
+    // A beam with open water out past the guns' reach, clear of the coast.
+    let open = |w: &World, bearing: f32, range: f32| {
+        let mark = at + direction(bearing) * range;
+        let mut view = ShipView::default();
+        view.center_on(at, mark.extend(0.).xzy());
+        let sight = view.sight(at, w.resource::<Encounter>());
+        sight.point.y < 0.01 && sight.point.xz().distance(mark) < 30.
+    };
+    let bearing = [70., -70., 90., -90., 110., -110., 50., -50.]
+        .map(|degrees: f32| heading + degrees.to_radians())
+        .into_iter()
+        .find(|&bearing| open(w, bearing, 1300.) && open(w, bearing, 350.))
+        .expect("open water on a beam");
+    // The mounts that would draw a shell arc onto the aim point.
+    let arcs = |w: &World| {
+        let (view, battle, guns) = (
+            w.resource::<ShipView>(),
+            w.resource::<Encounter>(),
+            w.resource::<Guns>(),
+        );
+        let aim = match view.main_aim(at, battle, guns.firing, guns.nearest) {
+            Aim::Sight(p) | Aim::Track(p) => p,
+            _ => panic!("the sight lays the guns"),
+        };
+        let round = w.resource::<Campaign>().fittings.round();
+        trajectory::laid(battle, w.resource::<PlayerHelm>(), aim, round).len()
+    };
+    let lay = |w: &mut World, bearing: f32, range: f32, ticks: usize| {
+        let mark = at + direction(bearing) * range;
+        w.resource_mut::<ShipView>()
+            .center_on(at, mark.extend(0.).xzy());
+        for _ in 0..ticks {
+            w.run_schedule(FixedUpdate);
+        }
+        w.run_schedule(Update);
+        assert!(
+            w.resource::<ShipView>()
+                .quarry(w.resource::<Encounter>())
+                .is_none()
+        );
+        let note = w
+            .query_filtered::<&Node, With<gun_sight::RangeNote>>()
+            .single(w)
+            .unwrap()
+            .display;
+        let grey = w
+            .query_filtered::<&TextColor, With<gun_sight::GunLabel>>()
+            .iter(w)
+            .filter(|tint| tint.0 == gun_sight::out_of_range_ink())
+            .count();
+        (note, grey, arcs(w))
+    };
+    // Long enough for the mounts to train round onto the bearing.
+    let (note, grey, drawn) = lay(w, bearing, 1300., 240);
+    assert_eq!(note, Display::Flex);
+    assert!(grey > 0);
+    assert_eq!(drawn, 0);
+    let (note, grey, drawn) = lay(w, bearing, 350., 240);
+    assert_eq!(note, Display::None);
+    assert_eq!(grey, 0);
+    assert!(drawn > 0);
+    // Swung across to the other beam, every mount is still training round.
+    let (_, _, drawn) = lay(w, bearing + std::f32::consts::PI, 350., 3);
+    assert_eq!(drawn, 0);
+}
+
+#[test]
 fn gun_circles_track_distinct_mounts_and_leave_with_the_helm() {
     use shipvivor_encounter::Station;
     let mut app = headless_game();
@@ -655,7 +1130,7 @@ fn gun_circles_track_distinct_mounts_and_leave_with_the_helm() {
             .count()
     };
     assert_eq!(circles(w), 0);
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     w.resource_mut::<ShipView>().bearing = 70_f32.to_radians();
     for _ in 0..155 {
         w.run_schedule(FixedUpdate);
@@ -692,7 +1167,7 @@ fn a_base_with_word_of_the_ship_sounds_its_siren_until_the_voyage_ends() {
     let mut app = headless_game();
     let w = app.world_mut();
     let mut mixer = w.resource::<sound::Soundboard>().claim().unwrap();
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     // Lying 150 m off the quay of the first base, the ship is in plain sight of it.
     let port = &w.resource::<Encounter>().ports()[0];
     let berth = port.body.pos + port.body.forward() * 150.;
@@ -721,11 +1196,212 @@ fn a_base_with_word_of_the_ship_sounds_its_siren_until_the_voyage_ends() {
 }
 
 #[test]
+fn a_spotter_is_heard_by_a_ship_under_its_circuit_and_not_from_far_out_to_sea() {
+    use shipvivor_acoustics::{Mixer, SAMPLE_RATE};
+    /// Sail on for some ticks with the ship held where she is put.
+    fn sail(w: &mut World, mixer: &mut Mixer, ticks: usize, at: impl Fn(&World) -> Vec2) {
+        for _ in 0..ticks {
+            let at = at(w);
+            w.resource_mut::<PlayerHelm>().position = at;
+            w.run_schedule(FixedUpdate);
+            mixer.render(&mut vec![[0.; 2]; (SAMPLE_RATE / 60) as usize]);
+        }
+    }
+    let mut app = headless_game();
+    let w = app.world_mut();
+    let mut mixer = w.resource::<sound::Soundboard>().claim().unwrap();
+    start_in_narrows(w);
+    // Six kilometres out no aeroplane is in earshot.
+    sail(w, &mut mixer, 120, |_| Vec2::splat(-6000.));
+    assert_eq!(mixer.droning(), 0);
+    // Under the first base's spotter its engine is heard, and perhaps the others'.
+    let under = |w: &World| w.resource::<Encounter>().spotters()[0].position;
+    sail(w, &mut mixer, 120, under);
+    assert!(mixer.droning() >= 1);
+    // At the title nothing flies.
+    press(w, KeyCode::Escape);
+    press(w, KeyCode::KeyM);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Title);
+    mixer.render(&mut vec![[0.; 2]; 10 * SAMPLE_RATE as usize]);
+    assert_eq!(mixer.droning(), 0);
+}
+
+#[test]
+fn a_mainland_answers_from_its_open_shore_and_no_stretch_of_it_twice() {
+    use sound::{Disc, open_shore, spaced};
+    let disc = |x: f32, y: f32, radius: f32| Disc {
+        at: Vec2::new(x, y),
+        radius,
+        height: 5.,
+    };
+    // Hills run together along a shore, with a mountain behind them and an islet off it.
+    let hills = (0..=10).map(|n| disc(60. * n as f32, 0., 100.));
+    let (mountain, islet) = (disc(300., 300., 350.), disc(300., -160., 20.));
+    let discs: Vec<Disc> = hills.chain([mountain, islet]).collect();
+    let ship = Vec2::new(300., -260.);
+    let shore = open_shore(ship, &discs);
+    // The mountain's nearest point is under the hills, and so are those of the hills
+    // away to either side, which lean in towards the ship.
+    assert!(!shore.iter().any(|(disc, _)| *disc == mountain));
+    assert!(shore.contains(&(islet, Vec2::new(300., -180.))));
+    assert!(shore.contains(&(discs[5], Vec2::new(300., -100.))));
+    assert!(shore.len() < discs.len() - 3, "{}", shore.len());
+    for (_, face) in &shore {
+        let inside = |other: &Disc| face.distance(other.at) < other.radius - 1.5;
+        assert!(!discs.iter().any(inside), "{face}");
+    }
+    // The nearest answers first, and its neighbours along the same shore do not.
+    let nearest = |(_, face): &(Disc, Vec2)| -face.distance(ship);
+    let kept = spaced(shore.clone(), nearest, 60., 8);
+    assert_eq!(kept[0].0, islet);
+    assert!(
+        kept.len() >= 2 && kept.len() < shore.len(),
+        "{}",
+        kept.len()
+    );
+    for (n, (_, face)) in kept.iter().enumerate() {
+        assert!(kept[..n].iter().all(|taken| taken.1.distance(*face) >= 60.));
+    }
+    // Taken further apart, this little bay is one stretch, and never more than asked.
+    assert_eq!(spaced(shore.clone(), nearest, 120., 8).len(), 1);
+    assert_eq!(spaced(shore, nearest, 0., 3).len(), 3);
+    // Open sea has no shore at all, and one island is its own.
+    assert!(open_shore(ship, &[]).is_empty());
+    assert_eq!(open_shore(ship, &[islet]).len(), 1);
+}
+
+#[test]
+fn an_alerted_base_sends_up_flares_that_come_down_slowly_under_canopies() {
+    let mut app = headless_game();
+    let w = app.world_mut();
+    start_in_narrows(w);
+    let models = |w: &mut World| w.query::<&flares::FlareModel>().iter(w).count();
+    // In plain sight of the first base, 150 m off its quay, the ship is soon reported
+    // and three flares go up from its yard. Word goes round by radio, so the other
+    // bases may send up their own.
+    let port = &w.resource::<Encounter>().ports()[0];
+    let (yard, top) = (port.yard_position(), port.yard_top());
+    let berth = port.body.pos + port.body.forward() * 150.;
+    let all = |w: &World| w.resource::<flares::Flares>().live().len();
+    let here = |w: &World| -> Vec<Vec3> {
+        let live = w.resource::<flares::Flares>().live().iter();
+        let near = live.filter(|flare| flare.position.xz().distance(yard) < 200.);
+        near.map(|flare| flare.position).collect()
+    };
+    let sail = |w: &mut World, ticks: usize, at: Vec2| {
+        for _ in 0..ticks {
+            w.resource_mut::<PlayerHelm>().position = at;
+            w.run_schedule(FixedUpdate);
+        }
+    };
+    assert_eq!(all(w), 0);
+    for _ in 0..300 {
+        sail(w, 1, berth);
+        if here(w).len() == 3 {
+            break;
+        }
+    }
+    assert_eq!(here(w).len(), 3);
+    // Three seconds on they have burst high over the water between base and ship.
+    sail(w, 180, berth);
+    let live = w.resource::<flares::Flares>().live();
+    assert!(live.iter().all(|flare| flare.glow() > 0.99));
+    let burst = here(w);
+    assert!(burst.iter().all(|at| at.y > top + 45.), "{burst:?}");
+    let out: Vec<f32> = burst.iter().map(|at| at.xz().distance(yard)).collect();
+    assert!(out.iter().all(|out| (40. ..170.).contains(out)), "{out:?}");
+    assert!(burst[0].distance(burst[2]) > 20.);
+    // They sink under their canopies at a few metres a second, and each is drawn.
+    sail(w, 120, berth);
+    let fell: Vec<f32> = burst.iter().zip(here(w)).map(|(a, b)| a.y - b.y).collect();
+    assert!(fell.iter().all(|fall| (5. ..9.).contains(fall)), "{fell:?}");
+    w.run_schedule(Update);
+    assert_eq!(models(w), all(w));
+    assert_eq!(w.query::<&PointLight>().iter(w).count(), all(w));
+    // Far out to sea the alarm comes down and no more go up. Those in the air burn out.
+    sail(w, 60 * 34, Vec2::splat(-6000.));
+    assert_eq!(all(w), 0);
+    w.run_schedule(Update);
+    assert_eq!(models(w), 0);
+    assert_eq!(w.query::<&PointLight>().iter(w).count(), 0);
+}
+
+#[test]
+fn the_klaxon_sounds_three_times_when_one_more_module_would_sink_her() {
+    use shipvivor_acoustics::{SAMPLE_RATE, Sound};
+    let mut app = headless_game();
+    let w = app.world_mut();
+    let mut mixer = w.resource::<sound::Soundboard>().claim().unwrap();
+    start_in_narrows(w);
+    // Far out to sea, so that the only damage is what is done here. Returns how many
+    // blasts began.
+    let mut sail = |w: &mut World, ticks: usize| {
+        let (mut blasts, mut sounding) = (0, false);
+        for _ in 0..ticks {
+            w.resource_mut::<PlayerHelm>().position = Vec2::splat(-6000.);
+            w.run_schedule(FixedUpdate);
+            mixer.render(&mut vec![[0.; 2]; (SAMPLE_RATE / 60) as usize]);
+            let now = mixer.making(Sound::Klaxon).0 > 0;
+            blasts += usize::from(now && !sounding);
+            sounding = now;
+        }
+        blasts
+    };
+    assert_eq!(sail(w, 120), 0);
+    // Shells into the forward half of her, a little at a time, until she is critical.
+    for hit in 0..400 {
+        let ship = &mut w.resource_mut::<Campaign>().ship;
+        if ship.in_peril() {
+            break;
+        }
+        ship.strike_hull(2.5 + 5. * (hit % 3) as f32, 4.);
+    }
+    let ship = &w.resource::<Campaign>().ship;
+    assert!(ship.in_peril() && ship.afloat());
+    // Three blasts, a couple of seconds apart, and then it holds its peace a while.
+    assert_eq!(sail(w, 60 * 8), 3);
+    assert!(w.resource::<Campaign>().ship.in_peril());
+    assert_eq!(sail(w, 60 * 8), 0);
+}
+
+#[test]
+fn choosing_a_fitting_sounds_two_notes_while_the_battle_is_still_held() {
+    use shipvivor_acoustics::{SAMPLE_RATE, Sound};
+    let mut app = headless_game();
+    let w = app.world_mut();
+    let mut mixer = w.resource::<sound::Soundboard>().claim().unwrap();
+    start_in_narrows(w);
+    // Two levels earned at once: the first choice leaves the second still to make.
+    w.resource_mut::<Campaign>().experience = 70;
+    for _ in 0..3 {
+        w.run_schedule(FixedUpdate);
+    }
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Refit);
+    // The battle and all its sound are held for the choice.
+    w.run_schedule(Update);
+    let mut heard = vec![[0_f32; 2]; (SAMPLE_RATE / 2) as usize];
+    mixer.render(&mut heard);
+    mixer.render(&mut heard);
+    assert_eq!(mixer.making(Sound::Upgrade).0, 0);
+    assert!(heard.iter().flatten().all(|x| *x == 0.));
+    press(w, KeyCode::Digit1);
+    mixer.render(&mut heard);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Refit);
+    assert_eq!(mixer.making(Sound::Upgrade).0, 1);
+    assert!(heard.iter().flatten().any(|x| x.abs() > 0.05));
+}
+
+#[test]
 fn the_bridge_hears_the_telegraph_answer_and_her_engines_stop() {
     use shipvivor_acoustics::{Mixer, SAMPLE_RATE, Sound};
     use shipvivor_shipyard::Component;
     /// Sail on for some ticks and return the level of what was heard.
-    fn sail(w: &mut World, mixer: &mut Mixer, ticks: usize, mut each: impl FnMut(&mut World)) -> f32 {
+    fn sail(
+        w: &mut World,
+        mixer: &mut Mixer,
+        ticks: usize,
+        mut each: impl FnMut(&mut World),
+    ) -> f32 {
         let mut heard = vec![[0_f32; 2]; ticks * (SAMPLE_RATE / 60) as usize];
         for tick in heard.chunks_mut((SAMPLE_RATE / 60) as usize) {
             each(w);
@@ -738,26 +1414,36 @@ fn the_bridge_hears_the_telegraph_answer_and_her_engines_stop() {
     let mut app = headless_game();
     let w = app.world_mut();
     let mut mixer = w.resource::<sound::Soundboard>().claim().unwrap();
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
+    // She is kept far out to sea, where nobody will find her and start shooting.
+    let alone = |w: &mut World| w.resource_mut::<PlayerHelm>().position = Vec2::splat(-6000.);
     // The order the voyage begins with rings no bell. A new one does, at once.
-    sail(w, &mut mixer, 240, |_| {});
+    sail(w, &mut mixer, 60, alone);
     assert_eq!(mixer.making(Sound::Telegraph).0, 0);
     w.resource_mut::<PlayerHelm>().ring(1);
-    sail(w, &mut mixer, 1, |_| {});
+    sail(w, &mut mixer, 1, alone);
     assert_eq!(mixer.making(Sound::Telegraph).0, 1);
-    let steaming = sail(w, &mut mixer, 240, |_| {});
-    assert_eq!(mixer.making(Sound::Telegraph).0, 0);
+    let steaming = sail(w, &mut mixer, 180, alone);
     // With every engine knocked out and kept out, the machinery is heard to stop.
     let wreck = |w: &mut World| {
+        alone(w);
         let ship = &mut w.resource_mut::<Campaign>().ship;
         let engines: Vec<_> = ship.fitted(Component::Engine).collect();
         for (berth, _) in engines {
             ship.strike_fitting(berth, 1e3);
         }
     };
-    sail(w, &mut mixer, 360, wreck);
-    assert_eq!(w.resource::<Campaign>().ship.propulsion(), 0.);
-    let adrift = sail(w, &mut mixer, 240, wreck);
+    sail(w, &mut mixer, 240, wreck);
+    let out = |(_, state)| state == shipvivor_shipyard::State::Out;
+    assert!(
+        w.resource::<Campaign>()
+            .ship
+            .fitted(Component::Engine)
+            .all(out)
+    );
+    let adrift = sail(w, &mut mixer, 120, wreck);
+    let guns = [Sound::MainGun, Sound::RaiderGun, Sound::ShoreGun];
+    assert!(guns.iter().all(|gun| mixer.making(*gun).0 == 0));
     assert!(adrift < 0.4 * steaming, "{adrift} against {steaming}");
 }
 
@@ -774,7 +1460,8 @@ fn the_bridge_sees_a_gun_flash_before_it_hears_the_report() {
             Sound::ShoreGun,
         ];
         let made = guns.map(|gun| mixer.making(gun));
-        made.iter().fold((0, 0), |sum, n| (sum.0 + n.0, sum.1 + n.1))
+        made.iter()
+            .fold((0, 0), |sum, n| (sum.0 + n.0, sum.1 + n.1))
     }
     /// Let sound run on and return its level.
     fn listen(mixer: &mut Mixer, secs: f32) -> f32 {
@@ -790,7 +1477,7 @@ fn the_bridge_sees_a_gun_flash_before_it_hears_the_report() {
     // At the title only the sea is heard.
     let moored = listen(&mut mixer, 3.);
     assert!(moored > 0.005);
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     w.resource_mut::<ButtonInput<KeyCode>>()
         .press(KeyCode::Space);
     w.run_schedule(PreUpdate);
@@ -968,7 +1655,7 @@ fn x_pins_the_guns_while_the_camera_can_look_astern() {
     use bevy::input::mouse::AccumulatedMouseMotion;
     let mut app = headless_game();
     let w = app.world_mut();
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     let player = w.resource::<PlayerHelm>().position;
     let cruiser = &w.resource::<Encounter>().raiders()[1];
     let id = cruiser.body.id;
@@ -1035,7 +1722,7 @@ fn x_pins_the_guns_while_the_camera_can_look_astern() {
 fn soft_lock_acquires_a_near_miss_at_both_magnifications_and_releases_on_open_water() {
     let mut app = headless_game();
     let w = app.world_mut();
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     let player = w.resource::<PlayerHelm>().position;
     let b = w.resource::<Encounter>();
     let ship = &b.raiders()[1];
@@ -1045,7 +1732,18 @@ fn soft_lock_acquires_a_near_miss_at_both_magnifications_and_releases_on_open_wa
         let mut view = ShipView::default();
         view.zoom = zoom;
         view.center_on(player, center);
-        view.bearing += if zoom == 0. { 0.058 } else { 0.021 };
+        // Miss her to whichever side has open water behind her. Pickets start at one of
+        // several stations, and a miss onto land or ice behind her looks for a battery.
+        let near_miss = if zoom == 0. { 0.058 } else { 0.021 };
+        let on = view.bearing;
+        view.bearing = on + near_miss;
+        if view.sight(player, b).point.y > 0.01 {
+            view.bearing = on - near_miss;
+        }
+        assert!(
+            view.sight(player, b).point.y <= 0.01,
+            "open water behind her"
+        );
         assert!(view.sight(player, b).ship_id.is_none());
         view.update_contact(player, b);
         assert_eq!(view.target(b).map(|r| r.body.id), Some(ship.body.id));
@@ -1059,10 +1757,83 @@ fn soft_lock_acquires_a_near_miss_at_both_magnifications_and_releases_on_open_wa
 }
 
 #[test]
+fn the_scope_drops_the_snap_and_rides_with_the_contact_off_the_reticle() {
+    let mut app = headless_game();
+    let w = app.world_mut();
+    start_in_narrows(w);
+    let size = Vec2::splat(600.);
+    let mark =
+        |r: &shipvivor_encounter::Raider| r.body.pos.extend(r.class.profile().deck * 0.65).xzy();
+    let player = w.resource::<PlayerHelm>().position;
+    let ship = &w.resource::<Encounter>().raiders()[1];
+    let (id, center) = (ship.body.id, mark(ship));
+    let mut view = w.resource_mut::<ShipView>();
+    view.zoom = 1.;
+    view.center_on(player, center);
+    // Off her seaward side: on the other, the reticle comes to rest on the islet behind
+    // her, and from the shore the free sight looks only for harbour guns.
+    view.bearing -= 0.021;
+    w.resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::ShiftLeft);
+    w.run_schedule(PreUpdate);
+    let offset = |w: &World| {
+        let b = w.resource::<Encounter>();
+        let view = w.resource::<ShipView>();
+        let r = view.target(b).expect("the scope keeps her");
+        assert_eq!(r.body.id, id);
+        let at = w.resource::<PlayerHelm>().position;
+        view.viewport_point(at, mark(r), size).unwrap() - size * 0.5
+    };
+    let before = offset(w);
+    assert!(before.length() > 20.);
+
+    let b = w.resource::<Encounter>();
+    let view = w.resource::<ShipView>();
+    let ship = b.ship(id).unwrap();
+    assert!(view.sight(player, b).ship_id.is_none());
+    let Aim::Track(p) = view.main_aim(player, b, false, false) else {
+        panic!("the scope tracks the reticle");
+    };
+    assert_ne!(p, ship.aim_point(player));
+    // On the reticle, out at her range.
+    assert!(
+        view.viewport_point(player, p, size)
+            .unwrap()
+            .distance(size * 0.5)
+            < 0.5
+    );
+    assert!((p.xz().distance(player) - ship.body.pos.distance(player)).abs() < 3.);
+    // Space still lays the guns on her.
+    assert!(
+        matches!(view.main_aim(player, b, false, true), Aim::Sight(q) if q == ship.aim_point(player))
+    );
+
+    let (start, bearing) = (ship.body.pos, view.bearing);
+    for _ in 0..200 {
+        w.run_schedule(FixedUpdate);
+    }
+    let after = offset(w);
+    assert!(after.distance(before) < 1.5, "{before} drifted to {after}");
+    let ship = w.resource::<Encounter>().ship(id).unwrap();
+    assert!(ship.body.pos.distance(start) > 5.);
+    assert_ne!(w.resource::<ShipView>().bearing, bearing);
+
+    // Out of the scope the free sight snaps onto her again.
+    w.resource_mut::<ButtonInput<KeyCode>>()
+        .release(KeyCode::ShiftLeft);
+    w.run_schedule(PreUpdate);
+    let b = w.resource::<Encounter>();
+    let view = w.resource::<ShipView>();
+    let at = w.resource::<PlayerHelm>().position;
+    let ship = view.target(b).unwrap();
+    assert!(matches!(view.main_aim(at, b, false, false), Aim::Track(p) if p == ship.aim_point(at)));
+}
+
+#[test]
 fn torpedo_mode_click_launches_once_and_bore_cards_resize_the_deck_models() {
     let mut app = headless_game();
     let w = app.world_mut();
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     let scales = |w: &mut World| {
         w.query_filtered::<(&Transform, &Visibility), With<scene::Turret>>()
             .iter(w)
@@ -1116,12 +1887,17 @@ fn choosing_turret_cards_refits_deck_models_sight_pips_and_battery_board() {
     use shipvivor_encounter::Station;
     let mut app = headless_game();
     let w = app.world_mut();
-    press(w, KeyCode::Enter);
-    for (stores, key, tubes) in [
-        (3, KeyCode::Digit3, 2),
-        (4, KeyCode::Digit2, 3),
-        (5, KeyCode::Digit2, 4),
+    start_in_narrows(w);
+    for (stores, between, key, tubes) in [
+        (3, 0, KeyCode::Digit3, 2),
+        (4, 0, KeyCode::Digit2, 3),
+        // Three more fittings bring the main battery's hand round again.
+        (5, 3, KeyCode::Digit2, 4),
     ] {
+        for _ in 0..between {
+            let fit = &mut w.resource_mut::<Campaign>().fittings;
+            *fit = fit.with(shipvivor_campaign::Card::Turbines);
+        }
         w.resource_mut::<Campaign>().tick(
             0.,
             Objectives {
@@ -1201,7 +1977,7 @@ fn click_fires_one_barrel_double_click_the_rest_and_holding_ripples() {
     }
     let mut app = headless_game();
     let w = app.world_mut();
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     press(w, KeyCode::KeyX);
     assert_eq!(
         wait(w, 4.),
@@ -1265,7 +2041,7 @@ fn ap_card_unlocks_q_and_the_secondary_hand_mounts_more_wing_guns() {
     use shipvivor_encounter::Ammo;
     let mut app = headless_game();
     let w = app.world_mut();
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     let texts = |w: &mut World| -> Vec<String> {
         w.query::<&Text>().iter(w).map(|t| t.0.clone()).collect()
     };
@@ -1345,13 +2121,13 @@ fn both_dock_sections_move_the_after_gun_and_sail_on_the_longer_hull() {
 
     let mut app = headless_game();
     let w = app.world_mut();
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     let stock = geometry(w);
     w.resource_mut::<Campaign>().tick_sector(
         1.,
         Objectives {
             kills: 4,
-            gates: 3,
+            destroyed_drydock: true,
             crates: 0,
         },
         0,
@@ -1359,11 +2135,14 @@ fn both_dock_sections_move_the_after_gun_and_sail_on_the_longer_hull() {
     );
     w.run_schedule(Update);
     assert!(w.query::<&Text>().iter(w).any(|t| t.as_str() == "40 m"));
-    // Selecting the hull at the bow and choosing a reserve bay previews the slipway,
-    // even though the ship still measures 40 m.
-    let reserve = shipvivor_campaign::DockJob::Section(shipvivor_campaign::DockModule::Reserve);
-    visit(w, 0);
-    choose(w, reserve);
+    // A reserve bay dropped ahead of the after turret previews the slipway, even
+    // though the ship still measures 40 m.
+    let reserve = shipvivor_campaign::DockJob::Insert {
+        at: w.resource::<Campaign>().default_gap(),
+        module: shipvivor_campaign::DockModule::Reserve,
+    };
+    draft(w, reserve);
+    assert_eq!(w.resource::<Campaign>().dock_job(), Some(reserve));
     assert_eq!(w.resource::<Campaign>().ship.design().length(), 40.);
     assert!((geometry(w).1 - stock.1 - 15.).abs() < 0.001);
     press(w, KeyCode::Escape);
@@ -1380,10 +2159,14 @@ fn both_dock_sections_move_the_after_gun_and_sail_on_the_longer_hull() {
         2
     );
     // Commit the third section and a turbine refit on the engine bay. Both persist
-    // across departure.
-    choose(w, reserve);
+    // across departure. The new bay is selected once it is fitted.
+    draft(w, reserve);
     press(w, KeyCode::Enter);
     assert_eq!(w.resource::<Campaign>().ship.design().length(), 45.);
+    let shipvivor_campaign::DockJob::Insert { at, .. } = reserve else {
+        unreachable!()
+    };
+    assert_eq!(w.resource::<Campaign>().dock_module, at);
     visit(w, 3);
     choose(
         w,
@@ -1403,7 +2186,7 @@ fn both_dock_sections_move_the_after_gun_and_sail_on_the_longer_hull() {
 
     press(w, KeyCode::Escape);
     press(w, KeyCode::KeyM);
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     assert_eq!(geometry(w), stock);
     assert_eq!(w.query::<&damage_control::Cell>().iter(w).count(), 6);
 }
@@ -1412,7 +2195,7 @@ fn both_dock_sections_move_the_after_gun_and_sail_on_the_longer_hull() {
 fn mission_clock_and_industry_bearings_remain_visible_in_the_last_minute() {
     let mut app = headless_game();
     let w = app.world_mut();
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     w.resource_mut::<Campaign>().elapsed = 540.2;
     w.run_schedule(Update);
     let readouts: Vec<_> = w
@@ -1449,19 +2232,19 @@ fn yard_controls_take_a_mixed_battery_to_sea() {
 
     let mut app = headless_game();
     let w = app.world_mut();
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     w.resource_mut::<Campaign>().tick_sector(
         1.,
         Objectives {
             kills: 4,
-            gates: 3,
-            crates: 3,
+            destroyed_drydock: true,
+            crates: 8,
         },
         0,
         true,
     );
     w.run_schedule(Update);
-    assert_eq!(w.resource::<Campaign>().fittings_remaining(), 3);
+    assert_eq!(w.resource::<Campaign>().fittings_remaining(), 4);
     // The yard opens on the earned reserve bay and previews nothing until a refit is
     // chosen. A centre turret heads its list.
     let reserve = w.resource::<Campaign>().turret_bay().unwrap();
@@ -1479,19 +2262,22 @@ fn yard_controls_take_a_mixed_battery_to_sea() {
     visit(w, 1);
     choose(w, DockJob::Calibre(18));
     press(w, KeyCode::Enter);
-    assert_eq!(w.resource::<Campaign>().fittings_remaining(), 3);
+    assert_eq!(w.resource::<Campaign>().fittings_remaining(), 4);
     assert_eq!(
         w.resource::<Campaign>().fittings.round().calibre_inches(),
         4.
     );
 
-    // The hull is widened from its bow.
-    visit(w, 0);
-    choose(w, DockJob::WidenBeam);
-    let beam = w.resource::<Campaign>().ship.design().beam();
-    assert!(w.resource::<Campaign>().display_design().beam() > beam);
-    press(w, KeyCode::Enter);
-    assert!(w.resource::<Campaign>().ship.design().beam() > beam);
+    // The hull is widened from the hull panel, one step at a time.
+    for _ in 0..2 {
+        draft(w, DockJob::WidenBeam);
+        let beam = w.resource::<Campaign>().ship.design().beam();
+        assert!(w.resource::<Campaign>().display_design().beam() > beam);
+        press(w, KeyCode::Enter);
+        assert!(w.resource::<Campaign>().ship.design().beam() > beam);
+        assert_eq!(w.resource::<Campaign>().dock_job(), None);
+    }
+    assert_eq!(w.resource::<Campaign>().ship.design().beam(), 9.5);
 
     visit(w, 1);
     choose(w, DockJob::Move { from: 1, to: 2 });
@@ -1535,13 +2321,13 @@ fn yard_controls_take_a_mixed_battery_to_sea() {
     press(w, KeyCode::Enter);
     // The wing pair offers the bore for every turret too.
     choose(w, DockJob::Calibre(18));
-    // The last order asks twice before the dock closes.
+    // The last order is fitted at once, and she sails on the next press.
     press(w, KeyCode::Enter);
     assert!(matches!(
         w.resource::<Campaign>().screen(),
         Screen::Drydock(_)
     ));
-    assert!(w.resource::<Campaign>().dock_armed);
+    assert_eq!(w.resource::<Campaign>().fittings_remaining(), 0);
     press(w, KeyCode::Enter);
     assert_eq!(w.resource::<Campaign>().screen(), Screen::Chart);
     press(w, KeyCode::Digit1);
@@ -1570,12 +2356,12 @@ fn yard_controls_take_a_mixed_battery_to_sea() {
 }
 
 #[test]
-fn a_one_order_yard_adds_a_turret_after_asking_twice() {
+fn a_one_order_yard_adds_a_turret_that_stays_fitted_until_she_sails() {
     use shipvivor_campaign::{DeckModule, DockJob};
 
     let mut app = headless_game();
     let w = app.world_mut();
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     w.resource_mut::<Campaign>()
         .tick(600., Objectives::default(), 0);
     w.run_schedule(Update);
@@ -1590,16 +2376,25 @@ fn a_one_order_yard_adds_a_turret_after_asking_twice() {
         with: DeckModule::WingBattery,
     };
     choose(w, split);
+    // The last order is fitted on the first press, like any other.
     press(w, KeyCode::Enter);
-    assert!(w.resource::<Campaign>().dock_armed);
-    press(w, KeyCode::ArrowLeft);
-    assert!(!w.resource::<Campaign>().dock_armed);
-    choose(w, split);
-    press(w, KeyCode::Enter);
+    assert_eq!(w.resource::<Campaign>().fittings_remaining(), 0);
+    let turrets = |w: &World| w.resource::<Campaign>().ship.design().gun_stations().len();
+    assert_eq!(turrets(w), 3);
+    // Looking over another section leaves the work done, and she stays in dock.
+    press(w, KeyCode::BracketRight);
+    assert_eq!(w.resource::<Campaign>().dock_module, 2);
+    assert_eq!(turrets(w), 3);
     assert!(matches!(
         w.resource::<Campaign>().screen(),
         Screen::Drydock(_)
     ));
+    // The spent orders give way to the Sail button, and Enter sails.
+    assert!(
+        w.query::<&Text>()
+            .iter(w)
+            .any(|t| t.contains("Sail  [Enter]"))
+    );
     press(w, KeyCode::Enter);
     let run = w.resource::<Campaign>();
     assert_eq!(run.screen(), Screen::Chart);
@@ -1610,7 +2405,7 @@ fn a_one_order_yard_adds_a_turret_after_asking_twice() {
 fn a_spotter_contact_posts_a_bridge_alert_then_clears_the_marker() {
     let mut app = headless_game();
     let w = app.world_mut();
-    press(w, KeyCode::Enter);
+    start_in_narrows(w);
     let plane = w.resource::<Encounter>().spotters()[0].position;
     let at = w
         .resource::<Encounter>()

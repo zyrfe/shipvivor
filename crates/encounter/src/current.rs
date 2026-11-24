@@ -116,6 +116,7 @@ impl Currents {
         if set.flow.length_squared() < 1e-8 {
             return Self::slack();
         }
+        let charted = (lo, hi);
         let (lo, hi) = (lo - MARGIN, hi + MARGIN);
         let eddies = lee_eddies(&set, land);
         let mut solved: Option<Level> = None;
@@ -131,16 +132,19 @@ impl Currents {
         let level = solved.expect("three levels were solved");
         let mut flow = level.velocities(&set);
         // Narrow straits can run hard. Ease the fastest water toward the limit smoothly,
-        // leaving the gentler stream as solved.
+        // leaving the gentler stream as solved. The peak is taken over the charted water,
+        // not the margin, where a coast runs out of the grid.
         let knee = MAX_CURRENT * 0.7;
         let mut peak: f32 = 0.;
-        for v in &mut flow {
+        for (n, v) in flow.iter_mut().enumerate() {
             let speed = v.length();
             if speed > knee {
                 let room = MAX_CURRENT - knee;
                 *v *= (knee + room * ((speed - knee) / room).tanh()) / speed;
             }
-            peak = peak.max(v.length());
+            if level.node(n).cmpge(charted.0).all() && level.node(n).cmple(charted.1).all() {
+                peak = peak.max(v.length());
+            }
         }
         Self {
             set,
@@ -189,11 +193,21 @@ impl Currents {
     }
 }
 
-/// A vortex pair behind each island of any size, turning so the water between them runs
-/// back toward the shore.
+/// A vortex pair behind each island of any size that stands alone, turning so the water
+/// between them runs back toward the shore. Land that runs into other land, such as the
+/// pieces of a coast, sheds no eddies of its own.
 fn lee_eddies(set: &Set, land: &[(Vec2, f32)]) -> Vec<Eddy> {
     let mut eddies = vec![];
-    for &(centre, radius) in land.iter().filter(|(_, r)| *r >= EDDY_RADIUS) {
+    let alone = |k: usize| {
+        let (centre, radius) = land[k];
+        land.iter()
+            .enumerate()
+            .all(|(j, &(c, r))| j == k || centre.distance(c) >= radius + r)
+    };
+    for &(centre, radius) in (0..land.len())
+        .filter(|&k| land[k].1 >= EDDY_RADIUS && alone(k))
+        .map(|k| &land[k])
+    {
         let stream = set.velocity(centre);
         let speed = stream.length();
         let down = stream / speed.max(1e-6);
@@ -279,15 +293,36 @@ impl Level {
         let mut source = vec![0.; count];
         let mut dry = vec![false; count];
         for n in 0..count {
-            let p = node(n);
-            open[n] = set.stream(p);
+            open[n] = set.stream(node(n));
             let (i, j) = (n % cols, n / cols);
             if i == 0 || j == 0 || i == cols - 1 || j == rows - 1 {
                 kind[n] = FRAME;
-            } else if land.iter().any(|&(c, r)| p.distance_squared(c) < r * r) {
-                dry[n] = true;
-            } else {
-                source[n] = cell * cell * eddies.iter().map(|e| e.vorticity(p)).sum::<f32>();
+            }
+        }
+        // The nodes within `reach` of a point, a square of them at a time. A coast of
+        // many pieces is marked piece by piece, not node by node against every piece.
+        let near = |centre: Vec2, reach: f32| {
+            let low = ((centre - reach - lo) / cell).floor().max(Vec2::ZERO);
+            let high = ((centre + reach - lo) / cell).ceil();
+            let (i0, j0) = (low.x as usize, low.y as usize);
+            let (i1, j1) = (
+                (high.x.max(0.) as usize).min(cols - 1),
+                (high.y.max(0.) as usize).min(rows - 1),
+            );
+            (j0..=j1).flat_map(move |j| (i0..=i1).map(move |i| j * cols + i))
+        };
+        for &(c, r) in land {
+            for n in near(c, r) {
+                if kind[n] != FRAME && node(n).distance_squared(c) < r * r {
+                    dry[n] = true;
+                }
+            }
+        }
+        for eddy in eddies {
+            for n in near(eddy.centre, eddy.width * 4.) {
+                if kind[n] != FRAME && !dry[n] {
+                    source[n] += cell * cell * eddy.vorticity(node(n));
+                }
             }
         }
         let step = |n: usize, (di, dj): (i32, i32)| {

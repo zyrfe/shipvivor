@@ -1,5 +1,5 @@
 //! One hull built to a design, and where each hit goes.
-use crate::design::{Berth, Component, Design, Fault, Module, Slot};
+use crate::design::{Berth, Component, Design, Fault, Module, Protection, Slot};
 use crate::repair::Task;
 use std::sync::Arc;
 
@@ -13,6 +13,46 @@ const BLAST: f32 = 0.5;
 const FLOOD_DRAG: f32 = 0.5;
 /// Seconds of reserve power regained for each second an engine runs.
 const RECHARGE: f32 = 0.5;
+/// Strength of each stretch of stock side plating, as a share of its module's structure.
+const PLATE: f32 = 0.5;
+/// A hit where the plating is gone does this multiple of its damage. Sound plating
+/// holds it to the damage itself, and worn plating to a share of the difference.
+const BARE: f32 = 2.;
+/// Share of a round's damage that wears the plate when the plate turns it aside.
+const SCUFF: f32 = 0.25;
+/// The bays stand this far inside their module's bulkheads, fore and aft, in metres.
+const BAY_INSET: f32 = 0.6;
+/// Share of their module's beam the bays fill, about the centreline. The rest is
+/// side passages, sponsons and coal bunkers.
+const BAY_BEAM: f32 = 0.6;
+
+/// One beam of the hull.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Side {
+    Port,
+    Starboard,
+}
+
+/// One stretch of side plating on a module: a beam, and the fore or after half.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Panel {
+    pub side: Side,
+    pub fore: bool,
+}
+impl Panel {
+    pub const ALL: [Self; 4] = [
+        Self::new(Side::Port, true),
+        Self::new(Side::Port, false),
+        Self::new(Side::Starboard, true),
+        Self::new(Side::Starboard, false),
+    ];
+    pub const fn new(side: Side, fore: bool) -> Self {
+        Self { side, fore }
+    }
+    fn index(self) -> usize {
+        2 * usize::from(self.side == Side::Starboard) + usize::from(!self.fore)
+    }
+}
 
 /// How well a fitted component is working.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +82,54 @@ pub enum Loss {
     Foundered,
 }
 
+/// How far into her a blow got, which decides whether it reaches the engines and
+/// magazines in her bays. The module it lands on takes the damage either way.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Reach {
+    /// Every bay in the module, as a ram, an iceberg or a bomb through the deck does.
+    Bays,
+    /// The bays a round's path crosses below the deck, from where it went in to where
+    /// it burst, each end in metres aft of the bow tip and to starboard. `None` is a
+    /// round that burst above the deck, in a funnel or the bridge, and reached no bay.
+    Track(Option<[(f32, f32); 2]>),
+}
+
+impl Reach {
+    /// Whether the blow gets into the bays of `module`: the middle of its beam, clear
+    /// of the bulkheads at either end.
+    fn reaches(self, design: &Design, module: usize) -> bool {
+        let Self::Track(track) = self else {
+            return true;
+        };
+        let Some([from, to]) = track else {
+            return false;
+        };
+        let (fore, end) = design.span(module);
+        let half = 0.5 * BAY_BEAM * design.module_beam(module);
+        crosses(from, to, (fore + BAY_INSET, -half), (end - BAY_INSET, half))
+    }
+}
+
+/// Whether the segment from `a` to `b` passes through the box from `low` to `high`.
+fn crosses(a: (f32, f32), b: (f32, f32), low: (f32, f32), high: (f32, f32)) -> bool {
+    let (mut enter, mut leave) = (0_f32, 1_f32);
+    for (start, delta, min, max) in [
+        (a.0, b.0 - a.0, low.0, high.0),
+        (a.1, b.1 - a.1, low.1, high.1),
+    ] {
+        if delta.abs() < 1e-6 {
+            if start < min || start > max {
+                return false;
+            }
+        } else {
+            let (t0, t1) = ((min - start) / delta, (max - start) / delta);
+            enter = enter.max(t0.min(t1));
+            leave = leave.min(t0.max(t1));
+        }
+    }
+    enter <= leave
+}
+
 pub(crate) struct Gear {
     pub health: f32,
     pub max: f32,
@@ -49,13 +137,17 @@ pub(crate) struct Gear {
     pub out: bool,
 }
 
-/// The condition of one module.
+/// The condition of one module: the watertight space inside, and the four stretches
+/// of side plating over it, each worn by the hits that land on it.
 pub struct Compartment {
     pub(crate) structure: f32,
     pub(crate) ceiling: f32,
     pub(crate) max: f32,
     pub(crate) wrecked: bool,
     pub(crate) gear: Vec<Gear>,
+    /// Strength left in each panel, in [`Panel::index`] order.
+    pub(crate) plates: [f32; 4],
+    pub(crate) plate_max: f32,
 }
 impl Compartment {
     fn new(design: &Design, index: usize) -> Self {
@@ -72,12 +164,32 @@ impl Compartment {
                 }
             })
             .collect();
+        let plate = design.plate_strength(index);
         Self {
             structure: max,
             ceiling: max,
             max,
             wrecked: false,
             gear,
+            plates: [plate; 4],
+            plate_max: plate,
+        }
+    }
+
+    /// Plating left on one panel, from 0 to 1.
+    pub fn plating(&self, panel: Panel) -> f32 {
+        if self.plate_max > 0. {
+            self.plates[panel.index()] / self.plate_max
+        } else {
+            0.
+        }
+    }
+
+    /// Mend every panel by `share` of its full strength.
+    pub(crate) fn mend_plates(&mut self, share: f32) {
+        let max = self.plate_max;
+        for plate in &mut self.plates {
+            *plate = (*plate + share * max).min(max);
         }
     }
 
@@ -99,6 +211,13 @@ impl Compartment {
     /// Structure left, from 0 to 1.
     pub fn soundness(&self) -> f32 {
         self.structure / self.max
+    }
+}
+
+impl Design {
+    /// Strength of each of the four stretches of side plating over one module.
+    pub fn plate_strength(&self, module: usize) -> f32 {
+        PLATE * self.plating * self.module_structure(module)
     }
 }
 
@@ -149,6 +268,32 @@ impl Ship {
 
     pub fn design(&self) -> &Arc<Design> {
         &self.design
+    }
+
+    /// Refit her plating and harden her fittings, at sea or in the dock. Every panel
+    /// and component keeps the share of its strength it had left, so a knocked-out
+    /// fitting stays out until it is mended.
+    pub fn protect(&mut self, protection: Protection) {
+        if self.design.protection() == protection {
+            return;
+        }
+        Arc::make_mut(&mut self.design).protect(protection);
+        for (module, hold) in self.holds.iter_mut().enumerate() {
+            let plate = self.design.plate_strength(module);
+            let rescale = |now: f32, old: f32, new: f32| {
+                if old > 0. { now * new / old } else { new }
+            };
+            for panel in &mut hold.plates {
+                *panel = rescale(*panel, hold.plate_max, plate);
+            }
+            hold.plate_max = plate;
+            let fit = &self.design.modules()[module].fit;
+            for (gear, component) in hold.gear.iter_mut().zip(fit) {
+                let max = component.health(hold.max, &self.design);
+                gear.health = rescale(gear.health, gear.max, max);
+                gear.max = max;
+            }
+        }
     }
 
     pub fn widen(&mut self, beam_metres: f32) {
@@ -371,11 +516,83 @@ impl Ship {
         !self.foundered && wrecked + largest >= self.design.sinks_at * whole - 1e-3
     }
 
-    /// A penetrating hit on the hull, `aft` metres behind the bow tip.
+    /// The module and stretch of plating over a point on the hull, `aft` metres behind
+    /// the bow tip and `abeam` metres to starboard of the centreline (negative to port).
+    pub fn panel_at(&self, aft: f32, abeam: f32) -> (usize, Panel) {
+        let module = self.design.module_at(aft);
+        let (fore, end) = self.design.span(module);
+        let side = if abeam < 0. {
+            Side::Port
+        } else {
+            Side::Starboard
+        };
+        (module, Panel::new(side, aft < 0.5 * (fore + end)))
+    }
+
+    /// A shell into her side, `aft` metres behind the bow tip and `abeam` metres to
+    /// starboard (negative to port).
+    ///
+    /// `calibre` is the round's width in inches, or `None` for a blow no plate can
+    /// turn, such as a ram or a bomb through the deck. A round no wider than the plate
+    /// left on the panel it lands on glances off: it does no harm and only scuffs the
+    /// plate. A sound panel turns rounds up to the design's full thickness, and one
+    /// worn to half turns rounds up to half of it, so heavy guns open the way for light
+    /// ones.
+    ///
+    /// Damage is what a round that gets through does against sound plate. The plate is
+    /// worn by every blow that gets through, and the more worn it is the more gets
+    /// through, up to twice the damage once it is gone. Fire kept on one spot tells,
+    /// and a fresh beam turned to the enemy starts over. What gets through reaches the
+    /// module as [`Ship::strike_hull`] does, bays and all.
+    pub fn strike_side(
+        &mut self,
+        aft: f32,
+        abeam: f32,
+        damage: f32,
+        calibre: Option<f32>,
+    ) -> Vec<Loss> {
+        self.strike_into(aft, abeam, damage, calibre, Reach::Bays)
+    }
+
+    /// As [`Ship::strike_side`], for a blow that got only as far into her as `reach`.
+    /// The module takes what gets through the plating, but the engines and magazines
+    /// in its bays are harmed only when the blow reaches them.
+    pub fn strike_into(
+        &mut self,
+        aft: f32,
+        abeam: f32,
+        damage: f32,
+        calibre: Option<f32>,
+        reach: Reach,
+    ) -> Vec<Loss> {
+        if self.foundered || damage <= 0. {
+            return Vec::new();
+        }
+        let (module, panel) = self.panel_at(aft, abeam);
+        let thickness = self.design.thickness;
+        let hold = &mut self.holds[module];
+        let left = hold.plating(panel);
+        let plate = &mut hold.plates[panel.index()];
+        if calibre.is_some_and(|calibre| calibre <= thickness * left) {
+            *plate = (*plate - SCUFF * damage).max(0.);
+            return Vec::new();
+        }
+        *plate = (*plate - damage).max(0.);
+        self.strike_reaching(aft, damage * (1. + (BARE - 1.) * (1. - left)), reach)
+    }
+
+    /// A penetrating hit on the module `aft` metres behind the bow tip, for just the
+    /// damage given: plating plays no part. [`Ship::strike_side`] works out a shell
+    /// into her side from the plating it lands on.
     ///
     /// The module there takes the damage, and so does everything in its bays. A
+    /// round's path decides which bays it reaches instead: see [`Ship::strike_into`]. A
     /// module that is already wrecked passes half of it to the modules on each side.
     pub fn strike_hull(&mut self, aft: f32, damage: f32) -> Vec<Loss> {
+        self.strike_reaching(aft, damage, Reach::Bays)
+    }
+
+    fn strike_reaching(&mut self, aft: f32, damage: f32, reach: Reach) -> Vec<Loss> {
         let mut losses = Vec::new();
         if self.foundered || damage <= 0. {
             return losses;
@@ -390,10 +607,11 @@ impl Ship {
                 .chain((module + 1..self.holds.len()).find(sound))
                 .collect();
             for &next in &beside {
-                self.hurt(next, damage * SPILL / beside.len() as f32, &mut losses);
+                let spilt = damage * SPILL / beside.len() as f32;
+                self.hurt(next, spilt, reach, &mut losses);
             }
         } else {
-            self.hurt(module, damage, &mut losses);
+            self.hurt(module, damage, reach, &mut losses);
         }
         self.settle(&mut losses);
         losses
@@ -418,7 +636,8 @@ impl Ship {
         losses
     }
 
-    fn hurt(&mut self, module: usize, damage: f32, losses: &mut Vec<Loss>) {
+    fn hurt(&mut self, module: usize, damage: f32, reach: Reach, losses: &mut Vec<Loss>) {
+        let reached = reach.reaches(&self.design, module);
         let hold = &mut self.holds[module];
         if hold.wrecked {
             return;
@@ -429,7 +648,7 @@ impl Ship {
         let mut blown = false;
         let fit = &self.design.modules()[module].fit;
         for (index, (gear, component)) in hold.gear.iter_mut().zip(fit).enumerate() {
-            if component.slot() != Slot::Bay || gear.out {
+            if component.slot() != Slot::Bay || gear.out || !reached {
                 continue;
             }
             gear.health = (gear.health - damage).max(0.);
@@ -460,7 +679,7 @@ impl Ship {
             .flatten()
         {
             if next < self.holds.len() {
-                self.hurt(next, blast, losses);
+                self.hurt(next, blast, Reach::Bays, losses);
             }
         }
     }

@@ -71,6 +71,14 @@ fn wing(mesh: &mut Facets, half_span: f32, y: f32, z: f32, chord: f32, color: Co
 }
 
 pub fn plane() -> Mesh {
+    airframe(false)
+}
+
+pub fn raider() -> Mesh {
+    airframe(true)
+}
+
+fn airframe(attack: bool) -> Mesh {
     let mut m = Facets::default();
     let v = Vec3::new;
     skin(
@@ -101,8 +109,12 @@ pub fn plane() -> Mesh {
             (1.75, 0.49, 0.45, 0.17, SEA),
         ],
     );
-    wing(&mut m, 8.6, 2.05, -2.4, 2.8, GOLD);
-    wing(&mut m, 7.25, -0.68, -1.76, 2.65, CANVAS);
+    if attack {
+        wing(&mut m, 8.2, -0.30, -2.1, 3.25, RED);
+    } else {
+        wing(&mut m, 8.6, 2.05, -2.4, 2.8, GOLD);
+        wing(&mut m, 7.25, -0.68, -1.76, 2.65, CANVAS);
+    }
     wing(&mut m, 3.05, 0.42, 4.13, 1.75, SEA);
     for x in [-0.09, 0.09] {
         let mut rudder = [
@@ -119,8 +131,8 @@ pub fn plane() -> Mesh {
     for side in [-1., 1.] {
         // Roundels sit on the outer panels, visible from the deck as well as from above.
         for (span, height, z, normal) in [
-            (5.20, 2.38, -1.24, Vec3::Y),
-            (4.6, -0.60, -0.72, Vec3::NEG_Y),
+            (5.20, if attack { 0.01 } else { 2.38 }, -1.24, Vec3::Y),
+            (4.6, if attack { -0.22 } else { -0.60 }, -0.72, Vec3::NEG_Y),
         ] {
             let mut center = v(side * span, height, z);
             for (radius, paint) in [(0.72, INK), (0.55, CANVAS), (0.31, RED)] {
@@ -150,6 +162,11 @@ pub fn plane() -> Mesh {
                 INK,
             );
         }
+        if attack {
+            let muzzle = v(side * 2.45, -0.24, -3.2);
+            m.tube(muzzle, muzzle + Vec3::Z * 1.8, 0.16, 0.18, INK);
+            continue;
+        }
         for x in [side * 2.45, side * 5.85] {
             let foot = v(x, -0.49, 0.11);
             m.tube(foot, v(x + 0.25 * side, 2.25, -1.76), 0.09, 0.09, INK);
@@ -159,6 +176,10 @@ pub fn plane() -> Mesh {
     m.finish()
 }
 pub const HUB: Vec3 = Vec3::new(0., 0., -5.50);
+/// The model is 17 m across the wings, which beside a 30 m ship is a giant. A base's
+/// spotter is drawn at this share of that: under 6 m across and 4 m long, which would
+/// sit on the 7 m quarterdeck of a battleship with room either side.
+pub const ALOFT: f32 = 0.34;
 pub fn propeller() -> Mesh {
     let mut m = Facets::default();
     for i in 0..3 {

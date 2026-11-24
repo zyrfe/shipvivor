@@ -1,6 +1,6 @@
 //! Water-level launch sectors and target-relative markings on the bridge sight.
 use crate::{
-    camera::ShipView,
+    camera::{Quarry, ShipView},
     scene::Facets,
     state::{Campaign, Encounter, Guns, PlayerHelm, Screen},
 };
@@ -215,12 +215,12 @@ pub fn spawn(cmd: &mut Commands, root: Entity, contact_icon: Handle<Image>) {
         }
     }
 }
-const CONTACT_SIZE: Vec2 = Vec2::new(17., 12.);
+pub(crate) const CONTACT_SIZE: Vec2 = Vec2::new(17., 12.);
 const CONTACT_GAP: f32 = 22.;
 
 /// Keep the entire triangle above the projected, wave-tilted ship. At the edge
 /// of the lens, only show a bearing arrow once the hull is fully out of view.
-fn contact_marker(
+pub(crate) fn contact_marker(
     view: &ShipView,
     player: Vec2,
     size: Vec2,
@@ -228,11 +228,34 @@ fn contact_marker(
     hull: &shipvivor_encounter::Hull,
     masthead: f32,
 ) -> Option<(Vec2, Rot2)> {
+    let plan = Rect::new(-hull.radius, -hull.bow, hull.radius, hull.stern);
+    marker_over(view, player, size, pose, plan, masthead)
+}
+/// The same triangle over a harbour gun, from the foot of her plinth to her roof.
+pub(crate) fn battery_marker(
+    view: &ShipView,
+    player: Vec2,
+    size: Vec2,
+    at: Vec2,
+) -> Option<(Vec2, Rot2)> {
+    let plan = Rect::from_center_half_size(Vec2::ZERO, Vec2::splat(Quarry::GUN_RADIUS));
+    let pose = Transform::from_xyz(at.x, 0., at.y);
+    marker_over(view, player, size, pose, plan, Quarry::GUN_TOP)
+}
+/// A box standing on the water: `plan` spans starboard and astern, and `top` is its height.
+fn marker_over(
+    view: &ShipView,
+    player: Vec2,
+    size: Vec2,
+    pose: Transform,
+    plan: Rect,
+    top: f32,
+) -> Option<(Vec2, Rot2)> {
     let mut bounds = Rect::EMPTY;
     let mut projected = 0;
-    for x in [-hull.radius, hull.radius] {
-        for z in [-hull.bow, hull.stern] {
-            for y in [0., masthead] {
+    for x in [plan.min.x, plan.max.x] {
+        for z in [plan.min.y, plan.max.y] {
+            for y in [0., top] {
                 let point = pose.transform_point(Vec3::new(x, y, z));
                 if let Some(p) = view.viewport_point(player, point, size) {
                     bounds = bounds.union_point(p);
@@ -283,30 +306,39 @@ pub fn update_marks(
     let (helm, view, battle) = navigation;
     let (run, guns) = equipment;
     let size = window.size() / scale.0;
-    let selected = view.target(&battle);
+    let selected = view.quarry(&battle);
+    // The lead and the range ticks are for a ship, measured off her middle.
+    let ship = view.target(&battle).map(|r| {
+        let profile = r.class.profile();
+        let center = r.body.pos.extend(profile.deck * 0.7).xzy();
+        (
+            r,
+            profile,
+            center,
+            view.project_mark(helm.position, center, size),
+        )
+    });
     let (kit, sea) = scenery;
     for (kind, mut node, image, mut transform) in &mut marks {
         node.display = Display::None;
         if size.min_element() < 32. {
             continue;
         }
-        let Some(r) = selected else {
+        let Some(quarry) = selected else {
             continue;
         };
-        let profile = r.class.profile();
-        let center = r.body.pos.extend(profile.deck * 0.7).xzy();
-        let (p, edge) = view.project_mark(helm.position, center, size);
-        let pos = match kind {
-            Mark::Contact => {
-                let pose = sea.float(r.body.pos, r.body.heading, &profile.hull);
-                let Some((pos, angle)) = contact_marker(
-                    &view,
-                    helm.position,
-                    size,
-                    pose,
-                    &profile.hull,
-                    kit.masthead(r.class),
-                ) else {
+        let pos = match (kind, &ship) {
+            (Mark::Contact, _) => {
+                let marker = match &ship {
+                    Some((r, profile, ..)) => {
+                        let pose = sea.float(r.body.pos, r.body.heading, &profile.hull);
+                        let masthead = kit.masthead(r.class);
+                        contact_marker(&view, helm.position, size, pose, &profile.hull, masthead)
+                    }
+                    None => (quarry.frame(&battle))
+                        .and_then(|(at, _)| battery_marker(&view, helm.position, size, at)),
+                };
+                let Some((pos, angle)) = marker else {
                     continue;
                 };
                 transform.rotation = angle;
@@ -319,7 +351,8 @@ pub fn update_marks(
                 }
                 pos
             }
-            Mark::Lead => {
+            (_, None) => continue,
+            (Mark::Lead, Some((r, _, _, (_, edge)))) => {
                 if (!guns.torpedo_mode && view.zoom < 0.45) || !edge.is_empty() {
                     continue;
                 }
@@ -338,13 +371,13 @@ pub fn update_marks(
                 }
                 lead - Vec2::splat(4.5)
             }
-            Mark::Tick(_) | Mark::Rail => {
+            (Mark::Tick(_) | Mark::Rail, Some((_, profile, center, (p, edge)))) => {
                 if view.zoom < 0.45 || !edge.is_empty() {
                     continue;
                 }
                 let half = (profile.hull.bow + profile.hull.stern) * 0.5;
                 // Project a half ship length at the contact's actual depth.
-                let spacing = view.screen_span(helm.position, center, half, size);
+                let spacing = view.screen_span(helm.position, *center, half, size);
                 let y = p.y + 24.;
                 match kind {
                     Mark::Tick(i) => {
@@ -421,6 +454,20 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn a_harbour_gun_carries_the_triangle_over_her_roof() {
+        let size = Vec2::new(1120., 666.);
+        let mut view = ShipView::astern(0.);
+        let at = Vec2::new(30., -260.);
+        view.center_on(Vec2::ZERO, at.extend(5.7).xzy());
+        let (corner, turn) = battery_marker(&view, Vec2::ZERO, size, at).unwrap();
+        assert_eq!(turn, Rot2::IDENTITY);
+        let roof = view
+            .viewport_point(Vec2::ZERO, at.extend(Quarry::GUN_TOP).xzy(), size)
+            .unwrap();
+        assert!(corner.y + CONTACT_SIZE.y + CONTACT_GAP <= roof.y + 0.01);
+        assert!((corner.x + CONTACT_SIZE.x * 0.5 - roof.x).abs() < 1.);
     }
     #[test]
     fn a_clipped_mast_never_pushes_the_triangle_down_onto_the_target() {

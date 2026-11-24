@@ -1180,6 +1180,60 @@ pub(super) fn conveyor() -> Mesh {
     mesh
 }
 
+/// Seaplane shed with its doors toward the water and a timber launching slip.
+pub(super) fn hangar(live: bool) -> Mesh {
+    let mut w = Works::default();
+    let v = Vec3::new;
+    w.slab(v(0., 0.18, 0.), v(8.4, 0.36, 8.6), CONCRETE);
+    let incline = Quat::from_rotation_z(0.30);
+    w.block(v(-8.2, -1.3, 0.), v(9.2, 0.35, 5.), incline, TIMBER);
+    for z in [-1.55, 1.55] {
+        w.block(v(-8.2, -1.07, z), v(9.2, 0.14, 0.14), incline, STEEL);
+    }
+    if live {
+        w.slab(v(0., 2., 0.), v(7.9, 3.8, 7.7), OLD_BLUE);
+        w.slab(v(-3.99, 1.8, 0.), v(0.12, 3.15, 6.1), IRON);
+        for z in [-2.7, 2.7] {
+            w.slab(v(-4.08, 1.8, z), v(0.14, 3.16, 0.8), STEEL);
+        }
+        for side in [-1., 1.] {
+            w.block(
+                v(0., 4.54, side * 2.),
+                v(8.6, 0.36, 4.45),
+                Quat::from_rotation_x(side * 0.31),
+                OXIDE,
+            );
+            w.slab(v(0., 2.9, side * 3.91), v(6.6, 0.68, 0.1), WINDOW);
+            for x in [-2.1, 0., 2.1] {
+                w.slab(v(x, 2.9, side * 4.), v(0.13, 0.75, 0.12), STRIPE);
+            }
+        }
+        // Striped windsock alongside the control cabin.
+        w.slab(v(3., 4., 2.7), v(2., 7.8, 2.2), CONCRETE);
+        w.slab(v(3., 7.4, 2.7), v(2.2, 1., 2.4), WINDOW);
+        w.slab(v(3., 8., 2.7), v(2.5, 0.2, 2.7), IRON);
+        w.girder(v(3., 8., 2.7), v(3., 9., 2.7), 0.12, IRON);
+        for i in 0..4 {
+            let t = i as f32;
+            let sock = |n: f32| v(3. - n * 0.52, 8.95 - n * 0.14, 2.7 + n * 0.05);
+            w.0.tube(
+                sock(t),
+                sock(t + 1.),
+                0.35 - t * 0.05,
+                0.30 - t * 0.05,
+                if i % 2 == 0 { CORAL } else { STRIPE },
+            );
+        }
+    } else {
+        w.slab(v(0., 0.52, 0.), v(7.8, 0.7, 7.5), CHAR);
+        for x in [-3., 0., 3.] {
+            w.girder(v(x, 0.7, -3.6), v(x + 0.5, 1.7, -0.8), 0.26, IRON);
+        }
+        w.block(v(1., 1., 0.7), v(5.5, 0.35, 2.7), incline, OXIDE);
+    }
+    w.finish()
+}
+
 /// The source of the plume is the open lip of the stack on each working building.
 pub(super) fn factory(harbour: Harbour, live: bool) -> Mesh {
     let mut m = Works::default();

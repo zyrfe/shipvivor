@@ -1,6 +1,6 @@
 ---
 name: screenshot
-description: Look at the user's latest Shipvivor dev capture (the ` key in a debug build saves a PNG and a game-state note to work/screenshots) and discuss it with the user's comment in mind. Use when the user types /screenshot, optionally followed by what they see or want changed, e.g. "/screenshot the harbor looks like hell".
+description: Look at the user's latest Shipvivor dev capture (the ` key in the game saves a PNG and a game-state note to work/screenshots) and discuss it with the user's comment in mind. Use when the user types /screenshot, optionally followed by what they see or want changed, e.g. "/screenshot the harbor looks like hell".
 argument-hint: "[what you see, or what should change]"
 ---
 
@@ -26,8 +26,8 @@ find "${CLAUDE_SKILL_DIR}/../../../work/screenshots" -maxdepth 1 -name '*.png' |
   ("the last two", "before and after", "compare"), or if the newest note was written well
   after the one before it and the comment seems to be about the earlier screen.
 - A `.png.partial` means that capture is still being encoded. Wait a second and look again.
-- If there are no captures, say so in one line: press ` in a debug build (`cargo run`) and
-  try again. Then stop.
+- If there are no captures, say so in one line: press ` in the game (`cargo run`,
+  `--release` too) and try again. Then stop.
 
 ## 2. Look before you answer
 

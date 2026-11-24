@@ -20,12 +20,12 @@ const LINGER: f32 = 6.;
 /// Level of the rush of a six-inch shell at no distance at all, and the metres at
 /// which it has fallen to a quarter. A shell is far quieter than a gun, so only one
 /// that passes close is heard.
-const RUSH: f32 = 6.;
-pub(crate) const CLOSE: f32 = 25.;
+const RUSH: f32 = 9.;
+pub(crate) const CLOSE: f32 = 35.;
 /// Centre of that rush in hertz when the shell is neither closing nor going away, and
 /// the whistle that rides above it.
 const TONE: f32 = 380.;
-const WHISTLE: (f32, f32) = (3.1, 0.3);
+const WHISTLE: (f32, f32) = (3.1, 0.5);
 /// How far closing or receding may shift the pitch.
 const SHIFT: (f32, f32) = (0.2, 8.);
 /// Beats a second of a shell's wobble about its line of flight, and their depth.

@@ -159,7 +159,21 @@ fn stat_art(label: &str, card: Card, art: &Insignia) -> Option<Handle<Image>> {
             | Card::SecondaryRange
             | Card::TwinSecondaries
     );
+    let flak = matches!(
+        card,
+        Card::AntiAir | Card::MoreAntiAir | Card::HeavyAntiAir | Card::QuickAntiAir
+    );
     Some(match label {
+        "Reload" if flak => art.fitting(Card::QuickAntiAir),
+        "Damage" if flak => art.fitting(Card::HeavyAntiAir),
+        "Guns" | "Reach" if flak => art.fitting(Card::MoreAntiAir),
+        "Traverse" => art.fitting(Card::TrainingGear),
+        "Plate" => art.fitting(Card::Armor),
+        // The largest round the plate turns aside.
+        "Stops" => art.fitting(Card::Shells),
+        "Engine" => art.fitting(Card::Turbines),
+        "Turret" => art.turret.clone(),
+        "Range" => art.fitting(Card::SecondaryRange),
         "Reload" if secondary => art.fitting(Card::QuickSecondaries),
         "Reload" => art.fitting(Card::Loader),
         "AP opens" | "AP at range" => art.fitting(Card::ArmorPiercing),
@@ -187,10 +201,13 @@ pub(super) fn details(
     let speed = |top: f32| top * KNOTS * current.speed_factor();
     match job {
         DockJob::WidenBeam => {
-            let Some(next) = run.next_beam() else {
+            let Some(next) = run.beam_class().next() else {
                 note(cmd, spec, art, "Widest beam fitted");
                 return;
             };
+            if let Some(why) = run.widen_refusal() {
+                refusal(cmd, spec, art, why);
+            }
             delta(
                 cmd,
                 spec,
@@ -232,9 +249,6 @@ pub(super) fn details(
                     1,
                     Some(true),
                 );
-            }
-            if run.beam_class().next() != Some(next) {
-                hint(cmd, spec, "Two stars unlock the capital beam");
             }
         }
         DockJob::Calibre(inches) => {
@@ -283,6 +297,17 @@ pub(super) fn details(
                     1,
                     Some(false),
                 );
+                // A heavier gunhouse trains more slowly.
+                delta(
+                    cmd,
+                    spec,
+                    art,
+                    art.fitting(Card::TrainingGear),
+                    (current.traverse(), planned.traverse()),
+                    "deg/s",
+                    0,
+                    Some(true),
+                );
                 if let Some(wing) = stations.iter().find(|s| s.paired()) {
                     figure(
                         cmd,
@@ -307,9 +332,21 @@ pub(super) fn details(
             };
             module_details(cmd, spec, run, art, job, from, to);
         }
-        DockJob::Section(kind) if fits => {
-            let before = design.sheet();
-            let after = run.projected_sheet(kind);
+        DockJob::Insert { module, .. } => {
+            if let Some(why) = run.refusal(job) {
+                refusal(cmd, spec, art, why);
+                return;
+            }
+            let Some(after) = run.projected_design(job) else {
+                return;
+            };
+            stock_details(cmd, spec, art, module);
+            let before_guns = design.gun_stations().len();
+            let after_guns = after.gun_stations().len();
+            if after_guns != before_guns {
+                turret_change(cmd, spec, art, before_guns, after_guns);
+            }
+            let (before, after) = (design.sheet(), after.sheet());
             delta(
                 cmd,
                 spec,
@@ -344,21 +381,9 @@ pub(super) fn details(
                 Some(false),
             );
             // On the last order the dock's own warning says the bay will sail empty.
-            if kind == DockModule::Reserve && !run.closes_dock(job) {
+            if module == DockModule::Reserve && !run.spends_last_order(job) {
                 hint(cmd, spec, "Then select the new bay for a turret");
             }
-        }
-        DockJob::Section(kind) => {
-            let count = run.dock_modules().filter(|(_, m)| *m == kind).count();
-            note(
-                cmd,
-                spec,
-                art,
-                format!(
-                    "{count} of {} fitted",
-                    shipvivor_campaign::MAX_SECTIONS_PER_KIND
-                ),
-            );
         }
         DockJob::Fitting(Card::TripleTurrets | Card::QuadTurrets) | DockJob::TwinTurrets => {
             if !fits {
@@ -390,7 +415,11 @@ pub(super) fn details(
                 Some(true),
             );
         }
-        DockJob::Fitting(_) if !fits => note(cmd, spec, art, "Fully fitted"),
+        // Thicker plate waits for a broader beam.
+        DockJob::Fitting(_) if !fits => match run.refusal(job) {
+            Some(why) => refusal(cmd, spec, art, why),
+            None => note(cmd, spec, art, "Fully fitted"),
+        },
         DockJob::Fitting(Card::Turbines) => {
             delta(
                 cmd,
@@ -407,7 +436,7 @@ pub(super) fn details(
             );
         }
         DockJob::Fitting(card) => {
-            for stat in cards::face(card, current).stats {
+            for stat in cards::face(card, current, design).stats {
                 let mark =
                     stat_art(stat.label, card, art).map_or(Mark::Word(stat.label), Mark::Icon);
                 let color = if stat.before.is_empty() {
@@ -419,6 +448,87 @@ pub(super) fn details(
             }
         }
     }
+}
+
+/// What a section from the yard's stock brings aboard besides its length.
+fn stock_details(cmd: &mut Commands, spec: Entity, art: &Insignia, module: DockModule) {
+    use shipvivor_shipyard as yard;
+    let new = |cmd: &mut Commands, image: Handle<Image>, words: String| {
+        figure(
+            cmd,
+            spec,
+            art,
+            Mark::Icon(image),
+            String::new(),
+            words,
+            Change::New.color(),
+        );
+    };
+    match module {
+        DockModule::Floatplane => {
+            new(
+                cmd,
+                art.floatplane.clone(),
+                format!("{} m", yard::FLOATPLANE_REACH),
+            );
+            new(
+                cmd,
+                art.fitting(Card::HeavySecondaries),
+                format!("{} / {:.0} s", yard::BOMB_DAMAGE, yard::SORTIE_SECONDS),
+            );
+        }
+        DockModule::Missiles => {
+            new(
+                cmd,
+                art.missile.clone(),
+                format!("{} m", yard::MISSILE_RANGE),
+            );
+            new(
+                cmd,
+                art.fitting(Card::HeavySecondaries),
+                format!(
+                    "{} x {} / {:.0} s",
+                    yard::MISSILE_SALVO,
+                    yard::MISSILE_DAMAGE,
+                    yard::MISSILE_RELOAD
+                ),
+            );
+        }
+        DockModule::Turret | DockModule::EngineRoom | DockModule::Reserve => {}
+    }
+}
+
+/// Why the yard turns a job down, as a padlock and the figure that would open it.
+pub(super) fn refusal(cmd: &mut Commands, spec: Entity, art: &Insignia, why: Refusal) {
+    let row = node(
+        cmd,
+        spec,
+        Node {
+            align_items: AlignItems::Center,
+            column_gap: px(7),
+            ..default()
+        },
+        Color::NONE,
+    );
+    icon(cmd, row, art.lock.clone(), brass(), 16.);
+    let (image, words) = match why {
+        Refusal::Full(1) => (None, "One at most".to_string()),
+        Refusal::Full(most) => (None, format!("{most} at most")),
+        Refusal::Beam(beam) => (
+            Some(art.beam.clone()),
+            format!("Needs {:.1} m", beam.metres()),
+        ),
+        Refusal::Length(metres) => (Some(art.length.clone()), format!("Needs {metres} m")),
+        Refusal::Longest => (
+            Some(art.length.clone()),
+            format!("{:.0} m at most", shipvivor_campaign::MAX_LENGTH),
+        ),
+        Refusal::Widest => (None, "Widest beam fitted".to_string()),
+    };
+    if let Some(image) = image {
+        icon(cmd, row, image, brass(), 14.);
+    }
+    text(cmd, row, words, 13., brass());
 }
 
 fn module_details(

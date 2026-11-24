@@ -143,3 +143,45 @@ fn a_hairpin_course_fails() {
         "{found:?}"
     );
 }
+
+#[test]
+fn a_passage_takes_its_bases_in_order_with_the_heavy_yard_last() {
+    let mut chart = charted(9);
+    chart.harbours.swap(0, 2);
+    let found = defects(&chart);
+    assert!(
+        found
+            .iter()
+            .any(|d| matches!(d, Defect::BasesOutOfOrder { a: 1, b: 2, .. })),
+        "{found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .any(|d| matches!(d, Defect::LastBaseShort { .. })),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn an_island_hard_under_the_cliffs_fails() {
+    let mut chart = charted(10);
+    // The piece of shore nearest the start, and an island just off it.
+    let shore = *chart
+        .coast
+        .iter()
+        .min_by(|a, b| (a.pos.length() - a.radius).total_cmp(&(b.pos.length() - b.radius)))
+        .unwrap();
+    let out = -shore.pos.normalize();
+    chart
+        .islets
+        .push(islet(shore.pos + out * (shore.radius + 15. + 20.), 20.));
+    let islands = chart.islets.len();
+    let found = defects(&chart);
+    assert!(
+        found
+            .iter()
+            .any(|d| matches!(d, Defect::StraitToCoast { a, .. } if *a == islands - 1)),
+        "{found:?}"
+    );
+}

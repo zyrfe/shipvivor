@@ -8,10 +8,14 @@
 //! stands in the open, and back from the whole sea as a long dark tail. Each ear hears
 //! it at its own moment.
 //!
-//! Three things are made as they play. The ship's own engine, wash and wind follow the
-//! speed and engine order last given. A shell in flight is heard from where it was when
+//! Four things are made as they play. The ship's own engine, wash and wind follow the
+//! speed, the engine order and the state of her engines last given. A shell in flight is heard from where it was when
 //! the sound left it, which for a fast shell is a crack and then a tearing fall in pitch.
 //! A base's siren is a rotor that winds up and runs down for as long as its alarm is up.
+//! An aeroplane's engine and propeller are heard sharp as it closes and flat as it goes.
+//!
+//! The places the ship passes make sounds of their own, which [`Ambience`] decides the
+//! moments of: surf, seabirds, ice and the work of a yard.
 //!
 //! The game thread sends [`Cue`]s. The [`Mixer`] renders on the audio thread, where it
 //! never blocks or allocates. Positions are metres with Y up.
@@ -22,7 +26,9 @@ mod filter;
 mod flight;
 mod foundry;
 mod hull;
+mod line;
 mod mixer;
+mod plane;
 mod siren;
 mod tail;
 #[cfg(test)]
@@ -38,6 +44,10 @@ pub const SAMPLE_RATE: u32 = 48_000;
 const RATE: f32 = SAMPLE_RATE as f32;
 /// Inside this many metres a sound is at full level.
 const NEAR: f32 = 15.;
+
+/// Stroke lengths shared by the chart animation and its paper foley.
+pub const CHART_UNROLL_SECONDS: f32 = 0.32;
+pub const CHART_ROLL_SECONDS: f32 = 0.22;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sound {
@@ -77,9 +87,15 @@ pub enum Sound {
     Creak,
     /// The engine-room telegraph ringing a new order, heard aboard.
     Telegraph,
+    /// Two notes for something gained. It is the game speaking and not the world.
+    Upgrade,
+    UnrollChart,
+    RollChart,
+    /// The ship's klaxon, which is sounded when she is close to sinking.
+    Klaxon,
 }
 impl Sound {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 27] = [
         Self::MainGun,
         Self::SecondaryGun,
         Self::RaiderGun,
@@ -103,6 +119,10 @@ impl Sound {
         Self::Rivets,
         Self::Creak,
         Self::Telegraph,
+        Self::Upgrade,
+        Self::UnrollChart,
+        Self::RollChart,
+        Self::Klaxon,
     ];
 
     /// Level of the detail, body and rumble layers at close range.
@@ -112,7 +132,7 @@ impl Sound {
             Self::SecondaryGun => [0.45, 0.36, 0.14],
             Self::RaiderGun => [0.6, 0.54, 0.2],
             Self::ShoreGun => [0.8, 1., 0.6],
-            Self::Splash => [0.25, 0.4, 0.25],
+            Self::Splash => [0.55, 0.9, 0.55],
             Self::Burst => [0.5, 0.8, 0.4],
             Self::Wreck => [0.5, 1., 0.8],
             Self::ArmorRing => [0.84, 0.52, 0.10],
@@ -125,12 +145,15 @@ impl Sound {
             Self::Ruin => [0.55, 1., 0.9],
             Self::Fanfare => [0.26, 0.66, 0.48],
             Self::Breaker => [0.5, 0.64, 0.08],
-            Self::IceCrack => [0.5, 0.6, 0.12],
-            Self::Calving => [0.4, 0.8, 0.7],
-            Self::Gull => [0.4, 0.24, 0.],
-            Self::Rivets => [0.9, 0.4, 0.05],
+            Self::IceCrack => [1., 1.2, 0.24],
+            Self::Calving => [0.6, 1.2, 1.],
+            Self::Gull => [1.1, 0.68, 0.],
+            Self::Rivets => [2., 0.85, 0.1],
             Self::Creak => [0.12, 0.3, 0.12],
             Self::Telegraph => [0.4, 0.08, 0.],
+            Self::Upgrade => [0.18, 0.5, 0.25],
+            Self::UnrollChart | Self::RollChart => [0.28, 0.39, 0.],
+            Self::Klaxon => [0.35, 0.6, 0.],
         }
     }
 
@@ -145,12 +168,29 @@ impl Sound {
                 | Self::Fanfare
                 | Self::Creak
                 | Self::Telegraph
+                | Self::Upgrade
+                | Self::UnrollChart
+                | Self::RollChart
+                | Self::Klaxon
         )
     }
 
     /// Music and bells, which sound at their own pitch every time.
     fn tuned(self) -> bool {
-        matches!(self, Self::Trumpet | Self::Fanfare | Self::Telegraph)
+        matches!(
+            self,
+            Self::Trumpet | Self::Fanfare | Self::Telegraph | Self::Upgrade | Self::Klaxon
+        )
+    }
+
+    /// The game speaking to the player. It belongs to no moment of the battle, so it
+    /// is heard whether the world's time runs or holds, and a hush leaves it be.
+    fn notice(self) -> bool {
+        self == Self::Upgrade || self.chart_paper()
+    }
+
+    fn chart_paper(self) -> bool {
+        matches!(self, Self::UnrollChart | Self::RollChart)
     }
 
     /// Loud enough for land to throw back.
@@ -175,6 +215,20 @@ pub enum Rotor {
     /// A heavier one carried by a capital ship: slower to wind up, and a major third
     /// near 240 and 300 Hz.
     Ship,
+}
+
+/// What is asked of a siren.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Alert {
+    /// The alarm is up, and it wails.
+    Raised,
+    /// The alarm is down. The rotor is left to run down by itself, which takes it
+    /// half a minute.
+    Lowered,
+    /// The siren has been brought down with whatever it stood on. Its power is gone
+    /// and its rotor is fouled, so its note drops away to nothing in a few seconds.
+    /// That is the sound of a base that is finished.
+    Wrecked,
 }
 
 /// What the air does to a sound on its way to the listener.
@@ -253,14 +307,22 @@ pub enum Cue {
         position: Vec3,
         radius: f32,
     },
-    /// A siren. While its alarm is raised it wails. Lowered, it is left to run down, as
-    /// it also is when it loses its power. Each slot holds one, and one aboard a ship
-    /// is given her new position each tick.
+    /// A siren, and what is being asked of it. Each slot holds one, and one aboard a
+    /// ship is given her new position each tick.
     Alarm {
         slot: usize,
         rotor: Rotor,
         position: Vec3,
-        raised: bool,
+        alert: Alert,
+    },
+    /// An aeroplane, heard from where it was when its sound left it: where it is this
+    /// tick, in metres and metres per second, and whether its engine is running. Each
+    /// slot holds one. Between ticks it is carried on at its speed.
+    Aircraft {
+        slot: usize,
+        position: Vec3,
+        velocity: Vec3,
+        flying: bool,
     },
     /// The ship is under way: speed through the water in metres per second, and the
     /// engine order as a share of full ahead.
@@ -269,10 +331,13 @@ pub enum Cue {
     /// damaged and still running, which stumble and bang in their exhaust, and those
     /// knocked out, which are silent. It holds until the next is sent.
     Engines { damaged: f32, stopped: f32 },
-    /// The machinery is shut down and only the sea is heard. Any alarm is lowered.
+    /// The machinery is shut down and only the sea is heard. Any alarm is lowered, and
+    /// no aeroplane is heard any longer.
     Moored,
     /// World time runs or holds. Held sound hangs in the air and resumes where it was.
+    /// What the game itself has to say is heard all the same.
     Flow(bool),
-    /// Drop every sound still in the air. The next ears are taken up without a glide.
+    /// Drop every sound of the world still in the air. The next ears are taken up
+    /// without a glide.
     Hush,
 }

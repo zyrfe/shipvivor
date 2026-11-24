@@ -35,6 +35,18 @@ impl TurretLayout {
     }
 }
 
+/// Degrees per second a stock four-inch gunhouse trains.
+pub const STOCK_TRAVERSE: f32 = 18.;
+/// Ranks of training gear a gunhouse can take.
+pub const MOST_TRAINING_GEAR: u16 = 4;
+
+/// How fast a main gunhouse trains and elevates, as a multiple of a stock four-inch
+/// mount. A larger bore is a heavier gunhouse and moves more slowly, and each rank of
+/// training gear adds a quarter, so four ranks bring a sixteen-inch mount back to stock.
+pub fn training_rate(calibre_inches: f32, gear: u16) -> f32 {
+    (4. / calibre_inches.max(1.)).sqrt() * (1. + 0.25 * f32::from(gear.min(MOST_TRAINING_GEAR)))
+}
+
 /// The crew-worked close-range battery as fitted.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Secondaries {
@@ -59,6 +71,31 @@ impl Secondaries {
     };
     /// The beam has deck room for this many guns a side.
     pub const MOST_PER_SIDE: usize = 3;
+}
+
+/// The light anti-aircraft battery as fitted. Each mount fires a time-fused round that
+/// bursts where it leads an aircraft to be.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AntiAir {
+    /// Mounts aboard, in port and starboard pairs. None until the battery is fitted.
+    pub mounts: usize,
+    /// Damage a burst does to an aircraft caught in it.
+    pub damage: u16,
+    /// Seconds between rounds from one mount.
+    pub reload: f32,
+    /// Metres out to which the crew engages.
+    pub range: f32,
+}
+impl AntiAir {
+    /// The battery before any is fitted: its figures are what the first pair brings.
+    pub const NONE: Self = Self {
+        mounts: 0,
+        damage: 1,
+        reload: 1.1,
+        range: 280.,
+    };
+    /// The deck has room for three pairs.
+    pub const MOST_MOUNTS: usize = 6;
 }
 
 use std::collections::HashMap;

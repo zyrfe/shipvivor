@@ -7,8 +7,10 @@ mod foreshore;
 mod harbour_models;
 #[path = "harbour_signals.rs"]
 mod harbour_signals;
+#[path = "mainland.rs"]
+mod mainland;
 #[path = "spotter_model.rs"]
-mod spotter_model;
+pub(crate) mod spotter_model;
 use crate::ensign::Side;
 use crate::scene;
 use crate::state::{Campaign, Encounter, Mode, PlayerHelm};
@@ -20,14 +22,18 @@ use harbour_models::Harbour;
 pub(crate) use harbour_signals::{
     animate as animate_harbour_signals, dye as dye_ensigns, fly_pennant,
 };
+pub(crate) use mainland::MainlandPlugin;
 use shipvivor_encounter::{
-    Battery, Body, EffectKind, EnemyClass, ISLAND_RADIUS, LandmarkKind, YardState,
+    Airframe, Battery, Body, EffectKind, EnemyClass, ISLAND_RADIUS, LandmarkKind, YardState,
 };
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 enum Shape {
     Spotter,
+    AttackPlane,
+    MooredPlane,
+    Hangar(bool),
     Propeller,
     Coast(Coast),
     Yard(Harbour, YardState),
@@ -62,6 +68,10 @@ enum Shape {
     MainShot,
     CloseShot,
     EnemyShot,
+    /// A light AA round: all tracer, no visible body.
+    Tracer,
+    /// Dark smoke from a flak burst or a burning aircraft.
+    FlakPuff(u8),
     Flash,
     Muzzle,
     Smoke,
@@ -76,6 +86,8 @@ pub(crate) struct Actor(u64, Shape);
 #[derive(Resource)]
 pub struct Kit {
     spotter: Handle<Mesh>,
+    attack_plane: Handle<Mesh>,
+    hangars: [Handle<Mesh>; 2],
     propeller: Handle<Mesh>,
     hull: Handle<Mesh>,
     scars: [Handle<Mesh>; 2],
@@ -107,6 +119,7 @@ pub struct Kit {
     gunmetal: Handle<StandardMaterial>,
     spray_paint: Handle<StandardMaterial>,
     smoke: Handle<StandardMaterial>,
+    flak: Handle<StandardMaterial>,
     ball: Handle<Mesh>,
     drum: Handle<Mesh>,
     terrain: Handle<StandardMaterial>,
@@ -162,6 +175,12 @@ pub fn setup(
         unlit: true,
         ..default()
     });
+    let flak = paint.add(StandardMaterial {
+        base_color: Color::srgba_u8(34, 34, 38, 214),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        ..default()
+    });
     let signals = harbour_signals::SignalKit::new(&mut meshes, &mut paint, &mut images);
     let mut yards = HashMap::new();
     let mut factories = HashMap::new();
@@ -195,6 +214,7 @@ pub fn setup(
                 LandmarkKind::Pines,
                 LandmarkKind::Stacks,
                 LandmarkKind::Glacier,
+                LandmarkKind::Mainland,
             ]
             .map(Coast::Landmark),
         )
@@ -209,6 +229,8 @@ pub fn setup(
     };
     cmd.insert_resource(Kit {
         spotter: meshes.add(spotter_model::plane()),
+        attack_plane: meshes.add(spotter_model::raider()),
+        hangars: [false, true].map(|live| meshes.add(harbour_models::hangar(live))),
         propeller: meshes.add(spotter_model::propeller()),
         hull: meshes.add(scene::hull_mesh()),
         impact_flash: meshes.add(armor_fx::flash_mesh()),
@@ -265,6 +287,7 @@ pub fn setup(
         gunmetal,
         spray_paint,
         smoke,
+        flak,
         ball: meshes.add(Sphere::new(1.).mesh().ico(1).unwrap()),
         drum: meshes.add(Cylinder::new(0.5, 1.).mesh().resolution(8)),
         terrain: material(255, 255, 255, true),
@@ -294,6 +317,18 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
     let v = Vec3::new;
     match key.1 {
         Shape::Spotter => part(&kit.spotter, &kit.gunmetal, Vec3::ZERO, Vec3::ONE),
+        Shape::AttackPlane | Shape::MooredPlane => {
+            part(&kit.attack_plane, &kit.gunmetal, Vec3::ZERO, Vec3::ONE);
+            if key.1 == Shape::MooredPlane {
+                part(&kit.propeller, &kit.gunmetal, spotter_model::HUB, Vec3::ONE);
+            }
+        }
+        Shape::Hangar(live) => part(
+            &kit.hangars[usize::from(live)],
+            &kit.construction,
+            Vec3::ZERO,
+            Vec3::ONE,
+        ),
         Shape::Propeller => part(&kit.propeller, &kit.gunmetal, Vec3::ZERO, Vec3::ONE),
         Shape::Coast(coast) => {
             part(&kit.coasts[&coast], &kit.ground, Vec3::ZERO, Vec3::ONE);
@@ -445,6 +480,20 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
             part(&kit.ball, &kit.gold, v(0., 0., -1.8), v(0.98, 0.94, 2.6));
             part(&kit.ball, &kit.foam, v(0., 0., -1.5), v(0.5, 0.50, 2.5));
         }
+        Shape::Tracer => {
+            part(&kit.ball, &kit.gold, v(0., 0., 1.1), v(0.075, 0.075, 2.2));
+            part(&kit.ball, &kit.foam, v(0., 0., 0.15), v(0.09, 0.09, 0.3));
+        }
+        Shape::FlakPuff(_) => {
+            part(&kit.ball, &kit.flak, Vec3::ZERO, v(1., 0.86, 0.94));
+            part(&kit.ball, &kit.flak, v(0.55, 0.3, -0.2), v(0.7, 0.62, 0.66));
+            part(
+                &kit.ball,
+                &kit.flak,
+                v(-0.45, 0.18, 0.4),
+                v(0.62, 0.56, 0.6),
+            );
+        }
         Shape::Smoke | Shape::FunnelSmoke(_) | Shape::Soot(_) => {
             part(&kit.ball, &kit.smoke, Vec3::ZERO, v(1.2, 0.95, 1.1));
             part(
@@ -487,24 +536,58 @@ pub fn sync(
 ) {
     let mut wanted = HashMap::new();
     if !matches!(run.mode, Mode::Title | Mode::Trial) {
-        for island in battle.landmarks() {
+        // The mainland is raised as one terrain (see `mainland`), not piece by piece.
+        for island in battle
+            .landmarks()
+            .iter()
+            .filter(|l| l.kind != LandmarkKind::Mainland)
+        {
             let scale = island.radius / ISLAND_RADIUS;
             wanted.insert(
                 Actor(island.body.id, Shape::Coast(Coast::Landmark(island.kind))),
                 pose(&island.body, 0.).with_scale(Vec3::new(scale, 1., scale)),
             );
         }
-        for (port, plane) in battle.ports().iter().zip(battle.spotters()) {
-            let rotation =
-                Quat::from_rotation_y(-plane.heading) * Quat::from_rotation_z(plane.bank);
-            let airframe = Transform::from_translation(plane.position_3d()).with_rotation(rotation);
-            wanted.insert(Actor(port.body.id, Shape::Spotter), airframe);
+        if let Some(plane) = battle.air_station().and_then(|base| base.aircraft.as_ref()) {
+            let mut airframe = pose(&plane.body, plane.altitude).with_scale(Vec3::splat(0.63));
+            airframe.rotate_local_z(plane.bank);
+            wanted.insert(Actor(plane.body.id, Shape::AttackPlane), airframe);
             let spin = Transform::from_translation(spotter_model::HUB)
-                .with_rotation(Quat::from_rotation_z(battle.at_sea() * 38.));
+                .with_rotation(Quat::from_rotation_z(battle.at_sea() * 42.));
             wanted.insert(
-                Actor(port.body.id, Shape::Propeller),
+                Actor(plane.body.id, Shape::Propeller),
                 airframe.mul_transform(spin),
             );
+        } else if let Some(base) = battle.air_station() {
+            let port = &battle.ports()[base.port];
+            if base.operational(port) {
+                let mooring = Body {
+                    pos: base.slip(port),
+                    ..port.body
+                };
+                wanted.insert(
+                    Actor(port.body.id, Shape::MooredPlane),
+                    pose(&mooring, 1.85 + sea.height(mooring.pos)).with_scale(Vec3::splat(0.63)),
+                );
+            }
+        }
+        for (base_index, (port, plane)) in battle.ports().iter().zip(battle.spotters()).enumerate()
+        {
+            // A spotter shot down is drawn falling by its effect, and then is gone.
+            if plane.airborne() {
+                let rotation =
+                    Quat::from_rotation_y(-plane.heading) * Quat::from_rotation_z(plane.bank);
+                let airframe = Transform::from_translation(plane.position_3d())
+                    .with_rotation(rotation)
+                    .with_scale(Vec3::splat(spotter_model::ALOFT));
+                wanted.insert(Actor(port.body.id, Shape::Spotter), airframe);
+                let spin = Transform::from_translation(spotter_model::HUB)
+                    .with_rotation(Quat::from_rotation_z(battle.at_sea() * 38.));
+                wanted.insert(
+                    Actor(port.body.id, Shape::Propeller),
+                    airframe.mul_transform(spin),
+                );
+            }
             let yard = Body {
                 pos: port.yard_position(),
                 ..port.body
@@ -568,6 +651,14 @@ pub fn sync(
                 let i = index as u8;
                 let live = factory.live() && state != YardState::Ruined;
                 let foot = pose(&mill, 3.2);
+                if index == 0
+                    && battle
+                        .air_station()
+                        .is_some_and(|base| base.port == base_index)
+                {
+                    wanted.insert(Actor(port.body.id, Shape::Hangar(live)), foot);
+                    continue;
+                }
                 wanted.insert(Actor(port.body.id, Shape::Factory(harbour, i, live)), foot);
                 if live {
                     let chimney = foot.transform_point(harbour.chimney());
@@ -751,10 +842,15 @@ pub fn sync(
             let shape = match s.battery {
                 Battery::Main => Shape::MainShot,
                 Battery::Secondary => Shape::CloseShot,
-                Battery::Raider | Battery::EnemySecondary => Shape::EnemyShot,
+                Battery::AntiAir => Shape::Tracer,
+                Battery::Raider | Battery::EnemySecondary | Battery::Aircraft => Shape::EnemyShot,
                 Battery::Shore => Shape::ShoreShell,
             };
-            let size = s.diameter / crate::ordnance::SHELL_MESH_DIAMETER;
+            let size = if shape == Shape::Tracer {
+                1.
+            } else {
+                s.diameter / crate::ordnance::SHELL_MESH_DIAMETER
+            };
             let xf = Transform::from_translation(s.position())
                 .looking_to(s.tangent(), Vec3::Y)
                 .with_scale(Vec3::splat(size));
@@ -826,6 +922,50 @@ pub fn sync(
                         wanted.insert(Actor(e.body.id, Shape::Debris(i)), shard);
                     }
                 }
+                EffectKind::Flak => {
+                    // A quick flash, then a dark puff that blooms at once, spreads a little
+                    // as it hangs, and thins away.
+                    let t = age / e.kind.lifetime();
+                    if age < 0.14 {
+                        let mut flash = pose(&e.body, e.height);
+                        flash.scale = Vec3::splat(1.5 * (1. - age / 0.14) + 0.05);
+                        wanted.insert(Actor(e.body.id, Shape::Flash), flash);
+                    }
+                    let bloom = 1. - (-age * 16.).exp();
+                    let thin = 1. - ((t - 0.62) / 0.38).clamp(0., 1.).powi(2);
+                    let mut puff = pose(&e.body, e.height + 0.6 * t);
+                    puff.rotate_local_y(e.body.id as f32);
+                    puff.scale = Vec3::splat((1.9 * bloom + 0.9 * t) * thin + 0.01);
+                    wanted.insert(Actor(e.body.id, Shape::FlakPuff(0)), puff);
+                }
+                EffectKind::Downed(frame) if e.height > 0. => {
+                    // Nose dropping and rolling as she falls, burning, trailing black smoke.
+                    let (shape, scale) = match frame {
+                        Airframe::Spotter => (Shape::Spotter, spotter_model::ALOFT),
+                        Airframe::Attack => (Shape::AttackPlane, 0.63),
+                    };
+                    let mut airframe = pose(&e.body, e.height).with_scale(Vec3::splat(scale));
+                    let roll = if e.body.id % 2 == 0 { 1. } else { -1. };
+                    airframe.rotate_local_x(-(0.12 + 0.75 * age).min(1.15));
+                    airframe.rotate_local_z(roll * (0.4 + 2.1 * age));
+                    wanted.insert(Actor(e.body.id, shape), airframe);
+                    let mut fire = Transform::from_translation(
+                        airframe.transform_point(Vec3::new(0., 0.6, -1.5)),
+                    );
+                    fire.scale = Vec3::splat(0.45 + 0.08 * (age * 23.).sin());
+                    wanted.insert(Actor(e.body.id, Shape::Fire), fire);
+                    let back = -e.body.forward();
+                    for i in 0..5_u8 {
+                        let k = f32::from(i) + 1.;
+                        let behind = Vec3::new(back.x, 0., back.y) * (2.6 * k);
+                        let lift = Vec3::Y * (0.5 + 0.7 * k * (0.3 + age));
+                        let mut puff =
+                            Transform::from_translation(airframe.translation + behind + lift);
+                        puff.scale = Vec3::splat((0.55 + 0.32 * k) * age.min(0.5) * 2.);
+                        wanted.insert(Actor(e.body.id, Shape::FlakPuff(i)), puff);
+                    }
+                }
+                EffectKind::Downed(_) => {}
                 EffectKind::Muzzle(_) => {
                     let t = age / e.kind.lifetime();
                     let mut xf = pose(&e.body, e.height);
