@@ -1,0 +1,141 @@
+<div id="raider-damage">
+  <div class="viz-controls">
+    <label class="form-label">Damage trial
+      <select class="form-select" data-part="trial">
+        <option value="gun">One barrel broken</option>
+        <option value="loaded">Loaded locker hit</option>
+        <option value="empty">Spent locker hit</option>
+        <option value="drive">Drive disabled</option>
+        <option value="sealed" selected>Port breach · bulkhead holds</option>
+        <option value="spread">Port breach · bulkheads open</option>
+      </select>
+    </label>
+    <label class="form-label">Time after hit <output class="tabular-nums" data-part="seconds">12 s</output>
+      <input class="form-range" data-part="time" type="range" min="0" max="60" value="12" step="1">
+    </label>
+  </div>
+  <svg class="raider-section" viewBox="0 0 530 210" role="img" aria-label="Ship seen from astern. The horizontal sea surface shows heel and immersion.">
+    <defs>
+      <clipPath id="rd-hold"><path d="M-84 -22H84L72 3 43 29H-43L-72 3Z"/></clipPath>
+      <linearGradient id="rd-depth" x2="0" y2="1" gradientUnits="objectBoundingBox">
+        <stop offset="0" stop-color="var(--background)" stop-opacity=".12"/>
+        <stop offset=".6" stop-color="var(--background)" stop-opacity=".65"/>
+        <stop offset="1" stop-color="var(--background)" stop-opacity=".95"/>
+      </linearGradient>
+    </defs>
+    <rect x="0" y="120" width="530" height="90" fill="var(--wash)"/>
+    <g data-part="wake" stroke="var(--sea)" stroke-width="2" fill="none">
+      <path d="M186 125Q157 137 107 137 M344 125Q373 137 423 137 M176 136Q153 144 128 145 M354 136Q377 144 402 145"/>
+    </g>
+    <g data-part="vessel" stroke="var(--edge)" stroke-width="1.4" stroke-linejoin="round">
+      <path d="M-89 -27H89L77 5 44 34H-44L-77 5Z" fill="var(--side)"/>
+      <path d="M-84 -22H84L72 3 43 29H-43L-72 3Z" fill="var(--background)"/>
+      <g clip-path="url(#rd-hold)" fill="var(--sea)" stroke="none" data-part="water">
+        <rect x="-84" width="42"/><rect x="-42" width="42"/><rect x="0" width="42"/><rect x="42" width="42"/>
+      </g>
+      <path d="M-42 -22V28M0 -22V28M42 -22V28" fill="none"/>
+      <g data-part="locker" fill="var(--side)">
+        <rect x="7" y="-16" width="28" height="15" rx="2"/>
+        <path data-part="rounds" d="M12 -4V-12 M18 -4V-12 M24 -4V-12 M30 -4V-12" stroke="var(--foreground)" stroke-width="3"/>
+      </g>
+      <path d="M-34 -27V-49H33V-27Z M-22 -49V-63H20V-49Z" fill="var(--side)"/>
+      <path d="M-20 -59H18" stroke="var(--edge)" stroke-width="4"/>
+      <path d="M-8 -63V-87H3V-63Z" fill="var(--side)"/>
+      <path d="M15 -63V-103M4 -89H24" fill="none"/>
+      <path d="M15 -104L33 -99L15 -95Z" fill="var(--edge)"/>
+      <path d="M-64 -28V-41L-57 -47H-39L-34 -40V-28Z M37 -28V-40L42 -46H59L66 -40V-28Z" fill="var(--side)"/>
+      <path d="M-60 -39L-76 -41 M58 -38L92 -44" stroke="var(--edge)" stroke-width="5"/>
+      <path data-part="barrel" d="M-75 -41L-95 -44" stroke="var(--edge)" stroke-width="5"/>
+      <path data-part="break" d="M-73 -44L-77 -40L-73 -39" fill="none" stroke="var(--orange)" stroke-width="3"/>
+      <path data-part="scar" d="M-76 -10L-83 -5L-74 -3L-71 3" fill="none" stroke="var(--orange)" stroke-width="3"/>
+      <g data-part="flare" fill="var(--orange)" stroke="none">
+        <path d="M12 -12L6 -28L16 -25L13 -51L24 -37L30 -52L30 -26L38 -29L30 -12Z"/>
+      </g>
+    </g>
+    <rect x="0" y="120" width="530" height="90" fill="url(#rd-depth)"/>
+    <path d="M0 120H530" fill="none" stroke="var(--sea)" stroke-width="1.4"/>
+  </svg>
+  <div data-part="status" aria-live="polite"></div>
+</div>
+<style>
+#raider-damage { --edge:color-mix(in srgb,var(--foreground) 72%,var(--background)); --side:color-mix(in srgb,var(--foreground) 17%,var(--background)); --sea:var(--viz-series-1); --wash:color-mix(in srgb,var(--sea) 9%,var(--background)); }
+#raider-damage .raider-section {display:block;width:100%;margin-block:calc(var(--font-size-base) * .5)}
+</style>
+<script>
+(() => {
+  const root = document.getElementById("raider-damage");
+  const part = name => root.querySelector('[data-part="' + name + '"]');
+  const trial = part("trial");
+  const time = part("time");
+  function stateAt(mode, t) {
+    const levels = [0, 0, 0, 0];
+    const breach = mode === "sealed" || mode === "spread";
+    const dt = 0.1;
+    let descent = 0;
+    for (let step = 0; breach && step < Math.round(t / dt); step++) {
+      levels[0] = Math.min(1, levels[0] + 0.13 * dt);
+      if (mode === "spread") {
+        for (let i = 0; i < 3; i++) {
+          const transfer = Math.max(0, levels[i] - levels[i + 1]) * 0.45 * dt;
+          levels[i] -= transfer;
+          levels[i + 1] += transfer;
+        }
+      }
+      const load = levels.reduce((a,b) => a+b, 0);
+      descent += Math.max(0, load - 2.15) * dt * 8;
+    }
+    const load = levels.reduce((a,b) => a+b, 0);
+    const heel = -17*levels[0] - 6*levels[1] + 6*levels[2] + 17*levels[3];
+    const speed = mode === "drive" ? 14*Math.exp(-t/7) : 14*Math.max(0, 1-load/3.1);
+    return {levels, load, heel, speed, sink: load*5+descent};
+  }
+  function render() {
+    const mode = trial.value, t = Number(time.value);
+    const {levels, load, heel, speed, sink} = stateAt(mode, t);
+    const drift = mode === "drive" ? t * 0.75 : 0;
+    const vessel = part("vessel");
+    vessel.setAttribute("transform", "translate("+(265+drift)+" "+(120+sink)+") rotate("+heel+")");
+    const wake = part("wake");
+    wake.setAttribute("opacity", String(Math.min(1, speed/14)*Math.max(0,1-sink/48)));
+    wake.setAttribute("transform", "translate("+drift+" 0)");
+    Array.from(part("water").children).forEach((cell, i) => {
+      cell.setAttribute("height", String(52*levels[i]));
+      cell.setAttribute("y", String(30-52*levels[i]));
+    });
+    const after = t > 0;
+    const show = (name, on) => { part(name).style.display = on ? "" : "none"; };
+    show("barrel", mode !== "gun" || !after);
+    show("break", mode === "gun" && after);
+    show("rounds", mode !== "empty" && !(mode === "loaded" && after));
+    show("scar", after && (mode === "sealed" || mode === "spread"));
+    show("flare", mode === "loaded" && t > 0 && t < 6);
+    const afloat = sink < 125;
+    const result = {
+      gun: after ? "One gun silent · second mount ready" : "Both mounts ready",
+      loaded: after ? "Locker burned out · stored rounds lost" : "Four rounds in locker",
+      empty: "Locker empty · no ammunition fire",
+      drive: speed > 1 ? "Drive lost · coasting" : "Drive lost · drifting with current",
+      sealed: load < 0.99 ? "One bay filling" : "One bay full · list stabilized",
+      spread: !afloat ? "Hull submerged" : load > 2.15 ? "Reserve buoyancy exhausted · sinking" : "Water spreading across bays"
+    }[mode];
+    part("status").textContent = result + (afloat ? " · "+speed.toFixed(1)+" kn through water · "+Math.abs(heel).toFixed(0)+"°"+(heel < -0.5 ? " port list" : " heel") : "");
+    part("seconds").textContent = t+" s";
+  }
+  function restore(saved) {
+    const s = saved?.modelContent;
+    if (s && Array.from(trial.options).some(o => o.value === s.trial)) trial.value = s.trial;
+    if (s && Number.isFinite(s.seconds)) time.value = String(Math.max(0,Math.min(60,s.seconds)));
+    render();
+  }
+  function save() {
+    window.openai?.setWidgetState?.({modelContent:{trial:trial.value,seconds:Number(time.value)},privateContent:null})?.catch(() => {});
+  }
+  trial.addEventListener("change", () => {render();save();});
+  time.addEventListener("input", render);
+  time.addEventListener("change", save);
+  window.addEventListener("openai:set_globals", e => {
+    if (e.detail?.globals?.widgetState) restore(e.detail.globals.widgetState);
+  });
+  restore(window.openai?.widgetState);
+})();
+</script>

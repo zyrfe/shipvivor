@@ -1,0 +1,9 @@
+[package]
+name = "shipvivor-compass"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+glam.workspace = true

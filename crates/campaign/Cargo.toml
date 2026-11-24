@@ -1,0 +1,10 @@
+[package]
+name = "shipvivor-campaign"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+shipvivor-artillery = { path = "../artillery" }
+shipvivor-shipyard = { path = "../shipyard" }

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shipvivor · Harbour studies</title>
+  <style>
+    :root { color-scheme: dark; background: #101c20; color: #ecede4; font: 16px/1.5 system-ui, sans-serif }
+    * { box-sizing: border-box }
+    body { margin: 0 }
+    main { max-width: 1240px; margin: auto; padding: clamp(20px, 4vw, 56px) }
+    h1, h2, h3 { font-weight: 560; line-height: 1.15; letter-spacing: -.025em }
+    h1 { margin: 0 0 8px; font-size: clamp(35px, 5vw, 62px) }
+    h2 { margin: 0 0 16px; font-size: clamp(24px, 3vw, 34px) }
+    h3 { margin: 12px 0 5px; font-size: 1.1rem }
+    p { max-width: 78ch; margin: 8px 0 }
+    a, summary { color: #ecc58b }
+    a:focus-visible, summary:focus-visible { outline: 2px solid #ffe0ad; outline-offset: 3px }
+    section { margin-top: 30px; border-top: 1px solid #3c5154; padding-top: 24px }
+    figure { margin: 0 }
+    img, video { display: block; height: auto; width: 100%; border-radius: 3px }
+    figcaption, footer { color: #c5cdc6; font-size: .91rem; margin-top: 8px }
+    .yards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px }
+    .films { display: grid; grid-template-columns: 1fr 1fr; gap: 18px }
+    summary { cursor: pointer; width: fit-content; margin: 14px 0 }
+    footer { margin-top: 30px; border-top: 1px solid #3c5154; padding-top: 18px }
+    @media (max-width: 700px) { .yards, .films { grid-template-columns: 1fr } }
+  </style>
+</head>
+<body><main>
+  <h1>Harbour studies</h1>
+  <p>One, two and three chimneys mark the working yards in the Iron Narrows. The flags follow the same wind as the smoke. Each plume goes out when its factory falls.</p>
+  <section aria-label="The three yards">
+    <div class="yards">
+      <figure><a href="cannery.jpg"><img src="cannery.jpg" alt="One chimney beside a timber derrick on a low stone shelf"></a><h3>A · Cannery</h3><figcaption>A timber derrick serves a single pile-built hall. The rails run down a planked slip into the sea.</figcaption></figure>
+      <figure><a href="mills.jpg"><img src="mills.jpg" alt="Two mill chimneys and a blue crane behind a sloping timber slip"></a><h3>B · Tidal mills</h3><figcaption>A conveyor links the mills. The blue lattice crane reaches out across their shared slip.</figcaption></figure>
+      <figure><a href="foundry.jpg"><img src="foundry.jpg" alt="A yellow travelling crane holds a steel hull plate above a vessel in the open berth"></a><h3>C · Foundry</h3><figcaption>Tracks carry plate from the furnace halls. A travelling gantry hoists a repair strake over a lighter between the quay walls.</figcaption></figure>
+    </div>
+  </section>
+  <section><h2>At work</h2><div class="films">
+    <figure><video controls playsinline preload="none" poster="foundry.jpg" aria-label="Foundry plate lift"><source src="plate-lift.mp4" type="video/mp4"></video><figcaption>The slings travel with the plate. The lighter rises and falls with the water in the berth.</figcaption></figure>
+    <figure><video controls playsinline preload="none" poster="secondary-fire.jpg" aria-label="Breakwater's secondary guns engaging the cannery"><source src="secondary-fire.mp4" type="video/mp4"></video><figcaption>Breakwater holds main-battery fire off the cannery. Her stock beam guns take out the shore gun and the factory. The factory plume disappears.</figcaption></figure>
+  </div></section>
+  <section><h2>Visual review</h2>
+    <p>Each comparison uses the same camera, elapsed time and classic Iron Narrows layout. An independent reviewer saw the pairs without revision labels, using the coastal installation and repair berth paintings as references.</p>
+    <details><summary>First pass · Shoreline and buildings</summary><figure><img loading="lazy" src="first-review.jpg" alt="Old build at left and first revision at right"><figcaption>Previous build at left. First revision at right. The reviewer preferred the new waterfront and shore but could not identify what the foundry crane was lifting.</figcaption></figure></details>
+    <details><summary>Second pass · A working repair berth</summary><figure><img loading="lazy" src="berth-review.jpg" alt="Comparison showing the introduction of a steel plate, vessel and flooded basin"><figcaption>The first revision is at left and the flooded berth is at right. The reviewer identified the suspended plate and the vessel beneath it. The bow was hard to trace and the shoreline foam formed a white ribbon in places.</figcaption></figure></details>
+    <details open><summary>Final pass · Bow, approach and surf</summary><figure><img loading="lazy" src="final-review.jpg" alt="Two matched views of the foundry, with a raised teal bow and open quay entrance in the right-hand view"><figcaption>At right, the raised bow shows its cream stripe, the entrance is open, and broken patches of foam pick out the rock ledges. The reviewer chose this version in the final blind comparison.</figcaption></figure></details>
+    <details><summary>The yard from the bridge</summary><figure><a href="bridge.jpg"><img loading="lazy" src="bridge.jpg" alt="The twin mills ahead of Breakwater, with a range of 434 metres on the dock marker"></a><figcaption>Approaching the twin mills from 434 metres. The foundry has already been cleared.</figcaption></figure></details>
+    <details><summary>Cleared foundry</summary><figure><a href="ruined.jpg"><img loading="lazy" src="ruined.jpg" alt="Empty flooded berth, fallen girders and cold chimneys after the foundry closes"></a><figcaption>The ruins retain their quay walls and rail approaches. The flag, lifting gear and smoke are gone.</figcaption></figure></details>
+  </section>
+  <footer>Concept paintings · <a href="../../concepts/installation-studies.png">Coastal installations</a> · <a href="../../concepts/flagship-repair-berth.png">Flagship repair berth</a></footer>
+</main></body></html>

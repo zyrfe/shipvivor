@@ -1,0 +1,192 @@
+//! Designs the yard builds without being asked: the player's cruiser and the enemy
+//! classes. Each enemy is cut to its class's length and hull points, with its guns on
+//! the modules beneath their present deck stations.
+use crate::design::{Component::*, Design, Frame, Frame::*, Module};
+use shipvivor_artillery::ArmorGrade;
+
+/// An enemy design stretched to `length` metres, with `strength` hull points in each
+/// module of the given frame, `gun` points in each main gun and a crew mending at
+/// `repair` pace. Sinking one takes about half again its class's old hull points.
+fn enemy(
+    name: &str,
+    modules: Vec<Module>,
+    length: f32,
+    (frame, strength): (Frame, f32),
+    gun: f32,
+    repair: f32,
+) -> Design {
+    let mut design = Design::new(name, modules).expect("a stock design");
+    design.scale = length / design.length();
+    design.toughness = strength / frame.spec().structure;
+    design.fittings = gun / (12. * design.toughness);
+    design.repair = repair;
+    design
+}
+
+impl Design {
+    pub const BREAKWATER_LENGTH: f32 = 30.;
+    /// The yard splices midship frames between the original machinery space and after gun.
+    pub const BREAKWATER_SPLICE: usize = 4;
+
+    /// The player's cruiser: 30 metres and 100 hull points, a main gun fore and aft,
+    /// the director and close guns amidships, and the torpedo racks over the engine.
+    /// She stays afloat until four of her six modules are wrecked.
+    pub fn breakwater() -> Self {
+        let mut ship = Self::new(
+            "Breakwater",
+            vec![
+                Module::new(Bow, []),
+                Module::new(Straight, [MainGun]),
+                Module::new(Sponsons, [Director, CloseGun, CloseGun]),
+                Module::new(Sponsons, [TorpedoRack, TorpedoRack, Engine]),
+                Module::new(Straight, [MainGun]),
+                Module::new(Stern, []),
+            ],
+        )
+        .expect("a stock design");
+        ship.sinks_at = 2. / 3.;
+        ship.engine_strength = 2. / 3.;
+        ship.auxiliary_drive = true;
+        ship
+    }
+
+    /// A raider's boat: one module of 4 hull points with nobody aboard to mend it. Its
+    /// engine fails at half structure, so one good hit leaves it adrift.
+    pub fn patrol_boat() -> Self {
+        enemy(
+            "Patrol boat",
+            vec![Module::new(Boat, [MainGun, Engine])],
+            15.,
+            (Boat, 4.),
+            2.,
+            0.,
+        )
+    }
+
+    /// A raider's destroyer: 22 metres, a gun fore and aft and the engine between them,
+    /// with a small crew that mends slowly. Faster than a cruiser and lighter built.
+    pub fn destroyer() -> Self {
+        enemy(
+            "Destroyer",
+            vec![
+                Module::new(Bow, []),
+                Module::new(Straight, [MainGun]),
+                Module::new(Straight, [Engine]),
+                Module::new(Straight, [MainGun]),
+                Module::new(Stern, []),
+            ],
+            22.,
+            (Straight, 3.),
+            2.,
+            0.25,
+        )
+    }
+
+    /// An unarmed merchant hull with its engine aft.
+    pub fn freighter() -> Self {
+        enemy(
+            "Freighter",
+            vec![
+                Module::new(Bow, []),
+                Module::new(Straight, []),
+                Module::new(Straight, []),
+                Module::new(Straight, []),
+                Module::new(Straight, [Engine]),
+                Module::new(Stern, []),
+            ],
+            30.1,
+            (Straight, 4.),
+            0.,
+            0.,
+        )
+    }
+
+    /// The enemy's cruiser: a gun fore and aft, with the engine under the after gun.
+    /// Fire at her middle sinks her. Fire at her stern stops her first.
+    pub fn cruiser() -> Self {
+        enemy(
+            "Cruiser",
+            vec![
+                Module::new(Bow, []),
+                Module::new(Straight, [MainGun]),
+                Module::new(Straight, []),
+                Module::new(Straight, []),
+                Module::new(Straight, [MainGun, Engine]),
+                Module::new(Stern, []),
+            ],
+            30.1,
+            (Straight, 5.),
+            2.,
+            0.5,
+        )
+    }
+
+    /// A capital ship: a magazine under each end turret, and the director and both
+    /// engines amidships, all inside a capital-grade citadel.
+    pub fn battleship() -> Self {
+        let mut ship = enemy(
+            "Battleship",
+            vec![
+                Module::new(Bow, []),
+                Module::new(Wide, [MainGun, Magazine]),
+                Module::new(Wide, [MainGun]),
+                Module::new(Wide, [Director, Engine]),
+                Module::new(Wide, [Engine]),
+                Module::new(Wide, [MainGun, Magazine]),
+                Module::new(Stern, []),
+            ],
+            51.,
+            (Wide, 21.),
+            6.,
+            0.5,
+        );
+        ship.citadel = Some(ArmorGrade::Capital);
+        ship
+    }
+
+    /// The flagship: ten turrets of 3 points each, in pairs across the hull with one
+    /// at each end, and a thin hull behind them.
+    pub fn flagship() -> Self {
+        let pair = || Module::new(Wide, [MainGun, MainGun]);
+        enemy(
+            "Flagship",
+            vec![
+                Module::new(Bow, []),
+                Module::new(Wide, [MainGun]),
+                pair(),
+                pair(),
+                pair(),
+                Module::new(Wide, [Engine, Engine]),
+                pair(),
+                Module::new(Stern, [MainGun]),
+            ],
+            81.,
+            (Wide, 3.),
+            3.,
+            0.,
+        )
+    }
+
+    /// The Regent has five paired gun decks, two end turrets and a deep hull beneath them.
+    pub fn iron_regent() -> Self {
+        let pair = || Module::new(Wide, [MainGun, MainGun]);
+        enemy(
+            "Iron Regent",
+            vec![
+                Module::new(Bow, []),
+                Module::new(Wide, [MainGun]),
+                pair(),
+                pair(),
+                pair(),
+                Module::new(Wide, [Engine, Engine]),
+                pair(),
+                pair(),
+                Module::new(Stern, [MainGun]),
+            ],
+            168.,
+            (Wide, 18.),
+            7.,
+            0.,
+        )
+    }
+}

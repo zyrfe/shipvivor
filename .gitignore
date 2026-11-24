@@ -1,0 +1,67 @@
+# --- Rust / Cargo -------------------------------------------------------------
+# Cargo.lock stays tracked: this is a binary, so builds should be reproducible.
+/target/
+**/*.rs.bk
+*.pdb
+*.profraw
+*.profdata
+
+# --- Bevy ---------------------------------------------------------------------
+# Asset processor output (only appears with the `asset_processor` feature).
+imported_assets/
+# `trace_chrome` and Tracy profiling captures.
+trace-*.json
+*.tracy
+
+# --- Profiling ----------------------------------------------------------------
+flamegraph.svg
+perf.data
+perf.data.old
+
+# --- Dev captures -------------------------------------------------------------
+# The ` key in a debug build writes PNG + state notes here (plus hook markers).
+/work/screenshots/
+
+# --- macOS --------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.DocumentRevisions-V100
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# --- Windows ------------------------------------------------------------------
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.stackdump
+*.lnk
+
+# --- Editors ------------------------------------------------------------------
+# VS Code: share launch/tasks/extensions, keep personal settings local.
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/extensions.json
+.history/
+# JetBrains (RustRover etc.)
+.idea/
+*.iml
+# Vim / Emacs
+*.swp
+*.swo
+*~
+\#*\#
+
+# --- Claude Code --------------------------------------------------------------
+# settings.json and hooks/ are shared; local overrides and worktrees are not.
+.claude/settings.local.json
+.claude/worktrees/
