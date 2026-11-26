@@ -1,7 +1,9 @@
 //! The intermission yard. The ship itself is the menu: select a section of her and its
 //! refits hang beneath it. Work on the hull as a whole has its own panel, and whole
-//! sections from the yard's stock are dragged onto the ship where they should go. Only
-//! confirmation alters the ship that will sail.
+//! sections from the yard's stock are dragged onto the ship where they should go.
+//!
+//! Every order is made on the ship at once and drawn as a blueprint, listed under its
+//! section with its price, and can be taken back until the refit is built.
 use crate::{
     cards,
     insignia::Insignia,
@@ -61,6 +63,77 @@ pub struct StockTile {
 /// The carried section, drawn under the cursor.
 #[derive(Component)]
 pub struct Ghost;
+/// The control for work that the work picked out waits on. It strobes to be found.
+#[derive(Component)]
+pub struct Beckon;
+
+/// Work the yard offers that the work picked out waits on: a job, or a section from the
+/// stock to lengthen her.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Need {
+    Job(DockJob),
+    Stock(DockModule),
+}
+
+/// What the work picked out waits on, when the yard offers it: a broader beam for thicker
+/// plate, a heavier bore or more barrels; fewer barrels for a bore no beam carries in
+/// these; and a longer hull, by a section from the stock, for a broader beam. A wait on
+/// work that waits in turn beckons the first step, which beckons the next once picked.
+fn need(run: &Campaign) -> Option<Need> {
+    let job = run.dock_job()?;
+    let widen = Some(Need::Job(DockJob::WidenBeam));
+    match run.refusal(job) {
+        Some(Refusal::Beam(_)) => return widen,
+        // Any section lengthens her, and an empty bay is the cheapest.
+        Some(Refusal::Length(_)) => {
+            return std::iter::once(DockModule::Reserve)
+                .chain(DockModule::ALL)
+                .find(|&module| run.stock_refusal(module).is_none())
+                .map(Need::Stock);
+        }
+        Some(_) => return None,
+        None if job.fits(run) => return None,
+        None => {}
+    }
+    let house = |at: usize| run.ship.design().modules().get(at).map(|m| m.gunhouse);
+    match job {
+        DockJob::Calibre { at, to, .. } => {
+            let barrels = house(at)?.barrels;
+            match run.beam_for(at, barrels, to) {
+                Some(beam) if beam > run.beam_class() => widen,
+                Some(_) => None,
+                // No beam carries it in so many barrels, but fewer would.
+                None => {
+                    run.beam_for(at, shipvivor_encounter::TurretLayout::Single, to)?;
+                    let fewer = barrels.fewer()?;
+                    Some(Need::Job(DockJob::Barrels {
+                        at,
+                        from: barrels,
+                        to: fewer,
+                    }))
+                }
+            }
+        }
+        DockJob::Barrels { at, to, .. } => run
+            .beam_for(at, to, house(at)?.bore)
+            .filter(|&beam| beam > run.beam_class())
+            .and(widen),
+        _ => None,
+    }
+}
+
+/// A steady strobe, one pulse every half second: 0 at rest, 1 at its brightest.
+fn strobe(seconds: f32) -> f32 {
+    const PERIOD: f32 = 0.5;
+    0.5 - 0.5 * (std::f32::consts::TAU * seconds / PERIOD).cos()
+}
+/// A beckoning control's fill and edge at this point in its strobe.
+fn beckon_paint(base: Color, pulse: f32) -> (Color, Color) {
+    (
+        base.mix(&Color::srgb_u8(150, 116, 44), pulse),
+        brass().mix(&Color::srgb_u8(255, 238, 186), pulse),
+    )
+}
 
 fn brass() -> Color {
     Color::srgb_u8(249, 192, 91)
@@ -492,6 +565,26 @@ pub fn setup(
         cyan(),
         Some(Color::srgba(0.30, 0.93, 0.83, 0.55)),
     );
+    // A traverse fan for each main turret the selected section can carry.
+    let fan = paints.add(StandardMaterial {
+        base_color: Color::WHITE,
+        unlit: true,
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        double_sided: true,
+        ..default()
+    });
+    for slot in 0..2 {
+        cmd.spawn((
+            Fan(slot),
+            Mesh3d::default(),
+            MeshMaterial3d(fan.clone()),
+            Transform::default(),
+            Visibility::Hidden,
+            bevy::light::NotShadowCaster,
+            ChildOf(root),
+        ));
+    }
 }
 
 /// The block a section of the ship occupies in the basin, as a centre and a size. The
@@ -642,7 +735,7 @@ fn proposal_box(run: &Campaign, job: DockJob) -> Option<(Vec3, Vec3)> {
     let fits = job.fits(run);
     Some(match job {
         DockJob::Insert { at, .. } if fits => {
-            let proposed = run.display_design();
+            let proposed = run.projected_design(job)?;
             let (centre, size) = section_box(&proposed, at);
             (centre, size - coords(0.4, 0.4, 0.))
         }
@@ -699,9 +792,7 @@ fn proposal_box(run: &Campaign, job: DockJob) -> Option<(Vec3, Vec3)> {
                 coords(x.abs() * 2. + 1.4, 1.45, 3.),
             )
         }
-        DockJob::Fitting(
-            Card::AntiAir | Card::MoreAntiAir | Card::HeavyAntiAir | Card::QuickAntiAir,
-        ) if fits => {
+        DockJob::Fitting(Card::MoreAntiAir | Card::HeavyAntiAir | Card::QuickAntiAir) if fits => {
             // The pair the card adds, or the first pair for an upgrade to every gun.
             let deck = shipvivor_encounter::DeckOffsets::for_design(design);
             let index = if job == DockJob::Fitting(Card::MoreAntiAir) {
@@ -715,19 +806,32 @@ fn proposal_box(run: &Campaign, job: DockJob) -> Option<(Vec3, Vec3)> {
                 coords(x.abs() * 2. + 1.4, 1.3, 2.2),
             )
         }
-        DockJob::Fitting(Card::Turbines | Card::Hardening) if fits => {
+        DockJob::Fitting(Card::Turbines | Card::Hardening | Card::Pumps) if fits => {
             let deck = shipvivor_encounter::DeckOffsets::for_design(design);
             (
                 coords(0., 2.4, 1.1 + deck.machinery_z),
                 coords(3.4, 4.8, 4.5),
             )
         }
-        DockJob::Fitting(_) | DockJob::Calibre(_) | DockJob::TwinTurrets if fits => {
-            // Bore, barrels and shells change every turret. Show the one on this bay.
-            let guns = design.gun_stations();
+        DockJob::Fitting(_)
+        | DockJob::Calibre { .. }
+        | DockJob::Barrels { .. }
+        | DockJob::Barbette { .. }
+            if fits =>
+        {
+            // A turret's own refit outlines it, standing as it would. Shells and gear
+            // change every turret, so the one on this bay is shown.
+            let bay = match job {
+                DockJob::Calibre { at, .. }
+                | DockJob::Barrels { at, .. }
+                | DockJob::Barbette { at, .. } => at,
+                _ => run.dock_module,
+            };
+            let projected = run.projected_design(job);
+            let guns = projected.as_ref().unwrap_or(design).gun_stations();
             let mount = guns
                 .iter()
-                .find(|g| g.berth.module == run.dock_module)
+                .find(|g| g.berth.module == bay)
                 .or_else(|| guns.iter().find(|g| !g.paired()))
                 .or(guns.first())?;
             let scale = run
@@ -742,7 +846,7 @@ fn proposal_box(run: &Campaign, job: DockJob) -> Option<(Vec3, Vec3)> {
             };
             let at = coords(
                 mount.abeam + mount.home.sin() * 1.4 * scale,
-                1.72 + 0.7 * scale,
+                1.72 + mount.lift() + 0.7 * scale,
                 -mount.fore - mount.home.cos() * 1.4 * scale,
             );
             (at, local_size * scale)
@@ -758,10 +862,23 @@ pub fn stage(
     mut basin: Single<&mut Visibility, (With<Basin>, Without<Cage>)>,
     mut cages: Query<(&Cage, &mut Transform, &mut Visibility), Without<Basin>>,
     mut buttons: Query<
-        (&YardButton, &RelativeCursorPosition, &mut BackgroundColor),
+        (
+            &YardButton,
+            &RelativeCursorPosition,
+            &mut BackgroundColor,
+            &mut BorderColor,
+            Has<Beckon>,
+        ),
         Without<StockTile>,
     >,
-    mut tiles: Query<(&StockTile, &RelativeCursorPosition, &mut BackgroundColor)>,
+    mut tiles: Query<(
+        &StockTile,
+        &RelativeCursorPosition,
+        &mut BackgroundColor,
+        &mut BorderColor,
+        Has<Beckon>,
+    )>,
+    clock: Res<Time>,
 ) {
     if !matches!(run.screen(), Screen::Drydock(_)) {
         basin.set_if_neq(Visibility::Hidden);
@@ -809,20 +926,32 @@ pub fn stage(
             visible.set_if_neq(Visibility::Hidden);
         }
     }
-    for (button, mouse, mut bg) in &mut buttons {
-        bg.set_if_neq(BackgroundColor(button_paint(
-            button.selected,
-            button.confirm,
-            mouse.cursor_over(),
-        )));
+    // Work that the work picked out waits on strobes, so it can be found.
+    let pulse = strobe(clock.elapsed_secs());
+    for (button, mouse, mut bg, mut edge, beckons) in &mut buttons {
+        let base = button_paint(button.selected, button.confirm, mouse.cursor_over());
+        if beckons {
+            let (fill, rim) = beckon_paint(base, pulse);
+            bg.set_if_neq(BackgroundColor(fill));
+            edge.set_if_neq(BorderColor::all(rim));
+        } else {
+            bg.set_if_neq(BackgroundColor(base));
+        }
     }
-    for (tile, mouse, mut bg) in &mut tiles {
+    for (tile, mouse, mut bg, mut edge, beckons) in &mut tiles {
         let lifted = pointer.carrying == Some(tile.module);
-        bg.set_if_neq(BackgroundColor(if tile.refused {
+        let base = if tile.refused {
             panel()
         } else {
             button_paint(lifted, false, mouse.cursor_over())
-        }));
+        };
+        if beckons {
+            let (fill, rim) = beckon_paint(base, pulse);
+            bg.set_if_neq(BackgroundColor(fill));
+            edge.set_if_neq(BorderColor::all(rim));
+        } else {
+            bg.set_if_neq(BackgroundColor(base));
+        }
     }
 }
 
@@ -863,6 +992,15 @@ pub fn place(
         ),
     >,
     floor: Query<&ComputedNode, With<Floor>>,
+    mut ledgers: Query<
+        (&Ledger, &mut Node, &ComputedNode),
+        (
+            Without<Callout>,
+            Without<Leader>,
+            Without<HoverTag>,
+            Without<Ghost>,
+        ),
+    >,
     mut ghost: Query<(&mut Node, &mut ImageNode), (With<Ghost>, Without<HoverIcon>)>,
     mut label: Query<&mut Text, With<HoverText>>,
     mut glyph: Query<&mut ImageNode, (With<HoverIcon>, Without<Ghost>)>,
@@ -880,20 +1018,34 @@ pub fn place(
         return;
     };
     let size = |c: &ComputedNode| c.size() * c.inverse_scale_factor();
-    // The callout hangs under the selected section, or under a new section being tried
-    // in place. Hull work is shown on the hull panel instead.
-    let proposed = run.display_design();
-    let target = match run.dock_draft {
-        Some(DockJob::Insert { at, .. }) => Some((&*proposed, at)),
-        Some(_) => None,
-        None => Some((&**design, run.dock_module)),
+    // The orders made on each section are listed under it, and the callout hangs under
+    // the selected section, below its list.
+    let keel = |at: usize| {
+        (at < design.modules().len())
+            .then(|| {
+                project(coords(
+                    -0.5 * design.beam(),
+                    -0.6,
+                    section_box(design, at).0.z,
+                ))
+            })
+            .flatten()
     };
-    let anchor = target
-        .filter(|(design, at)| *at < design.modules().len())
-        .and_then(|(design, at)| {
-            let centre = section_box(design, at).0;
-            project(coords(-0.5 * design.beam(), -0.6, centre.z))
-        });
+    let mut listed = 0.;
+    for (ledger, mut node, computed) in &mut ledgers {
+        let Some(anchor) = keel(ledger.0) else {
+            node.display = Display::None;
+            continue;
+        };
+        let extent = size(computed);
+        node.display = Display::Flex;
+        node.left = px(anchor.x - 0.5 * extent.x);
+        node.top = px(anchor.y + 8.);
+        if ledger.0 == run.dock_module {
+            listed = extent.y + 8.;
+        }
+    }
+    let anchor = keel(run.dock_module);
     // The callout stays clear of the panels along the floor of the yard.
     let ceiling = floor
         .iter()
@@ -905,16 +1057,14 @@ pub fn place(
             continue;
         };
         let extent = size(computed);
-        // The options column sits under the section; the panel stays on screen.
+        // The options column sits under the section; the panel stays on screen. It keeps
+        // room for the figures column, so showing them never moves the options.
+        let room = OPTIONS_WIDTH + 24. + FIGURES_WIDTH + 15.;
         let left =
-            (anchor.x - 0.5 * OPTIONS_WIDTH - 12.).clamp(12., (screen.x - extent.x - 12.).max(12.));
-        // A new section's measure hangs under the hull, so its order hangs lower.
-        let drop = if run.preview_insert().is_some() {
-            56.
-        } else {
-            34.
-        };
-        let top = (anchor.y + drop).min(ceiling - extent.y - 10.).max(12.);
+            (anchor.x - 0.5 * OPTIONS_WIDTH - 12.).clamp(12., (screen.x - room - 12.).max(12.));
+        let top = (anchor.y + 34. + listed)
+            .min(ceiling - extent.y - 10.)
+            .max(12.);
         node.display = Display::Flex;
         node.left = px(left);
         node.top = px(top);
@@ -988,6 +1138,8 @@ pub fn place(
 }
 
 const OPTIONS_WIDTH: f32 = 372.;
+/// Width of the column of figures for the refit under the cursor.
+const FIGURES_WIDTH: f32 = 250.;
 
 /// What the hover tag and the callout call a section.
 fn section_name(run: &Campaign, at: usize) -> &'static str {
@@ -1055,11 +1207,18 @@ fn job_name(job: DockJob, run: &Campaign) -> String {
     match job {
         DockJob::Insert { module, .. } => format!("Add {}", module.name().to_lowercase()),
         DockJob::WidenBeam => "Widen beam".into(),
-        DockJob::TwinTurrets => "Twin turrets".into(),
         DockJob::Fitting(card) => cards::face(card, run.fittings, run.ship.design())
             .name
             .into(),
-        DockJob::Calibre(inches) => format!("{inches}-inch main battery"),
+        DockJob::Calibre { to, .. } => format!("{to}-inch guns"),
+        DockJob::Barrels { from, to, .. } => match (to > from, to.count()) {
+            (false, _) => "Fewer barrels".into(),
+            (true, 2) => "Twin turret".into(),
+            (true, 3) => "Triple turret".into(),
+            _ => "Quad turret".into(),
+        },
+        DockJob::Barbette { from, to, .. } if to > from => "Raise turret".into(),
+        DockJob::Barbette { .. } => "Lower turret".into(),
         DockJob::Move { from, to } => if to < from {
             "Move forward"
         } else {
@@ -1121,6 +1280,24 @@ fn button(
     }
     entity.id()
 }
+/// A tile's price in yard points, in its top corner by the spanner.
+fn price_tag(cmd: &mut Commands, tile: Entity, art: &Insignia, cost: u16, ink: Color) {
+    let price = cmd
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: px(3),
+                right: px(4),
+                column_gap: px(2),
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            ChildOf(tile),
+        ))
+        .id();
+    icon(cmd, price, art.order.clone(), ink, 9.);
+    text(cmd, price, cost.to_string(), 10., ink);
+}
 fn icon(cmd: &mut Commands, parent: Entity, image: Handle<Image>, color: Color, size: f32) {
     cmd.spawn((
         ImageNode {
@@ -1180,39 +1357,38 @@ pub fn screen(
     art: &Insignia,
     reason: LegEnd,
 ) {
-    if run.preview_insert().is_some() {
-        let measure = cmd
-            .spawn((
-                Dimension,
-                Node {
-                    position_type: PositionType::Absolute,
-                    display: Display::None,
-                    height: px(26),
-                    border: UiRect {
-                        left: px(2),
-                        right: px(2),
-                        bottom: px(2),
-                        ..default()
-                    },
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
+    // The length a section carried over a seam would add, measured under where it goes.
+    let measure = cmd
+        .spawn((
+            Dimension,
+            Node {
+                position_type: PositionType::Absolute,
+                display: Display::None,
+                height: px(26),
+                border: UiRect {
+                    left: px(2),
+                    right: px(2),
+                    bottom: px(2),
                     ..default()
                 },
-                BorderColor::all(cyan()),
-                ChildOf(root),
-            ))
-            .id();
-        let caption = node(
-            cmd,
-            measure,
-            Node {
-                padding: UiRect::axes(px(5), px(1)),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
                 ..default()
             },
-            panel(),
-        );
-        text(cmd, caption, "+5 m", 15., cyan());
-    }
+            BorderColor::all(cyan()),
+            ChildOf(root),
+        ))
+        .id();
+    let caption = node(
+        cmd,
+        measure,
+        Node {
+            padding: UiRect::axes(px(5), px(1)),
+            ..default()
+        },
+        panel(),
+    );
+    text(cmd, caption, "+5 m", 15., cyan());
     header(cmd, root, run, battle, art, reason);
 
     // The section under the cursor, named above it each frame.
@@ -1266,14 +1442,9 @@ pub fn screen(
         ChildOf(root),
     ));
 
+    ledgers(cmd, root, run, art);
     floor(cmd, root, run, art);
-    // Work on the whole hull is shown on the hull panel instead.
-    if !run
-        .dock_draft
-        .is_some_and(|job| run.hull_jobs().contains(&job))
-    {
-        callout(cmd, root, run, art);
-    }
+    callout(cmd, root, run, art);
     // Drawn last, so the carried section passes over every panel.
     cmd.spawn((
         Ghost,
@@ -1293,8 +1464,93 @@ pub fn screen(
     ));
 }
 
-/// The refits of the selected section, hung under it, or the order for a new section
-/// dropped onto the ship, hung under where it would go.
+/// The orders made on one section and not yet built, listed on the water under it.
+#[derive(Component)]
+pub struct Ledger(pub usize);
+
+fn ledgers(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
+    let Some(plan) = run.plan() else { return };
+    let mut sections: Vec<usize> = plan.orders().iter().filter_map(|o| plan.place(o)).collect();
+    sections.sort_unstable();
+    sections.dedup();
+    for at in sections {
+        let list = cmd
+            .spawn((
+                Ledger(at),
+                Solid,
+                RelativeCursorPosition::default(),
+                Node {
+                    position_type: PositionType::Absolute,
+                    display: Display::None,
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(3),
+                    padding: UiRect::all(px(4)),
+                    border: UiRect::top(px(2)),
+                    ..default()
+                },
+                BackgroundColor(panel()),
+                BorderColor::all(cyan()),
+                ChildOf(root),
+            ))
+            .id();
+        for (index, order) in plan.orders().iter().enumerate() {
+            if plan.place(order) == Some(at) {
+                order_row(cmd, list, run, art, index, order);
+            }
+        }
+    }
+}
+
+/// One order not yet built: what it is and its price. A click takes it back.
+fn order_row(
+    cmd: &mut Commands,
+    parent: Entity,
+    run: &Campaign,
+    art: &Insignia,
+    index: usize,
+    order: &shipvivor_campaign::Order,
+) {
+    let row = button(
+        cmd,
+        parent,
+        Some(Action::Undo(index)),
+        false,
+        false,
+        Node {
+            height: px(24),
+            padding: UiRect::axes(px(6), px(0)),
+            column_gap: px(5),
+            align_items: AlignItems::Center,
+            border: UiRect::all(px(1)),
+            ..default()
+        },
+    );
+    icon(
+        cmd,
+        row,
+        catalog::tile_art(order.job, run, art),
+        cyan(),
+        14.,
+    );
+    text(
+        cmd,
+        row,
+        catalog::order_caption(order.job, run),
+        12.,
+        paper(),
+    );
+    spacer(cmd, row);
+    if order.cost > 0 {
+        icon(cmd, row, art.order.clone(), brass(), 11.);
+        text(cmd, row, order.cost.to_string(), 12., brass());
+    } else {
+        text(cmd, row, "Free", 11., muted());
+    }
+    icon(cmd, row, art.undo.clone(), muted(), 10.);
+}
+
+/// The refits of the selected section, hung under it, with the figures for the one under
+/// the cursor beside them.
 fn callout(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
     let callout = cmd
         .spawn((
@@ -1337,12 +1593,6 @@ fn callout(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
         },
         Color::NONE,
     );
-    if let Some(job @ DockJob::Insert { module, .. }) = run.dock_draft {
-        icon(cmd, head, catalog::stock_art(module, art), cyan(), 22.);
-        text(cmd, head, module.name(), 17., cyan());
-        order_card(cmd, options, run, art, job, false);
-        return;
-    }
     let at = run.dock_module;
     let jobs = run.dock_jobs();
     icon(cmd, head, section_art(run, at, art), brass(), 22.);
@@ -1376,14 +1626,52 @@ fn callout(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
         &[(here, brass()), (run.main_turrets() - here, paper())],
     );
     catalog::options(cmd, options, run, art, &jobs);
+    // The callout keeps one size whatever is picked, so a second click lands on the tile
+    // the first one did.
+    cmd.entity(callout).entry::<Node>().and_modify(|mut node| {
+        node.min_height = px(CALLOUT_HEIGHT);
+    });
 
-    // The preview column opens only once a refit is chosen.
-    if let Some(job) = run.dock_job() {
-        order_card(cmd, callout, run, art, job, true);
+    // The figures for the refit picked out. Their column keeps its room when nothing is
+    // picked.
+    match run.dock_job().filter(|job| jobs.contains(job)) {
+        Some(job) => order_card(cmd, callout, run, art, job, true),
+        None => {
+            let spec = figures(cmd, callout, true);
+            text(cmd, spec, "Click a refit", 13., muted());
+        }
     }
 }
 
-/// A previewed job: its name, what it changes, and the button that fits it.
+/// Least height of a section's callout: room for its options and the tallest figures.
+const CALLOUT_HEIGHT: f32 = 290.;
+
+/// The column a refit's figures stand in, beside the options or on top of the hull panel.
+fn figures(cmd: &mut Commands, parent: Entity, column: bool) -> Entity {
+    cmd.spawn((
+        Node {
+            flex_direction: FlexDirection::Column,
+            width: px(FIGURES_WIDTH),
+            row_gap: px(7),
+            padding: if column {
+                UiRect::left(px(14))
+            } else {
+                UiRect::bottom(px(4))
+            },
+            border: if column {
+                UiRect::left(px(1))
+            } else {
+                UiRect::ZERO
+            },
+            ..default()
+        },
+        BorderColor::all(rule()),
+        ChildOf(parent),
+    ))
+    .id()
+}
+
+/// A refit's figures: its name, what it changes, and what it costs.
 fn order_card(
     cmd: &mut Commands,
     parent: Entity,
@@ -1392,106 +1680,85 @@ fn order_card(
     job: DockJob,
     column: bool,
 ) {
-    let spec = cmd
-        .spawn((
-            Node {
-                flex_direction: FlexDirection::Column,
-                width: px(250),
-                row_gap: px(7),
-                padding: if column {
-                    UiRect::left(px(14))
-                } else {
-                    UiRect::top(px(4))
-                },
-                border: if column {
-                    UiRect::left(px(1))
-                } else {
-                    UiRect::ZERO
-                },
-                ..default()
-            },
-            BorderColor::all(rule()),
-            ChildOf(parent),
-        ))
-        .id();
-    if column {
-        text(cmd, spec, job_name(job, run), 16., paper());
-    }
+    let spec = figures(cmd, parent, column);
+    text(cmd, spec, job_name(job, run), 16., paper());
     if catalog::ship_wide(job) {
         text(cmd, spec, "ALL TURRETS", 10., cyan());
     }
     proposal::details(cmd, spec, run, art, job);
     let fits = job.fits(run);
     let cost = job.cost();
-    let affordable = cost <= run.fittings_remaining();
-    let enabled = fits && affordable;
-    // An empty bay bought with the last order has nothing left to put on it.
-    let empty_bay = matches!(
-        job,
-        DockJob::Insert {
-            module: DockModule::Reserve,
-            ..
-        }
-    );
-    if enabled && empty_bay && run.spends_last_order(job) {
+    let left = run.points_after(job);
+    let enabled = fits && left.is_some();
+    // An empty bay that leaves too few points for a turret has nothing to put on it.
+    if let Some(left) = left.filter(|_| enabled && run.leaves_bay_empty(job)) {
         badge(
             cmd,
             spec,
             art.order.clone(),
             brass(),
-            "Last order: this bay sails empty",
+            format!(
+                "{left} point{} left: this bay sails empty",
+                if left == 1 { "" } else { "s" }
+            ),
             12.,
         );
     }
-    let submit = button(
+    // A fitting at its last rank is done, not locked. Work the yard can make is ordered
+    // from its price.
+    let done = catalog::fully_fitted(job, run);
+    let price = button(
         cmd,
         spec,
         enabled.then_some(Action::Confirm),
         false,
         true,
         Node {
-            height: px(36),
-            justify_content: JustifyContent::Center,
+            height: px(34),
+            padding: UiRect::axes(px(10), px(0)),
+            column_gap: px(6),
             align_items: AlignItems::Center,
-            column_gap: px(4),
             border: UiRect::all(px(1)),
             ..default()
         },
     );
-    // A fitting at its last rank is done, not locked.
-    let done = catalog::fully_fitted(job, run);
     let ink = if enabled {
         panel()
     } else if done {
         cyan()
-    } else {
+    } else if !fits {
         muted()
+    } else {
+        cards::Change::Cost.color()
     };
-    if fits {
-        // The price in work orders, one spanner each.
-        for _ in 0..cost {
-            icon(cmd, submit, art.order.clone(), ink, 16.);
-        }
-    } else if !done {
-        icon(cmd, submit, art.lock.clone(), ink, 16.);
+    if !enabled {
+        cmd.entity(price)
+            .insert((BorderColor::all(ink), BackgroundColor(Color::NONE)));
     }
-    text(
-        cmd,
-        submit,
-        match (fits, affordable) {
-            _ if done => "Fitted",
-            (false, _) => " Locked",
-            (_, false) => " Short of orders",
-            _ if cost == 0 => "Free  [Enter]",
-            _ => " Fit  [Enter]",
-        },
-        15.,
-        ink,
-    );
+    if done {
+        text(cmd, price, "Fitted", 14., ink);
+        return;
+    }
+    if !fits {
+        icon(cmd, price, art.lock.clone(), ink, 14.);
+        text(cmd, price, "Locked", 14., ink);
+        return;
+    }
+    if cost > 0 {
+        icon(cmd, price, art.order.clone(), ink, 14.);
+        text(cmd, price, cost.to_string(), 15., ink);
+    } else {
+        text(cmd, price, "Free", 14., ink);
+    }
+    if left.is_none() {
+        text(cmd, price, " Short of points", 13., ink);
+    } else {
+        text(cmd, price, "  Order  [Enter]", 14., ink);
+    }
 }
 
-/// The floor of the yard: work on the hull as a whole, and the stock of whole sections
-/// to drag onto the ship.
+/// The floor of the yard: work on the hull as a whole, the stock of whole sections to
+/// drag onto the ship, and the way out: build the orders, then sail.
 fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
     let floor = cmd
         .spawn((
@@ -1541,12 +1808,34 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
         row
     };
 
-    // The hull as a whole: how long and how wide she is, and the work on both.
+    // The hull as a whole: how long and how wide she is, and the work on both. The
+    // figures for the work picked out float above the panel, so nothing moves.
     let hull = shelf(cmd, brass());
+    let picked = run.dock_job().filter(|job| run.hull_jobs().contains(job));
+    if let Some(job) = picked {
+        let float = cmd
+            .spawn((
+                Solid,
+                RelativeCursorPosition::default(),
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(0),
+                    bottom: percent(100),
+                    margin: UiRect::bottom(px(6)),
+                    padding: UiRect::all(px(10)),
+                    border: UiRect::top(px(2)),
+                    ..default()
+                },
+                BackgroundColor(panel()),
+                BorderColor::all(brass()),
+                ChildOf(hull),
+            ))
+            .id();
+        order_card(cmd, float, run, art, job, false);
+    }
     let head = title(cmd, hull, art.hull.clone(), "HULL");
     spacer(cmd, head);
     let design = run.ship.design();
-    let drafted = run.dock_draft.filter(|job| run.hull_jobs().contains(job));
     let figures = node(
         cmd,
         hull,
@@ -1572,6 +1861,24 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
         format!("{:.1} m", design.beam()),
         14.,
     );
+    // Hull work on order, each with its price, taken back with a click.
+    if let Some(plan) = run.plan() {
+        let list = node(
+            cmd,
+            hull,
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(3),
+                ..default()
+            },
+            Color::NONE,
+        );
+        for (index, order) in plan.orders().iter().enumerate() {
+            if plan.place(order).is_none() {
+                order_row(cmd, list, run, art, index, order);
+            }
+        }
+    }
     let works = node(
         cmd,
         hull,
@@ -1581,20 +1888,24 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
         },
         Color::NONE,
     );
+    let need = need(run);
     for job in run.hull_jobs() {
         let refused = run.refusal(job);
-        let chosen = drafted == Some(job);
-        let tint = if chosen {
-            brass()
-        } else if refused.is_some() || !job.fits(run) {
+        let chosen = picked == Some(job);
+        let tint = if refused.is_some() || !job.fits(run) {
             rule()
         } else {
             paper()
         };
+        // A click picks the work out to read its figures, and a second orders it.
         let tile = button(
             cmd,
             works,
-            Some(Action::Draft(job)),
+            Some(if chosen {
+                Action::Draft(job)
+            } else {
+                Action::Pick(job)
+            }),
             chosen,
             false,
             Node {
@@ -1608,6 +1919,9 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
                 ..default()
             },
         );
+        if need == Some(Need::Job(job)) {
+            cmd.entity(tile).insert(Beckon);
+        }
         let (image, words) = match job {
             DockJob::Fitting(card) => (
                 art.fitting(card),
@@ -1626,6 +1940,14 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
             ),
         };
         icon(cmd, tile, image, tint, 22.);
+        if refused.is_none() && job.fits(run) {
+            let ink = if run.points_after(job).is_none() {
+                cards::Change::Cost.color()
+            } else {
+                brass()
+            };
+            price_tag(cmd, tile, art, job.cost(), ink);
+        }
         // A step the hull is not ready for shows what it waits on, as the stock tiles do:
         // thicker armor on a broader beam, and a broader beam on a longer hull.
         let waits = match refused {
@@ -1651,9 +1973,6 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
             }
             None => text(cmd, tile, words, 10., tint),
         }
-    }
-    if let Some(job) = drafted {
-        order_card(cmd, hull, run, art, job, false);
     }
 
     // The yard's stock: whole sections, each dragged to the seam it should go into.
@@ -1694,30 +2013,18 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
                 ChildOf(row),
             ))
             .id();
-        // The price sits in the corner, one spanner a work order.
-        let price = cmd
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: px(3),
-                    right: px(3),
-                    column_gap: px(1),
-                    ..default()
-                },
-                ChildOf(tile),
-            ))
-            .id();
-        // Spanners the yard cannot pay for are red.
+        if need == Some(Need::Stock(module)) {
+            cmd.entity(tile).insert(Beckon);
+        }
+        // A price the yard cannot pay is red.
         let ink = if refused.is_some() {
             rule()
-        } else if module.cost() > run.fittings_remaining() {
+        } else if module.cost() > run.points() {
             cards::Change::Cost.color()
         } else {
             brass()
         };
-        for _ in 0..module.cost() {
-            icon(cmd, price, art.order.clone(), ink, 9.);
-        }
+        price_tag(cmd, tile, art, module.cost(), ink);
         icon(cmd, tile, catalog::stock_art(module, art), tint, 24.);
         let caption = node(
             cmd,
@@ -1748,6 +2055,227 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
                 text(cmd, caption, words, 10., muted());
             }
         }
+    }
+
+    spacer(cmd, floor);
+    finish(cmd, floor, run, art);
+}
+
+/// The way out of the yard, big enough to find at a glance, with the points left to spend
+/// above it: lock in the orders, then sail. It does its own work whatever refit is picked
+/// out, and says that points left over are banked for the next yard.
+fn finish(cmd: &mut Commands, parent: Entity, run: &Campaign, art: &Insignia) {
+    let plan = run.plan();
+    let points = run.points();
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let stack = node(
+        cmd,
+        parent,
+        Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: px(6),
+            ..default()
+        },
+        Color::NONE,
+    );
+    // The points left once the orders are built, and what the orders cost.
+    let purse = cmd
+        .spawn((
+            Solid,
+            RelativeCursorPosition::default(),
+            Node {
+                padding: UiRect::axes(px(12), px(7)),
+                column_gap: px(10),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                border: UiRect::top(px(2)),
+                ..default()
+            },
+            BackgroundColor(panel()),
+            BorderColor::all(brass()),
+            ChildOf(stack),
+        ))
+        .id();
+    badge(
+        cmd,
+        purse,
+        art.order.clone(),
+        brass(),
+        format!("{points} point{}", plural(points.into())),
+        18.,
+    );
+    if let Some(plan) = plan {
+        text(
+            cmd,
+            purse,
+            format!("({} on order)", plan.cost()),
+            13.,
+            cyan(),
+        );
+    }
+    let big = button(
+        cmd,
+        stack,
+        Some(Action::Sail),
+        false,
+        true,
+        Node {
+            min_width: px(250),
+            height: px(84),
+            padding: UiRect::axes(px(26), px(8)),
+            flex_direction: FlexDirection::Column,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            row_gap: px(5),
+            border: UiRect::all(px(2)),
+            ..default()
+        },
+    );
+    cmd.entity(big)
+        .insert((Solid, BorderColor::all(Color::srgb_u8(255, 226, 160))));
+    let line = |cmd: &mut Commands| {
+        node(
+            cmd,
+            big,
+            Node {
+                align_items: AlignItems::Center,
+                column_gap: px(8),
+                ..default()
+            },
+            Color::NONE,
+        )
+    };
+    let top = line(cmd);
+    let foot = line(cmd);
+    if let Some(plan) = plan {
+        let orders = plan.orders().len();
+        icon(cmd, top, art.lock.clone(), panel(), 24.);
+        text(cmd, top, "LOCK IN", 26., panel());
+        // What the orders leave unspent is banked too, so say so before she locks in,
+        // not only after: a lone point that buys nothing here is not lost.
+        let banked = if points > 0 {
+            format!(", {points} banked")
+        } else {
+            String::new()
+        };
+        text(
+            cmd,
+            foot,
+            format!("{orders} order{}{banked}   [Enter]", plural(orders)),
+            14.,
+            panel(),
+        );
+    } else {
+        icon(cmd, top, art.hull.clone(), panel(), 28.);
+        text(cmd, top, "SAIL", 28., panel());
+        // Points left over are banked for the next yard, not lost.
+        if points > 0 {
+            text(
+                cmd,
+                foot,
+                format!("{points} point{} banked", plural(points.into())),
+                14.,
+                panel(),
+            );
+        }
+        text(cmd, foot, "[Enter]", 14., panel());
+    }
+}
+
+/// The train of one main turret on the selected section, laid flat on the deck.
+#[derive(Component)]
+pub struct Fan(usize);
+
+/// Metres from a turret to the rim of its traverse fan.
+const FAN_REACH: f32 = 8.5;
+
+/// A flat fan over the bearings a turret can train to: a pale sector with a bright rim
+/// and bright edges where its arc stops. Bearings are from the bow, to starboard.
+pub fn fan_mesh(station: &shipvivor_shipyard::GunStation, reach: f32) -> Mesh {
+    use std::f32::consts::TAU;
+    const STEPS: usize = 180;
+    let fill = Color::srgba(0.49, 0.90, 0.85, 0.26);
+    let edge = Color::srgba(0.55, 0.95, 0.90, 0.85);
+    let along = |bearing: f32, r: f32| Vec3::new(bearing.sin() * r, 0., -bearing.cos() * r);
+    let bearing = |i: usize| i as f32 * TAU / STEPS as f32;
+    let mut mesh = crate::scene::Facets::default();
+    let bears = |i: usize| station.bears(bearing(i % STEPS) + 0.5 * TAU / STEPS as f32);
+    for i in 0..STEPS {
+        if !bears(i) {
+            continue;
+        }
+        let (a, b) = (bearing(i), bearing(i + 1));
+        mesh.triangle([Vec3::ZERO, along(b, reach), along(a, reach)], fill);
+        mesh.quad(
+            [
+                along(a, reach * 0.95),
+                along(a, reach),
+                along(b, reach),
+                along(b, reach * 0.95),
+            ],
+            edge,
+        );
+        // Where the arc stops, a bright edge runs out to the rim.
+        for (side, open) in [(a, !bears(i + STEPS - 1)), (b, !bears(i + 1))] {
+            if open {
+                let across = Vec3::new(side.cos(), 0., side.sin()) * 0.06;
+                let tip = along(side, reach);
+                mesh.quad([-across, across, tip + across, tip - across], edge);
+            }
+        }
+    }
+    mesh.finish()
+}
+
+/// Lay the traverse fans of the selected section's main turrets on the deck, as they
+/// stand or as the refit under the cursor would leave them.
+#[allow(clippy::type_complexity)]
+pub fn fans(
+    run: Res<Campaign>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut fans: Query<(&Fan, &mut Mesh3d, &mut Transform, &mut Visibility)>,
+    mut last: Local<Option<(u32, usize, Option<DockJob>)>>,
+) {
+    if !matches!(run.screen(), Screen::Drydock(_)) {
+        for (_, _, _, mut shown) in &mut fans {
+            shown.set_if_neq(Visibility::Hidden);
+        }
+        *last = None;
+        return;
+    }
+    let job = run.dock_job();
+    let key = (run.dock_revision, run.dock_module, job);
+    if *last == Some(key) {
+        return;
+    }
+    *last = Some(key);
+    let reshapes = |job: &DockJob| {
+        matches!(
+            job,
+            DockJob::Barbette { .. } | DockJob::Move { .. } | DockJob::Replace { .. }
+        )
+    };
+    let projected = job
+        .filter(reshapes)
+        .and_then(|job| run.projected_design(job));
+    let design = projected.as_ref().unwrap_or(run.ship.design());
+    let at = match job.filter(|_| projected.is_some()) {
+        Some(DockJob::Move { to, .. }) => to,
+        _ => run.dock_module,
+    };
+    let stations: Vec<_> = design
+        .gun_stations()
+        .into_iter()
+        .filter(|g| g.berth.module == at)
+        .collect();
+    for (fan, mut mesh, mut pose, mut shown) in &mut fans {
+        let Some(station) = stations.get(fan.0) else {
+            shown.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        *mesh = Mesh3d(meshes.add(fan_mesh(station, FAN_REACH)));
+        *pose = Transform::from_xyz(station.abeam, 2.0 + station.lift(), -station.fore);
+        shown.set_if_neq(Visibility::Inherited);
     }
 }
 
@@ -1849,47 +2377,21 @@ fn header(
         13.,
         muted(),
     );
-
-    let orders = column(cmd, AlignItems::End);
-    if run.fittings_remaining() == 0 {
-        // Every order is spent. She stays for free work until she is sailed.
-        let sail = button(
+    // The clock pays on top of the stars, or says it was missed.
+    if run.beat_clock() {
+        text(
             cmd,
-            orders,
-            Some(Action::Sail),
-            false,
-            true,
-            Node {
-                height: px(32),
-                padding: UiRect::axes(px(14), px(0)),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                column_gap: px(6),
-                border: UiRect::all(px(1)),
-                ..default()
-            },
-        );
-        icon(cmd, sail, art.hull.clone(), panel(), 16.);
-        text(cmd, sail, "Sail  [Enter]", 15., panel());
-    } else {
-        let tickets = line(cmd, orders);
-        badge(
-            cmd,
-            tickets,
-            art.order.clone(),
+            tally,
+            format!("Clock beaten  +{} pts", run.clock_points()),
+            13.,
             brass(),
-            format!(
-                "{} work order{}",
-                run.fittings_remaining(),
-                if run.fittings_remaining() == 1 {
-                    ""
-                } else {
-                    "s"
-                }
-            ),
-            18.,
         );
+    } else {
+        text(cmd, tally, "Past the clock", 13., muted());
     }
+
+    // Her hull, as the dock has mended it. The points to spend stand over the way out.
+    let orders = column(cmd, AlignItems::End);
     let hull = line(cmd, orders);
     let percent = run.hull_percent();
     icon(cmd, hull, art.hull.clone(), muted(), 14.);
@@ -1926,32 +2428,36 @@ fn percent_of(value: u16) -> Val {
     Val::Percent(f32::from(value.min(100)))
 }
 
-/// Project both ends of the frame the dock crew would splice in, under where it goes.
+/// Project both ends of the frame a carried section would make, under the seam it is
+/// over.
 pub fn dimension(
     run: Res<Campaign>,
+    pointer: Res<Pointer>,
     scale: Res<UiScale>,
     camera: Single<(&Camera, &GlobalTransform), With<crate::camera::FollowCamera>>,
     mut labels: Query<&mut Node, With<Dimension>>,
 ) {
     let (camera, pose) = *camera;
-    let proposed = run.display_design();
-    let span = run.preview_insert().map(|(at, _)| proposed.span(at));
+    let carried = pointer.carrying.zip(pointer.gap).and_then(|(module, at)| {
+        let job = DockJob::Insert { at, module };
+        run.projected_design(job).map(|design| (design, at))
+    });
     for mut label in &mut labels {
+        let Some((design, at)) = &carried else {
+            label.display = Display::None;
+            continue;
+        };
         let point = |aft: f32| {
             camera
                 .world_to_viewport(
                     pose,
-                    BERTH
-                        + Vec3::new(
-                            -0.5 * proposed.beam() - 0.35,
-                            -1.05,
-                            aft - Hull::CRUISER.bow,
-                        ),
+                    BERTH + Vec3::new(-0.5 * design.beam() - 0.35, -1.05, aft - Hull::CRUISER.bow),
                 )
                 .ok()
                 .map(|p| p / scale.0)
         };
-        let Some((Some(a), Some(b))) = span.map(|(fore, aft)| (point(fore), point(aft))) else {
+        let (fore, aft) = design.span(*at);
+        let (Some(a), Some(b)) = (point(fore), point(aft)) else {
             label.display = Display::None;
             continue;
         };
@@ -1979,6 +2485,36 @@ mod tests {
         // Open water beside the hull is not the ship.
         let water = coords(-design.beam() - 6., 0., 0.);
         assert_eq!(section_at(design, water - look * 80., look), None);
+    }
+
+    #[test]
+    fn a_turret_fan_covers_the_bearings_it_trains_to_and_none_it_cannot() {
+        let run = Campaign::default();
+        let guns = run.ship.design().gun_stations();
+        // The forward turret trains across the bow, and not back over the bridge.
+        let fore = guns[0];
+        assert!(fore.bears(0.) && !fore.bears(std::f32::consts::PI));
+        let mesh = fan_mesh(&fore, FAN_REACH);
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(points)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("a fan has positions");
+        };
+        let mut ahead = false;
+        for p in points.iter().map(|p| Vec3::from_array(*p)) {
+            if p.length() < 0.5 {
+                continue;
+            }
+            // Bearings from the bow, to starboard, as the fan is laid out.
+            let bearing = p.x.atan2(-p.z);
+            let step = std::f32::consts::TAU / 180.;
+            assert!(
+                fore.bears(bearing) || fore.bears(bearing + step) || fore.bears(bearing - step),
+                "{bearing}"
+            );
+            ahead |= bearing.abs() < 0.1;
+        }
+        assert!(ahead, "the fan reaches dead ahead");
     }
 
     #[test]

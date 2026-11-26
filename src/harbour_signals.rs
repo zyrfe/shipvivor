@@ -15,6 +15,11 @@ use shipvivor_ensign::Flag;
 use std::f32::consts::TAU;
 
 const BILLOWS: u8 = 14;
+/// Billows of smoke streaming from each of a ship's funnels at once.
+const PUFFS: u8 = 18;
+/// The share of the breeze that carries funnel smoke, kept small so that the trail
+/// lies back along the ship's own track and shows which way she is going.
+const SMOKE_DRIFT: f32 = 0.15;
 const CLOTH_FRAMES: usize = 32;
 /// Texels the painted cloth spans from hoist to fly and from head to foot.
 const CLOTH: (u32, u32) = (112, 40);
@@ -23,6 +28,18 @@ const CLOTH: (u32, u32) = (112, 40);
 pub(crate) enum Signal {
     Flag,
     Billow(u8),
+}
+
+/// One billow of a ship's funnel smoke. Once out of the funnel it hangs in the air
+/// where it left her, so a ship under way trails a line of them back along her track.
+#[derive(Component)]
+pub(crate) struct Puff {
+    index: u8,
+    /// Metres across the funnel's mouth.
+    mouth: f32,
+    /// The round of its cycle in which it last left the funnel, and where it did.
+    cycle: i64,
+    born: Vec3,
 }
 
 pub(super) struct SignalKit {
@@ -83,6 +100,26 @@ impl SignalKit {
         for i in 0..BILLOWS {
             cmd.spawn((
                 Signal::Billow(i),
+                Mesh3d(self.card.clone()),
+                MeshMaterial3d(self.smoke[0].clone()),
+                NotShadowCaster,
+                ChildOf(root),
+            ));
+        }
+    }
+
+    /// The smoke from a funnel `mouth` metres across, whose lip is `root`.
+    pub fn spawn_funnel_smoke(&self, cmd: &mut Commands, root: Entity, mouth: f32) {
+        for index in 0..PUFFS {
+            cmd.spawn((
+                Puff {
+                    index,
+                    mouth,
+                    cycle: i64::MIN,
+                    born: Vec3::ZERO,
+                },
+                // Unseen until it has been placed.
+                Transform::from_scale(Vec3::ZERO),
                 Mesh3d(self.card.clone()),
                 MeshMaterial3d(self.smoke[0].clone()),
                 NotShadowCaster,
@@ -290,6 +327,81 @@ pub(crate) fn animate(
                 paint.set_if_neq(MeshMaterial3d(kit.signals.smoke[shade].clone()));
             }
         }
+    }
+}
+
+/// Stream each enemy ship's funnel smoke. A billow leaves the lip, then rises and
+/// spreads where it left her, drifting a little downwind, so the smoke trails back
+/// along the way she has come and curves where she turned. It shows at a glance, and
+/// at range, which way she is going. She makes it thicker the harder she steams, and
+/// only a thin wisp at anchor.
+pub(crate) fn stream_funnel_smoke(
+    kit: Res<super::Kit>,
+    sea: Res<Sea>,
+    run: Res<Campaign>,
+    battle: Res<Encounter>,
+    camera: Single<&Transform, (With<FollowCamera>, Without<Puff>)>,
+    anchors: Query<(&Transform, &super::Actor), Without<Puff>>,
+    mut puffs: Query<(
+        &mut Puff,
+        &ChildOf,
+        &mut Transform,
+        &mut MeshMaterial3d<StandardMaterial>,
+    )>,
+) {
+    let weather = sea.weather();
+    let breeze = shipvivor_compass::direction(weather.wind) * (4. + 8. * weather.sea);
+    let drift = (breeze * SMOKE_DRIFT).extend(0.).xzy();
+    let across = drift.cross(Vec3::Y).normalize_or_zero();
+    // Each ship's way over the ground and the share of her full speed it is.
+    let ships: std::collections::HashMap<u64, (Vec2, f32)> = (battle.raiders().iter())
+        .map(|r| {
+            let way = r.motion();
+            let pace = (way.length() / r.class.profile().speed()).min(1.);
+            (r.body.id, (way, pace))
+        })
+        .collect();
+    for (mut puff, parent, mut xf, mut paint) in &mut puffs {
+        let Ok((lip, actor)) = anchors.get(parent.parent()) else {
+            continue;
+        };
+        let super::Shape::Stack(_, stack) = actor.1 else {
+            continue;
+        };
+        let Some(&(way, pace)) = ships.get(&actor.0) else {
+            continue;
+        };
+        let mouth = puff.mouth;
+        // A big funnel's plume lasts longer, and each keeps its own time.
+        let life = 5. + 1.6 * mouth;
+        let seed = (actor.0 % 97) as f32 * 0.137 + f32::from(stack) * 0.31;
+        let phase = run.elapsed / life + seed + f32::from(puff.index) / f32::from(PUFFS);
+        let (cycle, t) = (phase.floor() as i64, phase.rem_euclid(1.));
+        let age = t * life;
+        if puff.cycle != cycle {
+            // Fresh from the lip; or, on her first sight, where it would have been had
+            // she been steaming so all along.
+            let behind = if puff.cycle == i64::MIN { age } else { 0. };
+            puff.born = lip.translation - way.extend(0.).xzy() * behind;
+            puff.cycle = cycle;
+        }
+        let turn = f32::from(puff.index) * 2.40;
+        let eddy = (7. * t + seed * TAU).sin() + 0.4 * (4. * t + turn).cos();
+        let rise = mouth * (0.3 + 4.5 * t - 1.6 * t * t) + 1.2 * t;
+        let at = puff.born + drift * age + Vec3::Y * rise + across * (0.5 * mouth * t * eddy);
+        // At speed the billows leave the lip farther apart, so each starts larger to
+        // keep the trail whole.
+        let spacing = way.length() * life / f32::from(PUFFS);
+        let size = mouth * (1.5 + 3.2 * t) + 0.35 * spacing + 2.2 * t;
+        // The anchor heaves and rolls with her hull; the billows stand in the air.
+        let unroll = lip.rotation.inverse();
+        xf.translation = unroll * (at - lip.translation);
+        xf.rotation =
+            unroll * camera.rotation * Quat::from_rotation_z(0.31 * eddy + 0.81 * turn.sin());
+        xf.scale = Vec3::splat(size * (0.6 + 0.4 * pace));
+        // Banked fires at anchor give a thin, pale wisp.
+        let shade = ((t + 0.35 * (1. - pace)).min(1.) * 31.).round() as usize;
+        paint.set_if_neq(MeshMaterial3d(kit.signals.smoke[shade].clone()));
     }
 }
 

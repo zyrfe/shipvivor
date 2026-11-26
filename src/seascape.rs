@@ -358,7 +358,12 @@ pub fn churn(
                 }
                 // An effect made on this tick has not aged yet.
                 EffectKind::Splash if effect.age == 0. => sea.wake.splash(body.pos, 2.2),
+                EffectKind::Column if effect.age == 0. => sea.wake.splash(body.pos, 4.5),
                 EffectKind::Crunch if effect.age == 0. => sea.wake.splash(body.pos, 3.),
+                EffectKind::Torpedoed if effect.age == 0. => sea.wake.splash(body.pos, 5.),
+                EffectKind::Shatter(radius) if effect.age == 0. => {
+                    sea.wake.splash(body.pos, 1.5 + 0.3 * f32::from(radius))
+                }
                 _ => {}
             }
         }

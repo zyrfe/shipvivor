@@ -702,8 +702,11 @@ fn a_damaged_engine_misses_stumbles_and_bangs_in_its_exhaust() {
     let (lame, missing) = run(1., 0.);
     let (_, banging) = run(1., 1.5);
     // With cylinders lost there is less of it, through the hull and from the funnel.
-    assert!(loud(&lame) < 0.8 * loud(&hull));
+    assert!(loud(&low(&lame, 250.)) < 0.8 * loud(&low(&hull, 250.)));
     assert!(loud(&missing) < 0.8 * loud(&funnel));
+    // What came loose knocks through the hull, above the boom of the firings.
+    let (knocking, sound) = (above(&lame, 450.), above(&hull, 450.));
+    assert!(knocking > 3. * sound, "{knocking} against {sound}");
     // A sound engine never bangs, and neither does a lame one with nothing to light.
     assert!(crest(&funnel) < 8. && crest(&missing) < 8.);
     // Recordings put a backfire 10 to 20 dB over the engine it comes from. Its peak
@@ -750,13 +753,186 @@ fn engines_knocked_out_fall_silent_and_damaged_ones_are_heard_to_be() {
     let adrift_again = steady(state(0., 1.));
     assert!(level(&adrift) < 0.2 * level(&sound));
     assert!((level(&adrift_again) / level(&moored) - 1.).abs() < 0.25);
-    // Repaired, they start again. Damaged, they bang.
+    // Repaired, they start again. Damaged, they bang, and they knock: there is less of
+    // their boom and more above it.
     let mended = steady(state(0., 0.));
     assert!(level(&mended) > 0.8 * level(&sound));
     let rough = steady(state(1., 0.));
     assert!(peak(&rough) > 1.2 * peak(&mended), "{}", peak(&rough));
-    assert!(level(&rough) < level(&mended));
+    let left = |heard: &[[f32; 2]]| heard.iter().map(|frame| frame[0]).collect::<Vec<f32>>();
+    let boom = |heard: &[[f32; 2]]| low(&left(heard), 200.).iter().map(|x| x * x).sum::<f32>();
+    assert!(boom(&rough) < boom(&mended));
+    let (knocking, sound) = (above(&left(&rough), 450.), above(&left(&mended), 450.));
+    assert!(knocking > 1.3 * sound, "{knocking} against {sound}");
     assert!(peak(&rough) < 0.9);
+}
+
+/// What an engine dies away to once knocked out, every tenth of a second for four
+/// seconds: the level of its boom against what it was making before.
+fn dying_away(cues: &Cues, mixer: &mut Mixer, then: Cue) -> Vec<f32> {
+    let boom = |heard: Vec<[f32; 2]>| {
+        let left: Vec<f32> = heard.iter().map(|frame| frame[0]).collect();
+        let low = low(&left, 250.);
+        (low.iter().map(|x| x * x).sum::<f32>() / low.len() as f32).sqrt()
+    };
+    listen(mixer, 8.);
+    let running = boom(listen(mixer, 1.));
+    cues.send(then);
+    (0..40)
+        .map(|_| boom(listen(mixer, 0.1)) / running)
+        .collect()
+}
+
+#[test]
+fn an_engine_knocked_out_sputters_on_for_a_while_where_one_shut_down_runs_down() {
+    let ahead = Cue::Way {
+        speed: 0.,
+        throttle: 1.,
+    };
+    let knocked = Cue::Engines {
+        damaged: 0.,
+        stopped: 1.,
+    };
+    let (cues, mut mixer) = desk(Air::SCALED);
+    cues.send(ahead);
+    let failing = dying_away(&cues, &mut mixer, knocked);
+    let (cues, mut mixer) = desk(Air::SCALED);
+    cues.send(ahead);
+    let shut = dying_away(&cues, &mut mixer, Cue::Moored);
+    // A recording of a diesel failing holds within 10 dB for a second and more, then
+    // is gone in the next second and a half. One shut down is falling from the first.
+    let mean = |levels: &[f32]| levels.iter().sum::<f32>() / levels.len() as f32;
+    let (holding, falling) = (mean(&failing[6..11]), mean(&shut[6..11]));
+    assert!(holding > 0.32, "{failing:?}");
+    assert!(holding > 1.3 * falling, "{failing:?} against {shut:?}");
+    let (gone, floor) = (mean(&failing[32..]), mean(&shut[32..]));
+    assert!(
+        gone < 0.2 && (gone / floor - 1.).abs() < 0.35,
+        "{failing:?} against {shut:?}"
+    );
+    // It lurches as cylinders catch and miss on the way down.
+    let lurches = |levels: &[f32]| {
+        levels[..16]
+            .windows(2)
+            .filter(|w| w[1] > 1.25 * w[0])
+            .count()
+    };
+    assert!(
+        lurches(&failing) > lurches(&shut),
+        "{failing:?} against {shut:?}"
+    );
+}
+
+/// A sound with what lies above `hz` taken out, near enough.
+fn low(sound: &[f32], hz: f32) -> Vec<f32> {
+    let mut lows = [filter::Biquad::low_pass(hz, 0.7); 2];
+    sound
+        .iter()
+        .map(|&x| {
+            let once = lows[0].run(x);
+            lows[1].run(once)
+        })
+        .collect()
+}
+
+#[test]
+fn an_engine_hurt_clanks_and_grinds_below_a_torpedo_and_gives_out_with_a_falling_whine() {
+    let heard = |sound: Sound| {
+        let (cues, mut mixer) = desk(Air::SCALED);
+        emit(&cues, sound, Vec3::new(0., 0., -3.));
+        let heard = listen(&mut mixer, 4.5);
+        let left: Vec<f32> = heard.iter().map(|frame| frame[0]).collect();
+        (heard, left)
+    };
+    let (hurt, hurt_left) = heard(Sound::EngineHurt);
+    let (torpedoed, _) = heard(Sound::Torpedoed);
+    let (gun, _) = heard(Sound::MainGun);
+    // It sounds bad, but it is no blow to the ship.
+    assert!(level(&hurt) < 0.5 * level(&torpedoed), "{}", level(&hurt));
+    assert!(peak(&hurt) < 0.7 * peak(&gun), "{}", peak(&hurt));
+    // It is heard aboard at once, and goes on grinding after the clank.
+    assert!(onset(&hurt) < 0.002);
+    let after = &hurt_left[(0.3 * RATE) as usize..(1.2 * RATE) as usize];
+    assert!(above(after, 1000.) > 0.3, "{}", above(after, 1000.));
+    assert!(level(&hurt[(0.3 * RATE) as usize..(1.2 * RATE) as usize]) > 0.1 * level(&hurt));
+    // Giving out, its gearing whines down from the revolutions she was making.
+    let (stall, stall_left) = heard(Sound::EngineStall);
+    assert!(onset(&stall) < 0.002 && level(&stall) < 0.5 * level(&torpedoed));
+    let whine = |from: f32| {
+        let span = &stall_left[(from * RATE) as usize..((from + 0.25) * RATE) as usize];
+        pitch_between(span, 300., 900.)
+    };
+    let (early, later) = (whine(0.2), whine(0.9));
+    assert!(early > 1.3 * later, "{early} Hz falling to {later} Hz");
+}
+
+/// The frequency between `low` and `high` hertz where a sound is strongest, near enough.
+fn pitch_between(sound: &[f32], low: f32, high: f32) -> f32 {
+    let power = |hz: f32| {
+        let (mut re, mut im) = (0_f32, 0_f32);
+        for (n, x) in sound.iter().enumerate() {
+            let turn = std::f32::consts::TAU * hz * n as f32 / RATE;
+            re += x * turn.cos();
+            im += x * turn.sin();
+        }
+        re * re + im * im
+    };
+    let steps = 120;
+    (0..=steps)
+        .map(|n| low * (high / low).powf(n as f32 / steps as f32))
+        .max_by(|a, b| power(*a).total_cmp(&power(*b)))
+        .unwrap_or(low)
+}
+
+#[test]
+fn the_repair_party_is_heard_from_its_section_over_the_engines_and_below_the_guns() {
+    let deck = Vec3::new(4., 1., -12.);
+    let alone = |sound: Sound, serial: u64| {
+        let (cues, mut mixer) = desk(Air::SCALED);
+        cues.send(Cue::Emit {
+            sound,
+            position: deck,
+            serial,
+        });
+        listen(&mut mixer, 4.)
+    };
+    let gun = alone(Sound::MainGun, 0);
+    // The ship's own noise at half ahead, which the work must be heard over.
+    let (cues, mut mixer) = desk(Air::SCALED);
+    cues.send(Cue::Way {
+        speed: 6.8,
+        throttle: 0.5,
+    });
+    listen(&mut mixer, 6.);
+    let bed = listen(&mut mixer, 4.);
+    // The most power above 1.5 kHz in any 20 ms of it.
+    let bright = |heard: &[[f32; 2]]| {
+        let mut high = [filter::Biquad::high_pass(1500., 0.7); 2];
+        let kept: Vec<f32> = (heard.iter())
+            .map(|frame| {
+                let once = high[0].run(frame[0]);
+                high[1].run(once)
+            })
+            .collect();
+        (kept.chunks((0.02 * RATE) as usize))
+            .map(|span| span.iter().map(|x| x * x).sum::<f32>() / span.len() as f32)
+            .fold(0., f32::max)
+    };
+    for sound in [Sound::Hammer, Sound::Torch, Sound::Ratchet] {
+        for take in 0..foundry::VARIATIONS as u64 {
+            let heard = alone(sound, take);
+            // Positioned, so heard to the side it is on and late by its distance.
+            let side = level(&heard.iter().map(|f| [f[1], 0.]).collect::<Vec<_>>())
+                / level(&heard.iter().map(|f| [f[0], 0.]).collect::<Vec<_>>());
+            assert!(side > 1.05, "{sound:?} take {take}: {side}");
+            assert!(onset(&heard) > 0.05, "{sound:?} take {take}");
+            // The work stands out above what little of the engines and the sea gets
+            // above 1.5 kHz, and is a long way below a gun.
+            let over = bright(&heard) / bright(&bed);
+            assert!(over > 1.5, "{sound:?} take {take}: {over}");
+            assert!(peak(&heard) < 0.4 * peak(&gun), "{sound:?} take {take}");
+        }
+    }
 }
 
 /// Let the places make their sounds for a while, and return the most voices each of
@@ -848,6 +1024,77 @@ fn the_telegraph_rings_aboard_and_a_calving_glacier_is_heard_late_and_low() {
     assert!(worst > 4. * second(15.) && second(15.) > 0.);
     let roar = &fall[(5.5 * RATE) as usize..(8.5 * RATE) as usize];
     assert!(brightness(roar) < 0.01, "{}", brightness(roar));
+}
+
+#[test]
+fn a_chime_is_a_handbell_on_its_note_that_rings_on_even_while_the_world_is_held() {
+    let (cues, mut mixer) = desk(Air::SCALED);
+    cues.send(Cue::Flow(false));
+    emit(&cues, Sound::Chime, Vec3::new(300., 0., 0.));
+    let heard = listen(&mut mixer, 2.4);
+    // Wherever the game says it is, it rings aboard: at once, and alike in both ears.
+    assert!(onset(&heard) < 0.01, "{}", onset(&heard));
+    let ear = |i: usize| heard.iter().map(|f| f[i] * f[i]).sum::<f32>();
+    assert!((ear(0) / ear(1) - 1.).abs() < 0.01);
+    let strength = |from: f32, to: f32, hz: f32| {
+        let part = &heard[(from * RATE) as usize..(to * RATE) as usize];
+        let turn = |n: usize| (std::f32::consts::TAU * hz * n as f32 / RATE).sin_cos();
+        let sum = part.iter().enumerate().fold((0., 0.), |sum, (n, f)| {
+            (sum.0 + f[0] * turn(n).0, sum.1 + f[0] * turn(n).1)
+        });
+        sum.0 * sum.0 + sum.1 * sum.1
+    };
+    // The note is E6, and the twelfth stands over it where a plain tone has nothing.
+    let tries = (0..500).map(|n| 1100. + n as f32);
+    let note = tries
+        .max_by(|a, b| strength(0.05, 0.45, *a).total_cmp(&strength(0.05, 0.45, *b)))
+        .unwrap();
+    assert!((note - 1318.5).abs() < 4., "{note}");
+    let twelfth = strength(0.01, 0.2, 3.012 * 1318.5);
+    assert!(twelfth > 50. * strength(0.01, 0.2, 2. * 1318.5));
+    assert!(twelfth < strength(0.01, 0.2, 1318.5));
+    // It is struck and rings on, then dies away to nothing.
+    let stretch = |from: f32, to: f32| level(&heard[(from * RATE) as usize..(to * RATE) as usize]);
+    assert!(stretch(0., 0.15) > 2. * stretch(0.8, 1.));
+    assert!(stretch(0.8, 1.) > 0.01, "{}", stretch(0.8, 1.));
+    assert!(peak(&heard[(2.3 * RATE) as usize..]) < 0.002);
+    assert!(peak(&heard) < 0.8);
+    // The same every time.
+    emit(&cues, Sound::Chime, Vec3::ZERO);
+    assert_eq!(listen(&mut mixer, 2.4), heard);
+}
+
+#[test]
+fn the_bridge_clock_ticks_short_and_bright_at_the_strength_it_is_given() {
+    let (cues, mut mixer) = desk(Air::SCALED);
+    let tick = |level: f32, serial: u64| {
+        cues.send(Cue::Notice {
+            sound: Sound::Tick,
+            level,
+            serial,
+        });
+    };
+    cues.send(Cue::Flow(false));
+    tick(1., 0);
+    let full = listen(&mut mixer, 0.4);
+    // It is heard at once, aboard, even while the world is held, and is over in a
+    // tenth of a second.
+    assert!(onset(&full) < 0.01, "{}", onset(&full));
+    assert!(peak(&full) > 0.02 && peak(&full) < 0.8, "{}", peak(&full));
+    assert!(peak(&full[(0.1 * RATE) as usize..]) < 0.002);
+    // Half the strength is half as loud, and none is silence.
+    tick(0.5, 0);
+    let half = listen(&mut mixer, 0.4);
+    assert!((peak(&half) / peak(&full) - 0.5).abs() < 0.05);
+    tick(0., 0);
+    assert_eq!(peak(&listen(&mut mixer, 0.4)), 0.);
+    // The tock is the other pallet: a little lower and duller than the tick.
+    tick(1., 1);
+    let tock = listen(&mut mixer, 0.4);
+    assert!(brightness(&tock) < 0.9 * brightness(&full));
+    // The same tick every time.
+    tick(1., 0);
+    assert_eq!(listen(&mut mixer, 0.4), full);
 }
 
 #[test]
@@ -1300,4 +1547,140 @@ fn a_wrecked_siren_drops_away_to_nothing_in_seconds_where_a_lowered_one_takes_it
     assert_eq!(mixer.wailing(), 0);
     alarm(&cues, there, true);
     assert!(peak(&listen(&mut mixer, 6.)) > 0.05);
+}
+
+fn horn(cues: &Cues, position: Vec3, length: f32, blow: bool) {
+    cues.send(Cue::Horn {
+        position,
+        length,
+        blow,
+    });
+}
+/// Strength of one tone over a stretch of sound, with the ends leaned out.
+fn tone(heard: &[[f32; 2]], hz: f32) -> f32 {
+    let (mut re, mut im) = (0_f32, 0_f32);
+    let whole = heard.len() as f32;
+    for (n, frame) in heard.iter().enumerate() {
+        let (sin, cos) = (std::f32::consts::TAU * hz * n as f32 / RATE).sin_cos();
+        let lean = (std::f32::consts::PI * n as f32 / whole).sin().powi(2);
+        re += lean * (frame[0] + frame[1]) * cos;
+        im += lean * (frame[0] + frame[1]) * sin;
+    }
+    (re * re + im * im).sqrt()
+}
+/// The stretches of a sound that hold within 12 dB of its loudest, in seconds from
+/// the start and seconds long, each at least a second.
+fn blasts(heard: &[[f32; 2]]) -> Vec<(f32, f32)> {
+    let step = (0.05 * RATE) as usize;
+    let loudness: Vec<f32> = heard.chunks(step).map(level).collect();
+    let top = loudness.iter().copied().fold(0., f32::max);
+    let mut found = Vec::new();
+    let mut start = None;
+    for (i, &loud) in loudness.iter().chain([&0.]).enumerate() {
+        match (start, loud > 0.25 * top) {
+            (None, true) => start = Some(i),
+            (Some(from), false) => {
+                let (at, long) = (from as f32 * 0.05, (i - from) as f32 * 0.05);
+                if long >= 1. {
+                    found.push((at, long));
+                }
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+#[test]
+fn a_horn_sounds_prolonged_blasts_on_a_note_that_deepens_with_the_ship() {
+    // The three bosses, a third of a kilometre off in still air.
+    let mut notes = Vec::new();
+    for (length, (low, high), count) in [
+        (58., (155., 220.), 2),
+        (81., (110., 140.), 2),
+        (168., (70., 90.), 3),
+    ] {
+        let signal = horn::Signal::of(length);
+        let (cues, mut mixer) = desk(Air::default());
+        horn(&cues, Vec3::new(0., 16., -343.), length, true);
+        let heard = listen(&mut mixer, signal.span() + 3.);
+        assert!(mixer.blowing());
+        // Nothing is heard until the sound has crossed the water.
+        assert_eq!(peak(&heard[..(0.99 * RATE) as usize]), 0.);
+        // Its note lies in the band the rules give a ship of its size, steady through
+        // a blast, and a longer ship's is deeper.
+        let hz = note(&heard, 2., low, high);
+        assert!((low..high).contains(&hz), "{length} m: {hz} Hz");
+        assert!((note(&heard, 3.5, low, high) - hz).abs() < 0.01 * hz);
+        notes.push(hz);
+        // Each blast is prolonged, four to six seconds, and a short gap parts them.
+        let found = blasts(&heard);
+        assert_eq!(found.len(), count, "{length} m: {found:?}");
+        for (at, long) in &found {
+            assert!((3.9..6.4).contains(long), "{length} m: {found:?}");
+            assert!(*at >= 0.99, "{found:?}");
+        }
+        for pair in found.windows(2) {
+            let gap = pair[1].0 - pair[0].0 - pair[0].1;
+            assert!((0.8..2.).contains(&gap), "{length} m: {found:?}");
+        }
+        // It is a horn and not a pure tone: the second and third tones are as strong
+        // as the first, near enough, and the eighth is far weaker.
+        let steady = &heard[(2. * RATE) as usize..(3.5 * RATE) as usize];
+        let [first, second, third, eighth] = [1., 2., 3., 8.].map(|k| tone(steady, k * hz));
+        assert!(second > 0.35 * first && second < 3.5 * first, "{length} m");
+        assert!(third > 0.2 * first && eighth < 0.4 * first, "{length} m");
+        // Once the last blast is over and has crossed, the air falls quiet.
+        listen(&mut mixer, 6.);
+        assert!(!mixer.blowing());
+        assert_eq!(peak(&listen(&mut mixer, 0.5)), 0.);
+    }
+    assert!(notes[0] > notes[1] && notes[1] > notes[2], "{notes:?}");
+}
+
+#[test]
+fn a_horn_follows_its_ship_says_nothing_unless_blown_and_a_hush_stops_it() {
+    // Only carried along, a horn is never heard.
+    let (cues, mut mixer) = desk(Air::SCALED);
+    horn(&cues, Vec3::new(30., 16., -60.), 81., false);
+    assert_eq!(peak(&listen(&mut mixer, 2.)), 0.);
+    assert!(!mixer.blowing());
+    // Blown, a big ship's horn close to is about as loud as gunfire, and a short
+    // ship's is quieter. The sea takes more of a deep note far off, so the gap
+    // narrows with the range.
+    let blown = |length: f32, range: f32| {
+        let (cues, mut mixer) = desk(Air::SCALED);
+        horn(&cues, Vec3::new(0., 16., -range), length, true);
+        let arrives = range / Air::SCALED.speed;
+        level(&listen(&mut mixer, arrives + 3.)[((arrives + 0.5) * RATE) as usize..])
+    };
+    let big = blown(168., 60.);
+    assert!((0.1..0.6).contains(&big), "{big}");
+    let (big, small) = (blown(168., 400.), blown(58., 400.));
+    assert!(big > 1.1 * small && small > 0.05, "{big} {small}");
+    // A horn moved as her ship moves is heard from where she has got to.
+    let (cues, mut mixer) = desk(Air::SCALED);
+    horn(&cues, Vec3::new(-200., 16., 0.), 81., true);
+    let mut heard = Vec::new();
+    for step in 0..4 * 60 {
+        let x = -200. + 400. * step as f32 / (4. * 60.);
+        horn(&cues, Vec3::new(x, 16., 0.), 81., false);
+        heard.extend(listen(&mut mixer, 1. / 60.));
+    }
+    let side = |from: f32| {
+        let s = &heard[(from * RATE) as usize..((from + 0.5) * RATE) as usize];
+        let ear = |e: usize| s.iter().map(|f| f[e] * f[e]).sum::<f32>();
+        ear(1) / ear(0)
+    };
+    assert!(
+        side(1.6) < 1. && side(3.4) > 1.,
+        "{} {}",
+        side(1.6),
+        side(3.4)
+    );
+    // A hush stops one dead, with nothing left in the air.
+    cues.send(Cue::Hush);
+    assert_eq!(peak(&listen(&mut mixer, 1.)), 0.);
+    assert!(!mixer.blowing());
 }

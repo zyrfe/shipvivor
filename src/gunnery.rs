@@ -10,14 +10,17 @@ use bevy::{
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
-use shipvivor_encounter::{Ammo, MainMount, MainShell, MountStatus, Station, TurretLayout, Volley};
+use shipvivor_encounter::{Ammo, Control, MainMount, MainShell, MountStatus, Station, Volley};
 use shipvivor_shipyard::{Component as Equipment, Design, Frame};
 
 /// Plan pixels per metre across and along the hull. The beam is drawn a little wide to read.
 const SCALE: Vec2 = Vec2::new(5., 4.);
 const PLAN: UVec2 = UVec2::new(40, 128);
+/// Room either side of the plan for the turret numbers: port and centreline on the left,
+/// starboard on the right.
+const GUTTER: f32 = 12.;
 /// The frame leaves room for barrels trained abeam to reach past the hull.
-const FRAME: Vec2 = Vec2::new(64., 128.);
+const FRAME: Vec2 = Vec2::new(64. + 2. * GUTTER, 128.);
 /// The frame pixel over the ship's origin.
 const ORIGIN: Vec2 = Vec2::new(FRAME.x / 2., 67.);
 /// A turret icon is a square this wide, pivoting about its centre.
@@ -51,6 +54,13 @@ pub struct PlanTurret(Station);
 pub struct PlanHouse(Station);
 #[derive(Component)]
 pub struct PlanBarrel(Station, usize);
+/// A turret's number in the gutter beside it, white while the trigger has it and lilac
+/// while the crew does.
+#[derive(Component)]
+pub struct PlanNumber(Station, usize);
+/// The ring round the turret a digit key picked out.
+#[derive(Component)]
+pub struct PlanSelect(usize);
 /// Where the sight looks relative to the bow: a line from amidships and a diamond at its tip.
 #[derive(Component)]
 pub enum SightMark {
@@ -59,7 +69,12 @@ pub enum SightMark {
 }
 #[derive(Component)]
 pub enum Readout {
-    Tag(Station, usize, &'static str),
+    /// The arrow by the barrel a click fires next.
+    Tag(Station, usize),
+    /// A turret's number over its barrels, boxed while picked out.
+    Number(usize),
+    /// Who has the turret: manual, scope or auto.
+    Control(Station),
     Bar(Station, usize),
     State(Station, usize),
     Summary,
@@ -75,6 +90,10 @@ fn brass() -> Color {
 }
 fn trim() -> Color {
     Color::srgb_u8(47, 70, 77)
+}
+/// A turret the crew lays and fires.
+pub(crate) fn crew_ink() -> Color {
+    Color::srgb_u8(190, 166, 255)
 }
 
 /// Even-odd test against the hull outline, in hull metres with the bow at -Z.
@@ -277,7 +296,29 @@ pub fn spawn(cmd: &mut Commands, root: Entity, plan: Handle<Image>, run: &Campai
     ));
     for (&station, position) in Station::SLOTS.iter().zip(&positions) {
         let layout = run.fittings.for_station(position).turrets;
-        let at = ORIGIN + Vec2::new(position.abeam, -position.fore) * scale - TURRET / 2.;
+        let number = station.number(&positions);
+        let center = ORIGIN + Vec2::new(position.abeam, -position.fore) * scale;
+        let at = center - TURRET / 2.;
+        cmd.spawn((
+            PlanNumber(station, number),
+            Text::new(number.to_string()),
+            TextFont::from_font_size(10.),
+            TextColor(Color::WHITE),
+            TextLayout::no_wrap(),
+            BackgroundColor(Color::NONE),
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(if position.abeam > 0. {
+                    FRAME.x - GUTTER / 2. - 4.
+                } else {
+                    GUTTER / 2. - 4.
+                }),
+                top: px(center.y - 7.),
+                padding: UiRect::horizontal(px(1.5)),
+                ..default()
+            },
+            ChildOf(frame),
+        ));
         let turret = cmd
             .spawn((
                 PlanTurret(station),
@@ -339,6 +380,22 @@ pub fn spawn(cmd: &mut Commands, root: Entity, plan: Handle<Image>, run: &Campai
             BorderColor::all(Color::srgb_u8(16, 30, 36)),
             ChildOf(turret),
         ));
+        cmd.spawn((
+            PlanSelect(number),
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(-1),
+                top: px(-1),
+                width: px(TURRET + 2.),
+                height: px(TURRET + 2.),
+                border: UiRect::all(px(1.5)),
+                border_radius: BorderRadius::MAX,
+                display: Display::None,
+                ..default()
+            },
+            BorderColor::all(brass()),
+            ChildOf(turret),
+        ));
     }
 
     let readouts = cmd
@@ -387,8 +444,12 @@ pub fn spawn(cmd: &mut Commands, root: Entity, plan: Handle<Image>, run: &Campai
     let groups = cmd
         .spawn((
             Node {
-                flex_direction: if positions.len() <= 2
-                    && run.fittings.turrets == TurretLayout::Twin
+                // Stacked while a heading and a row for each barrel fit beside the plan.
+                flex_direction: if positions
+                    .iter()
+                    .map(|p| 1 + run.fittings.for_station(p).turrets.count())
+                    .sum::<usize>()
+                    <= 5
                 {
                     FlexDirection::Column
                 } else {
@@ -416,15 +477,46 @@ pub fn spawn(cmd: &mut Commands, root: Entity, plan: Handle<Image>, run: &Campai
                 ChildOf(groups),
             ))
             .id();
+        let title = cmd
+            .spawn((
+                Node {
+                    column_gap: px(5),
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                ChildOf(block),
+            ))
+            .id();
+        let number = station.number(&positions);
+        let badge = label(
+            cmd,
+            title,
+            &number.to_string(),
+            11.,
+            brass(),
+            Some(Readout::Number(number)),
+        );
+        cmd.entity(badge).insert((
+            BackgroundColor(Color::NONE),
+            Node {
+                padding: UiRect::horizontal(px(2)),
+                ..default()
+            },
+        ));
+        label(
+            cmd,
+            title,
+            "",
+            11.,
+            Color::WHITE,
+            Some(Readout::Control(station)),
+        );
+        // Turrets of more than one bore say which each is.
         if positions.len() > 2 {
             label(
                 cmd,
-                block,
-                &format!(
-                    "{}  {:.0}\"",
-                    station.label(&positions),
-                    fit.round().calibre_inches()
-                ),
+                title,
+                &format!("{:.0}\"", fit.round().calibre_inches()),
                 11.,
                 brass(),
                 None,
@@ -441,14 +533,18 @@ pub fn spawn(cmd: &mut Commands, root: Entity, plan: Handle<Image>, run: &Campai
                     ChildOf(block),
                 ))
                 .id();
-            label(
+            let tag = label(
                 cmd,
                 row,
                 "",
                 12.,
-                Color::WHITE,
-                Some(Readout::Tag(station, tube, station.label(&positions))),
+                brass(),
+                Some(Readout::Tag(station, tube)),
             );
+            cmd.entity(tag).insert(Node {
+                width: px(7),
+                ..default()
+            });
             let gauge = cmd
                 .spawn((
                     Node {
@@ -522,7 +618,15 @@ fn ammo_ink(ammo: Ammo) -> Color {
 }
 
 type SightParts<'a> = (&'a SightMark, &'a mut Node, &'a mut UiTransform);
-type SightFilter = (Without<PlanBarrel>, Without<Readout>, Without<PlanTurret>);
+type SightFilter = (
+    Without<PlanBarrel>,
+    Without<Readout>,
+    Without<PlanTurret>,
+    Without<PlanSelect>,
+);
+type NumberParts<'a> = (&'a PlanNumber, &'a mut TextColor, &'a mut BackgroundColor);
+type NumberFilter = (Without<PlanHouse>, Without<PlanBarrel>, Without<Readout>);
+type SelectFilter = (Without<PlanBarrel>, Without<Readout>, Without<SightMark>);
 type ReadoutFilter = (Without<PlanBarrel>, Without<SightMark>, Without<PlanHouse>);
 type ReadoutParts<'a> = (
     &'a Readout,
@@ -548,8 +652,36 @@ pub fn update(
     mut barrels: Query<(&PlanBarrel, &mut Node, &mut BackgroundColor), Without<Readout>>,
     mut sight: Query<SightParts, SightFilter>,
     mut readouts: Query<ReadoutParts, ReadoutFilter>,
+    marks: (
+        Query<NumberParts, NumberFilter>,
+        Query<(&PlanSelect, &mut Node), SelectFilter>,
+    ),
 ) {
     let (battle, run, helm, view, guns) = state;
+    let (mut numbers, mut rings) = marks;
+    let picked = |number: usize| guns.selected == Some(number - 1);
+    for (number, mut tint, mut fill) in &mut numbers {
+        let crewed = battle.main_mount(number.0).crewed();
+        let (text, back) = if picked(number.1) {
+            (navy(), brass())
+        } else if crewed {
+            (crew_ink(), Color::NONE)
+        } else {
+            (Color::WHITE, Color::NONE)
+        };
+        tint.set_if_neq(TextColor(text));
+        fill.set_if_neq(BackgroundColor(back));
+    }
+    for (ring, mut node) in &mut rings {
+        let shown = if picked(ring.0) {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if node.display != shown {
+            node.display = shown;
+        }
+    }
     let with_ammo = run.fittings.armor_piercing();
     // The icons grow with the gunhouses, by half as much.
     for (turret, mut pose) in &mut turrets {
@@ -593,23 +725,42 @@ pub fn update(
         }
     }
     let next = battle.next_barrel();
+    // The count is of the trigger's barrels. The crew's are on targets of its own.
     let mut ready = 0;
-    for mount in battle.main_mounts() {
+    for mount in battle.main_mounts().iter().filter(|m| !m.crewed()) {
         ready += (0..mount.layout().count())
             .filter(|&t| mount.loaded(t) && mount.status() == MountStatus::Ready)
             .count();
     }
-    let total: usize = battle
-        .main_mounts()
-        .iter()
+    let total: usize = (battle.main_mounts().iter())
+        .filter(|m| !m.crewed())
         .map(|m| m.layout().count())
         .sum();
     for (readout, node, fill, text, tint) in &mut readouts {
         let (words, color) = match *readout {
-            Readout::Tag(station, tube, letter) => {
+            Readout::Tag(station, tube) => {
                 let up = next == Some((station, tube));
-                let words = format!("{}{}{}", if up { ">" } else { " " }, letter, tube + 1);
-                (words, if up { brass() } else { Color::WHITE })
+                ((if up { ">" } else { "" }).into(), brass())
+            }
+            Readout::Number(number) => {
+                let up = picked(number);
+                if let Some(mut fill) = fill {
+                    fill.set_if_neq(BackgroundColor(if up { brass() } else { Color::NONE }));
+                }
+                (number.to_string(), if up { navy() } else { brass() })
+            }
+            Readout::Control(station) => {
+                let mount = battle.main_mount(station);
+                let words = match (mount.control(), mount.crewed()) {
+                    (Control::Scope, true) => "SCOPE (AUTO)",
+                    (control, _) => control.label(),
+                };
+                let tint = if mount.crewed() {
+                    crew_ink()
+                } else {
+                    Color::WHITE
+                };
+                (words.into(), tint)
             }
             Readout::Bar(station, tube) => {
                 let mount = battle.main_mount(station);
@@ -632,6 +783,7 @@ pub fn update(
             Readout::Summary => match battle.standing_volley() {
                 Some(Volley::Salvo) => ("SALVO".into(), brass()),
                 Some(Volley::Single) => ("STANDING BY".into(), brass()),
+                None if total == 0 => ("ALL AUTO".into(), crew_ink()),
                 None => (
                     format!("{ready} / {total} ON TARGET"),
                     if ready > 0 {

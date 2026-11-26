@@ -316,4 +316,45 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn a_flagship_bound_round_a_headland_makes_her_way_up_the_channel() {
+        use crate::{Battle, Chart, EnemyClass, Waters, fairway_point, fairway_run, pilotage};
+        // On these charts the player, seen at the head, is hidden behind a bend. The
+        // fairway mark she is led by lies nearer than her stand-off from the quarry.
+        for seed in [1, 3] {
+            let (chart, _) = Chart::generate(seed, &Waters::SOUND).unwrap();
+            let mut b = Battle::for_chart(20., &chart);
+            let length = fairway_run(&b.fairway, *b.fairway.last().unwrap());
+            let foot = fairway_point(&b.fairway, length * 0.15);
+            let head = fairway_point(&b.fairway, length * 0.95);
+            b.raiders.clear();
+            b.spawn(
+                EnemyClass::Parliament,
+                foot,
+                fairway_point(&b.fairway, length * 0.15 + 20.),
+            );
+            let start = fairway_run(&b.fairway, foot);
+            let mut sailed = 0.;
+            for _ in 0..60 * 60 {
+                let r = &mut b.raiders[0];
+                let bound = pilotage(&b.fairway, &b.landmarks, r.body.pos, head);
+                r.sail(
+                    1. / 60.,
+                    bound,
+                    bound != head,
+                    &b.ports,
+                    &b.landmarks,
+                    &[],
+                    Vec2::ZERO,
+                );
+                sailed += r.motion().length() / 60.;
+            }
+            let made = fairway_run(&b.fairway, b.raiders[0].body.pos) - start;
+            assert!(
+                made > 0.8 * sailed,
+                "seed {seed}: made {made} of {sailed} m"
+            );
+        }
+    }
 }

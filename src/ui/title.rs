@@ -2,6 +2,22 @@ use super::*;
 
 pub(super) fn show(cmd: &mut Commands, root: Entity, face: &Handle<Font>) {
     backdrop(cmd, root);
+    // The build number, bottom centre, so a round can be pinned to the build that sailed it.
+    let build = cmd
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                right: px(0),
+                bottom: px(14),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            ChildOf(root),
+        ))
+        .id();
+    text(cmd, build, build_label(), 13., ink().with_alpha(0.6));
+
     let panel = cmd
         .spawn((
             Node {

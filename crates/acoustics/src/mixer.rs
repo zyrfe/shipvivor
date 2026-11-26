@@ -4,6 +4,7 @@ use crate::{
     filter::pole,
     flight::{CLOSE, Flight, Passing},
     foundry::{Bank, VARIATIONS},
+    horn::Horn,
     hull::Hull,
     plane::Plane,
     siren::Siren,
@@ -22,7 +23,8 @@ const VOICES: usize = 64;
 const FLIGHTS: usize = 32;
 const SHORES: usize = 8;
 const SIRENS: usize = 4;
-const PLANES: usize = 4;
+/// Three bases' spotters, an air station's attacker and eight harriers.
+pub const AIRCRAFT: usize = 12;
 const NOTICES: usize = 8;
 const QUEUE: usize = 1024;
 /// Seconds to close or open the output when world time holds or resumes.
@@ -75,7 +77,11 @@ pub fn console(bank: Arc<Bank>, air: Air) -> (Cues, Mixer) {
         notices: Vec::with_capacity(NOTICES),
         shores: [None; SHORES],
         sirens: [0x51E, 0xA1A, 0x3A9, 0x70C].map(Siren::new),
-        planes: [0xF17, 0xB1D, 0x2E9, 0xA17].map(Plane::new),
+        planes: [
+            0xF17, 0xB1D, 0x2E9, 0xA17, 0x4C3, 0xD52, 0x7E1, 0x1B8, 0x9A5, 0x36F, 0xC0B, 0x5E2,
+        ]
+        .map(Plane::new),
+        horn: Horn::new(0x40B),
         ears: Ears::default(),
         hull: Hull::new(),
         tail: Tail::new(),
@@ -103,13 +109,15 @@ pub struct Mixer {
     /// Land that answers a report: where it stands and how wide it is.
     shores: [Option<(Vec3, f32)>; SHORES],
     sirens: [Siren; SIRENS],
-    planes: [Plane; PLANES],
+    planes: [Plane; AIRCRAFT],
+    /// The horn of whichever big ship last sounded one.
+    horn: Horn,
     ears: Ears,
     hull: Hull,
     tail: Tail,
     bed: [[f32; 2]; BLOCK],
-    /// Sirens and aeroplanes, which are kept out of the reckoning of how loud a moment
-    /// is.
+    /// Sirens, the horn and aeroplanes, which are kept out of the reckoning of how loud
+    /// a moment is.
     aside: [[f32; 2]; BLOCK],
     send: [[f32; 2]; BLOCK],
     /// How far the ears have closed against a blast, from 0 to 1.
@@ -157,6 +165,11 @@ impl Mixer {
     /// Sirens that are turning, or have stopped with their last sound still on its way.
     pub fn wailing(&self) -> usize {
         self.sirens.iter().filter(|siren| !siren.spent()).count()
+    }
+
+    /// A horn is blowing, or its last blast is still on its way.
+    pub fn blowing(&self) -> bool {
+        !self.horn.spent()
     }
 
     /// Aeroplanes in earshot with their engines running, or gone with their last
@@ -227,6 +240,9 @@ impl Mixer {
         for siren in self.sirens.iter_mut().filter(|siren| !siren.spent()) {
             siren.sing(ears, air, aside, send);
         }
+        if !self.horn.spent() {
+            self.horn.sing(ears, air, aside, send);
+        }
         for plane in &mut self.planes {
             plane.sing(ears, air, aside, send);
         }
@@ -263,7 +279,12 @@ impl Mixer {
                 sound,
                 position,
                 serial,
-            } => self.emit(sound, position, serial),
+            } => self.emit(sound, position, serial, 1.),
+            Cue::Notice {
+                sound,
+                level,
+                serial,
+            } => self.emit(sound, Vec3::ZERO, serial, level.clamp(0., 1.)),
             Cue::Shell {
                 serial,
                 position,
@@ -296,6 +317,17 @@ impl Mixer {
                     siren.order(rotor, position, alert);
                 }
             }
+            Cue::Horn {
+                position,
+                length,
+                blow,
+            } => {
+                if blow {
+                    self.horn.blow(position, length);
+                } else {
+                    self.horn.follow(position);
+                }
+            }
             Cue::Aircraft {
                 slot,
                 position,
@@ -319,6 +351,7 @@ impl Mixer {
                 self.voices.clear();
                 self.flights.clear();
                 self.sirens.iter_mut().for_each(Siren::clear);
+                self.horn.clear();
                 self.planes.iter_mut().for_each(Plane::clear);
                 self.tail.clear();
                 (self.deaf, self.muffle) = (0., [[0.; 2]; 2]);
@@ -350,8 +383,9 @@ impl Mixer {
         }
     }
 
-    fn emit(&mut self, sound: Sound, position: Vec3, serial: u64) {
-        let levels = sound.levels();
+    /// A sound made once, at `strength` times its usual level.
+    fn emit(&mut self, sound: Sound, position: Vec3, serial: u64, strength: f32) {
+        let levels = sound.levels().map(|level| level * strength);
         // A small spread of playback speed keeps repeated takes from sounding identical.
         let detune = (serial.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40) as f64 / (1 << 24) as f64;
         let speed = if sound.tuned() {

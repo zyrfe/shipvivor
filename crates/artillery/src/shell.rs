@@ -3,6 +3,9 @@ use crate::ShellClass;
 
 /// Metres a stock round carries.
 const STOCK_REACH: f32 = 780.;
+/// The stock loading curve runs through these two guns, each given as its bore in
+/// inches and the seconds one barrel takes to load.
+const LOADING: ((f32, f32), (f32, f32)) = ((4., 2.5), (30., 30.));
 
 /// What a round is filled with. HE bursts on whatever it strikes and opens only light
 /// plate. AP is built to go through armour, and caps and a larger bore drive it harder.
@@ -60,6 +63,14 @@ impl MainShell {
     }
     pub fn diameter_metres(self) -> f32 {
         self.calibre_inches() * 0.0254
+    }
+    /// Seconds a stock crew takes to load one barrel with this round. A light gun loads
+    /// in moments, and the time grows faster than the bore: 2.5 s at four inches, about
+    /// 6 s at eight, 16 s at eighteen and 30 s at thirty.
+    pub fn load_seconds(self) -> f32 {
+        let ((light, quick), (heavy, slow)) = LOADING;
+        let steepness = (slow / quick).ln() / (heavy / light).ln();
+        quick * (self.calibre_inches() / light).powf(steepness)
     }
     /// The larger projectile displaces more material once a plate opens.
     pub fn breach_force(self) -> u16 {

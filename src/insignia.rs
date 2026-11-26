@@ -28,6 +28,10 @@ pub struct Insignia {
     pub bridge: Handle<Image>,
     pub order: Handle<Image>,
     pub arrow: Handle<Image>,
+    /// Take back an order the yard has not yet built.
+    pub undo: Handle<Image>,
+    /// A turret raised on a barbette to fire over the one ahead.
+    pub raise: Handle<Image>,
     pub length: Handle<Image>,
     pub turn: Handle<Image>,
     pub lock: Handle<Image>,
@@ -52,10 +56,10 @@ pub struct Insignia {
     training_gear: Handle<Image>,
     armor: Handle<Image>,
     hardening: Handle<Image>,
-    anti_air: Handle<Image>,
     aa_mounts: Handle<Image>,
     aa_shells: Handle<Image>,
     aa_loaders: Handle<Image>,
+    pumps: Handle<Image>,
 }
 impl Insignia {
     pub fn fitting(&self, card: Card) -> Handle<Image> {
@@ -76,10 +80,10 @@ impl Insignia {
             Card::TrainingGear => &self.training_gear,
             Card::Armor => &self.armor,
             Card::Hardening => &self.hardening,
-            Card::AntiAir => &self.anti_air,
             Card::MoreAntiAir => &self.aa_mounts,
             Card::HeavyAntiAir => &self.aa_shells,
             Card::QuickAntiAir => &self.aa_loaders,
+            Card::Pumps => &self.pumps,
         }
         .clone()
     }
@@ -346,6 +350,34 @@ pub fn setup(
             ".......##...",
             ".......#....",
             "............",
+            "............",
+        ]),
+        undo: stamp([
+            "............",
+            ".##......##.",
+            ".###....###.",
+            "..###..###..",
+            "...######...",
+            "....####....",
+            "....####....",
+            "...######...",
+            "..###..###..",
+            ".###....###.",
+            ".##......##.",
+            "............",
+        ]),
+        raise: stamp([
+            "............",
+            "......####..",
+            "#####.#####.",
+            "......#####.",
+            ".......###..",
+            "..###..###..",
+            "#####..###..",
+            "..###..###..",
+            "..###..###..",
+            "############",
+            "############",
             "............",
         ]),
         length: stamp([
@@ -657,20 +689,6 @@ pub fn setup(
             "..#..##..#..",
             ".....##.....",
         ]),
-        anti_air: stamp([
-            ".........#..",
-            ".......#####",
-            ".........#..",
-            "........###.",
-            "............",
-            "......#.#...",
-            ".....#.#....",
-            "....#.#.....",
-            "..#####.....",
-            ".#######....",
-            ".#######....",
-            "............",
-        ]),
         aa_mounts: stamp([
             ".#.......#..",
             "###....#####",
@@ -711,6 +729,21 @@ pub fn setup(
             "######..####",
             "............",
             "............",
+            "............",
+        ]),
+        // A jet of water arcing over the side from a hull into the sea.
+        pumps: stamp([
+            "............",
+            "..####......",
+            ".#....##....",
+            ".#......#...",
+            "###......#..",
+            "###.......#.",
+            "###.......#.",
+            "###......#.#",
+            "###.......#.",
+            "###...#.#...",
+            "##.##.##.##.",
             "............",
         ]),
     });

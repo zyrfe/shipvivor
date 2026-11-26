@@ -16,7 +16,7 @@ use bevy::{
     mesh::{Indices, PrimitiveTopology},
     prelude::*,
 };
-use icons::Emblem;
+pub(crate) use icons::Emblem;
 use shipvivor_compass::{direction, heading};
 use shipvivor_encounter::{Battery, Battle, Hull, SIGHT_LIMIT};
 
@@ -43,6 +43,16 @@ const TAG: f32 = 24.;
 const ARROW: f32 = 14.;
 /// HUD margin kept clear around pinned pips.
 const INSET: Vec2 = Vec2::new(24., 30.);
+/// Two threats of a kind whose ranges differ by less than this share of the nearer
+/// one's are a near tie for which pip draws on top.
+const NEAR_TIE: f32 = 0.1;
+/// The box the scoped target's name is centred in, its height, and the air between it
+/// and her badge.
+const NAME_WIDTH: f32 = 220.;
+const NAME_HEIGHT: f32 = 16.;
+const NAME_GAP: f32 = 2.;
+/// How far the lens has narrowed when the name comes up: where the range ticks do.
+const NAME_ZOOM: f32 = 0.45;
 
 #[derive(Component)]
 pub struct Ring;
@@ -62,6 +72,11 @@ pub struct OverShip;
 pub struct BadgeEmblem;
 #[derive(Component)]
 pub struct BadgeArrow;
+/// What the target is, over her badge while the scope is in.
+#[derive(Component)]
+pub struct QuarryName {
+    text: Entity,
+}
 
 #[derive(Resource)]
 pub struct BadgeArt {
@@ -71,7 +86,7 @@ pub struct BadgeArt {
     emblems: Vec<(Emblem, Handle<Image>)>,
 }
 impl BadgeArt {
-    fn emblem(&self, kind: Emblem) -> &Handle<Image> {
+    pub(crate) fn emblem(&self, kind: Emblem) -> &Handle<Image> {
         &self.emblems.iter().find(|(k, _)| *k == kind).unwrap().1
     }
 }
@@ -227,6 +242,35 @@ pub fn setup(
             badge.insert(OverShip);
         }
     }
+    let text = cmd
+        .spawn((
+            Text::new(""),
+            TextFont::from_font_size(12.),
+            TextColor(Color::WHITE),
+            TextShadow::default(),
+            BackgroundColor(Color::srgba_u8(14, 34, 40, 218)),
+            Node {
+                padding: UiRect::horizontal(px(4)),
+                ..default()
+            },
+        ))
+        .id();
+    cmd.spawn((
+        QuarryName { text },
+        Node {
+            position_type: PositionType::Absolute,
+            width: px(NAME_WIDTH),
+            height: px(NAME_HEIGHT),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            display: Display::None,
+            ..default()
+        },
+        // Over every badge, whose ranks run down from nought.
+        ZIndex(1),
+        ChildOf(layer),
+    ))
+    .add_child(text);
     cmd.insert_resource(art);
 }
 
@@ -258,14 +302,24 @@ fn threats(battle: &Battle, player: Vec2, log: &mut FireLog) -> Vec<Threat> {
     for shot in battle.shots() {
         if !matches!(
             shot.battery,
-            Battery::Raider | Battery::EnemySecondary | Battery::Shore | Battery::Aircraft
+            Battery::Raider
+                | Battery::EnemySecondary
+                | Battery::Shore
+                | Battery::Heavy
+                | Battery::Aircraft
         ) {
             continue;
         }
         let source = if shot.battery == Battery::Aircraft {
-            aircraft.map_or(Source::Stray(shot.origin()), |plane| {
-                Source::Aircraft(plane.body.id)
-            })
+            // The strafer or the harrier nearest where the round was fired.
+            let from = shot.origin();
+            let planes = aircraft.map(|plane| (plane.body.id, plane.body.pos));
+            let harriers = battle.harriers().iter().map(|p| (p.body.id, p.body.pos));
+            planes
+                .into_iter()
+                .chain(harriers)
+                .min_by(|a, b| a.1.distance(from).total_cmp(&b.1.distance(from)))
+                .map_or(Source::Stray(from), |(id, _)| Source::Aircraft(id))
         } else {
             attribute(&guns, shot.origin())
         };
@@ -288,7 +342,14 @@ fn threats(battle: &Battle, player: Vec2, log: &mut FireLog) -> Vec<Threat> {
     let mut out = Vec::new();
     for r in battle.raiders() {
         let source = Source::Ship(r.body.id);
-        let armed = r.afloat() && r.vessel().powered() && r.live_guns() > 0;
+        // A torpedo boat is a threat once she is out: running in with a torpedo, or
+        // circling her with her little gun. At her mooring or bound home she is not.
+        let gunned = if r.torpedo_mooring().is_some() {
+            r.running_in() || (r.harrying() && r.live_guns() > 0)
+        } else {
+            r.live_guns() > 0
+        };
+        let armed = r.afloat() && r.vessel().powered() && gunned;
         let quiet = quiet(source);
         if (armed && in_sight(r.body.pos)) || quiet.is_some() {
             out.push(Threat {
@@ -306,8 +367,8 @@ fn threats(battle: &Battle, player: Vec2, log: &mut FireLog) -> Vec<Threat> {
             if (turret.live() && in_sight(at)) || quiet.is_some() {
                 out.push(Threat {
                     at,
-                    emblem: Emblem::Fort,
-                    heading: None,
+                    emblem: Emblem::battery(turret),
+                    heading: Some(turret.heading),
                     quiet,
                 });
             }
@@ -321,6 +382,17 @@ fn threats(battle: &Battle, player: Vec2, log: &mut FireLog) -> Vec<Threat> {
             quiet: quiet(Source::Aircraft(plane.body.id)),
         });
     }
+    for plane in battle.harriers() {
+        let quiet = quiet(Source::Aircraft(plane.body.id));
+        if (plane.attacking() && in_sight(plane.body.pos)) || quiet.is_some() {
+            out.push(Threat {
+                at: plane.body.pos,
+                emblem: Emblem::Plane,
+                heading: Some(plane.body.heading),
+                quiet,
+            });
+        }
+    }
     for &(source, at) in &log.0 {
         if let Source::Stray(origin) = source {
             out.push(Threat {
@@ -332,6 +404,52 @@ fn threats(battle: &Battle, player: Vec2, log: &mut FireLog) -> Vec<Threat> {
         }
     }
     out
+}
+
+/// Every enemy torpedo in sight, turned along its run. One that will pass within
+/// `reach` of her, at `player` making `way`, points in at her as a gun firing does.
+fn torpedo_threats(battle: &Battle, player: Vec2, way: Vec2, reach: f32) -> Vec<Threat> {
+    (battle.torpedoes().iter())
+        .filter(|fish| fish.hostile())
+        .filter(|fish| fish.body.pos.distance_squared(player) <= SIGHT_LIMIT * SIGHT_LIMIT)
+        .map(|fish| Threat {
+            at: fish.body.pos,
+            emblem: Emblem::Torpedo,
+            heading: Some(fish.body.heading),
+            quiet: fish.closing(player, way, reach).map(|_| 0.),
+        })
+        .collect()
+}
+
+/// Whether `a`'s pip draws over `b`'s, seen from `ship`: the more serious kind of
+/// threat, then the nearer, then at nearly the same range the one further clockwise.
+/// None of it turns on whether a gun has a round in the air, so a battery's guns
+/// firing in turn don't take turns on top.
+fn draws_over(a: &Threat, b: &Threat, ship: Vec2) -> bool {
+    let (menace_a, menace_b) = (a.emblem.menace(), b.emblem.menace());
+    if menace_a != menace_b {
+        return menace_a > menace_b;
+    }
+    let (to_a, to_b) = (a.at - ship, b.at - ship);
+    let (range_a, range_b) = (to_a.length(), to_b.length());
+    if (range_a - range_b).abs() > NEAR_TIE * range_a.min(range_b) {
+        return range_a < range_b;
+    }
+    // Bearings run clockwise with south down +y, so this is positive when `a` lies
+    // clockwise of `b`, less than half a turn round.
+    to_b.perp_dot(to_a) > 0.
+}
+
+/// Put the threats in drawing order, the one on top first. An insertion sort, since
+/// near ties make `draws_over` no total order and the pips are few.
+fn stack(threats: &mut [Threat], ship: Vec2) {
+    for i in 1..threats.len() {
+        let mut j = i;
+        while j > 0 && draws_over(&threats[j], &threats[j - 1], ship) {
+            threats.swap(j, j - 1);
+            j -= 1;
+        }
+    }
 }
 
 /// Where a pip for a bearing sits on the HUD: on the ring where the ring is in view,
@@ -427,7 +545,8 @@ type LayerOnly = (With<PipLayer>, Without<Badge>, Without<BadgeArrow>);
 type RingOnly = (With<OnRing>, Without<OverShip>);
 type TagsOnly = (With<OverShip>, Without<OnRing>);
 
-/// Show each badge in a pool with the next look, and hide the ones left over.
+/// Show each badge in a pool with the next look, and hide the ones left over. Each
+/// look draws over the ones after it, whichever badge it lands on.
 fn dress<'a, F: bevy::ecs::query::QueryFilter>(
     badges: &mut Badges<F>,
     looks: impl IntoIterator<Item = &'a Look>,
@@ -435,12 +554,13 @@ fn dress<'a, F: bevy::ecs::query::QueryFilter>(
     emblems: &mut Emblems,
     arrows: &mut Arrows,
 ) {
-    let mut looks = looks.into_iter();
+    let mut looks = looks.into_iter().enumerate();
     for (badge, mut node, mut disc, mut transform, mut z) in badges.iter_mut() {
-        let Some(look) = looks.next() else {
+        let Some((rank, look)) = looks.next() else {
             node.display = Display::None;
             continue;
         };
+        z.set_if_neq(ZIndex(-(rank as i32)));
         let gold = look.emblem.gold();
         let face = if gold { &art.gold_disc } else { &art.disc };
         if disc.image != *face {
@@ -448,7 +568,6 @@ fn dress<'a, F: bevy::ecs::query::QueryFilter>(
         }
         disc.color = Color::WHITE.with_alpha(look.alpha);
         transform.scale = Vec2::splat(1. + look.pop);
-        z.0 = i32::from(look.inward.is_some());
         node.width = px(look.side);
         node.height = px(look.side);
         node.left = px(look.centre.x - look.side * 0.5);
@@ -544,8 +663,11 @@ pub fn update(
         .viewport_point(ship, ship.extend(height).xzy(), size)
         .unwrap_or(Vec2::new(size.x * 0.5, size.y));
     let mut threats = threats(&battle, ship, &mut log);
-    // Firing pips draw over quiet ones.
-    threats.sort_by_key(|t| t.quiet.is_some());
+    let way = direction(helm.heading) * helm.speed;
+    threats.extend(torpedo_threats(&battle, ship, way, radius));
+    // Should there be more threats than pips, the ones that would draw underneath go
+    // without.
+    stack(&mut threats, ship);
     let looks: Vec<Look> = threats
         .iter()
         .map(|threat| {
@@ -584,6 +706,20 @@ fn tag_centre(corner: Vec2) -> Vec2 {
     )
 }
 
+/// The top left of the name's box, centred over a tag whose centre is given and just
+/// clear of it.
+fn name_corner(tag: Vec2) -> Vec2 {
+    Vec2::new(
+        tag.x - NAME_WIDTH * 0.5,
+        tag.y - TAG * 0.5 - NAME_GAP - NAME_HEIGHT,
+    )
+}
+
+type Names<'w, 's> =
+    Query<'w, 's, (&'static QuarryName, &'static mut Node), (Without<Badge>, Without<BadgeArrow>)>;
+
+/// Through the scope, the target's tag carries what she is over it: her class, or the
+/// kind of harbour gun. A flagship's own tag already names her.
 #[allow(clippy::too_many_arguments)]
 pub fn tag_ships(
     navigation: (
@@ -597,13 +733,20 @@ pub fn tag_ships(
     scale: Res<UiScale>,
     art: Res<BadgeArt>,
     mut parts: (Badges<TagsOnly>, Emblems, Arrows),
+    mut naming: (Names, Query<(&mut Text, &mut TextColor)>),
 ) {
+    use crate::camera::Quarry;
     let (run, helm, battle, view) = navigation;
     let (sea, kit) = scenery;
     let (tags, emblems, arrows) = &mut parts;
     let size = window.size() / scale.0;
     let ship = helm.position;
     let mut looks = Vec::new();
+    let quarry = (view.zoom >= NAME_ZOOM)
+        .then(|| view.quarry(&battle))
+        .flatten();
+    // Where her tag sits, and what she is.
+    let mut named: Option<(Vec2, String)> = None;
     if run.screen() == Screen::Sailing && size.min_element() >= 32. {
         for r in battle.raiders() {
             if r.class.is_flagship()
@@ -629,8 +772,13 @@ pub fn tag_ships(
                 continue;
             }
             let emblem = Emblem::of(r.class);
+            let centre = tag_centre(corner);
+            if quarry == Some(Quarry::Ship(r.body.id)) {
+                let class = crate::mission_hud::ship_class(r.class);
+                named = Some((centre, r.weight().name(class)));
+            }
             looks.push(Look {
-                centre: tag_centre(corner),
+                centre,
                 side: TAG,
                 emblem,
                 turn: Look::turn(&view, emblem, Some(r.body.heading)),
@@ -639,8 +787,11 @@ pub fn tag_ships(
                 inward: None,
             });
         }
-        for port in battle.ports() {
-            for turret in port.turrets().iter().filter(|turret| turret.live()) {
+        for (index, port) in battle.ports().iter().enumerate() {
+            for (gun, turret) in port.turrets().iter().enumerate() {
+                if !turret.live() {
+                    continue;
+                }
                 let at = turret.position(&port.body);
                 if at.distance_squared(ship) > SIGHT_LIMIT * SIGHT_LIMIT {
                     continue;
@@ -653,11 +804,21 @@ pub fn tag_ships(
                 if edge != Rot2::IDENTITY {
                     continue;
                 }
+                let emblem = Emblem::battery(turret);
+                let centre = tag_centre(corner);
+                if quarry == Some(Quarry::Battery(index, gun)) {
+                    let kind = if turret.heavy_battery() {
+                        "Heavy battery"
+                    } else {
+                        "Shore turret"
+                    };
+                    named = Some((centre, kind.to_owned()));
+                }
                 looks.push(Look {
-                    centre: tag_centre(corner),
+                    centre,
                     side: TAG,
-                    emblem: Emblem::Fort,
-                    turn: Rot2::IDENTITY,
+                    emblem,
+                    turn: Look::turn(&view, emblem, Some(turret.heading)),
                     alpha: Look::alpha(at.distance(ship)),
                     pop: 0.,
                     inward: None,
@@ -666,6 +827,29 @@ pub fn tag_ships(
         }
     }
     dress(tags, &looks, &art, emblems, arrows);
+    let (names, texts) = &mut naming;
+    for (name, mut node) in names.iter_mut() {
+        let Some((centre, words)) = &named else {
+            node.display = Display::None;
+            continue;
+        };
+        let corner = name_corner(*centre);
+        node.left = px(corner.x);
+        node.top = px(corner.y);
+        node.display = Display::Flex;
+        if let Ok((mut text, mut ink)) = texts.get_mut(name.text) {
+            let words = words.to_uppercase();
+            if text.0 != words {
+                text.0 = words;
+            }
+            // The targeting triangle's colours: gold while she is pinned.
+            ink.set_if_neq(TextColor(if view.locked() {
+                Color::srgb_u8(255, 202, 93)
+            } else {
+                Color::srgb_u8(207, 234, 228)
+            }));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -677,6 +861,25 @@ mod tests {
 
     fn inside(p: Vec2) -> bool {
         p.cmpge(INSET - 0.01).all() && p.cmple(SIZE - INSET + 0.01).all()
+    }
+
+    #[test]
+    fn the_scoped_name_stands_centred_over_the_targets_tag_and_clear_of_it() {
+        let class = shipvivor_encounter::EnemyClass::Cruiser;
+        let hull = &class.profile().hull;
+        let pose = Transform::from_xyz(0., 0., -260.);
+        let mut view = ShipView::astern(0.);
+        view.zoom = 1.;
+        view.center_on(Vec2::ZERO, pose.translation + Vec3::Y * 3.);
+        let (corner, turn) =
+            crate::fire_control::contact_marker(&view, Vec2::ZERO, SIZE, pose, hull, 9.).unwrap();
+        assert_eq!(turn, Rot2::IDENTITY);
+        let tag = tag_centre(corner);
+        let name = name_corner(tag);
+        assert!((name.x + NAME_WIDTH * 0.5 - tag.x).abs() < 0.01);
+        assert!(name.y + NAME_HEIGHT < tag.y - TAG * 0.5);
+        // Over a ship in the middle of the scope, the name is on screen.
+        assert!(name.y > 0. && name.x > 0. && name.x + NAME_WIDTH < SIZE.x);
     }
 
     #[test]
@@ -763,6 +966,116 @@ mod tests {
         for gun in port.turrets() {
             assert!(forts.contains(&gun.position(&port.body)), "{forts:?}");
         }
+    }
+
+    fn threat(at: Vec2, emblem: Emblem, quiet: Option<f32>) -> Threat {
+        Threat {
+            at,
+            emblem,
+            heading: None,
+            quiet,
+        }
+    }
+
+    fn stacked(mut threats: Vec<Threat>, ship: Vec2) -> Vec<Vec2> {
+        stack(&mut threats, ship);
+        threats.iter().map(|t| t.at).collect()
+    }
+
+    #[test]
+    fn pips_stack_by_menace_then_range_then_clockwise_whatever_is_firing() {
+        let ship = Vec2::new(40., -300.);
+        let at = |bearing: f32, range: f32| ship + direction(bearing) * range;
+        // Top first, all within a few degrees of one bearing.
+        let top_first = vec![
+            threat(at(0.35, 1350.), Emblem::Torpedo, None),
+            threat(at(0.31, 1200.), Emblem::Battleship, None),
+            threat(at(0.29, 1300.), Emblem::Cruiser, Some(0.)),
+            threat(at(0.33, 400.), Emblem::Fort, None),
+            // A near tie in range: the one clockwise goes over, though a little further.
+            threat(at(0.31, 610.), Emblem::Fort, None),
+            threat(at(0.30, 600.), Emblem::Fort, Some(0.)),
+            threat(at(0.32, 900.), Emblem::Fort, Some(1.)),
+        ];
+        let expected: Vec<Vec2> = top_first.iter().map(|t| t.at).collect();
+        for turn in 0..top_first.len() {
+            for flip in [false, true] {
+                let mut given = top_first.clone();
+                if flip {
+                    given.reverse();
+                }
+                given.rotate_left(turn);
+                assert_eq!(
+                    stacked(given, ship),
+                    expected,
+                    "rotated {turn}, flipped {flip}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_batterys_guns_firing_in_turn_never_trade_places() {
+        let ship = Vec2::new(-900., 250.);
+        let guns = [
+            Vec2::new(0., 0.),
+            Vec2::new(35., 10.),
+            Vec2::new(70., -5.),
+            Vec2::new(20., 40.),
+        ];
+        let quiet: Vec<Threat> = guns
+            .iter()
+            .map(|&at| threat(at, Emblem::Fort, None))
+            .collect();
+        let settled = stacked(quiet.clone(), ship);
+        for firing in 0..guns.len() {
+            let mut volley = quiet.clone();
+            volley[firing].quiet = Some(0.);
+            assert_eq!(stacked(volley, ship), settled, "gun {firing} firing");
+        }
+    }
+
+    #[test]
+    fn pips_trade_places_only_now_and_then_as_she_steams_past_a_harbour() {
+        let guns = [
+            Vec2::new(0., 0.),
+            Vec2::new(35., 10.),
+            Vec2::new(70., -5.),
+            Vec2::new(20., 40.),
+            Vec2::new(-30., 25.),
+        ];
+        let threats: Vec<Threat> = guns
+            .iter()
+            .map(|&at| threat(at, Emblem::Fort, None))
+            .collect();
+        const TICK: f32 = 1. / 60.;
+        // Which of each pair drew on top, and when that last changed.
+        let mut last: Vec<Option<(bool, f32)>> = vec![None; guns.len() * guns.len()];
+        let mut swaps = 0;
+        for step in 0..(200. / TICK) as usize {
+            let now = step as f32 * TICK;
+            let ship = Vec2::new(-1200. + 12. * now, 300. - 0.4 * now);
+            let order = stacked(threats.clone(), ship);
+            let rank = |p: Vec2| order.iter().position(|&q| q == p).unwrap();
+            for a in 0..guns.len() {
+                for b in a + 1..guns.len() {
+                    let over = rank(guns[a]) < rank(guns[b]);
+                    let slot = &mut last[a * guns.len() + b];
+                    match *slot {
+                        Some((was, since)) if was != over => {
+                            assert!(now - since > 1., "guns {a} and {b} flapped at {now} s");
+                            swaps += 1;
+                            *slot = Some((over, now));
+                        }
+                        None => *slot = Some((over, now)),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // Ten pairs, each swapping when their bearings cross or their ranges part, and
+        // the pass does bring some of them round.
+        assert!((1..=30).contains(&swaps), "{swaps} swaps");
     }
 
     #[test]

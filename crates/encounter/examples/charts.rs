@@ -4,7 +4,9 @@
 //!
 //! `waters` is narrows, open, sound, cut or all. Each writes a contact sheet to
 //! `work/charts/<waters>.svg` and prints each chart's score and measures, then the share
-//! of raw sketches the survey passed and what failed the rest. Streamlines trace the
+//! of raw sketches the survey passed and what failed the rest. Set `CHARTS_WHY` to list
+//! the defects of the first few sketches that failed, and `CHARTS_TILE` to draw each
+//! chart larger than 520 pixels a side. Streamlines trace the
 //! solved current, shaded by speed, and the ice is drawn where it lies on arrival.
 use shipvivor_encounter::{
     Battle, Chart, Course, ISLAND_RADIUS, LandmarkKind, SHORE_RANGE, Survey, Waters,
@@ -13,7 +15,13 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::Instant;
 
-const TILE: f32 = 520.;
+/// Side of one chart's tile, unless `CHARTS_TILE` gives another.
+fn tile_size() -> f32 {
+    std::env::var("CHARTS_TILE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(520.)
+}
 const COLUMNS: usize = 4;
 
 fn main() {
@@ -69,14 +77,18 @@ fn main() {
                     .fold(0., f32::max),
                 chart.coast.len(),
             );
-            let (x, y) = ((i % COLUMNS) as f32 * TILE, (i / COLUMNS) as f32 * TILE);
+            let tile_side = tile_size();
+            let (x, y) = (
+                (i % COLUMNS) as f32 * tile_side,
+                (i / COLUMNS) as f32 * tile_side,
+            );
             tiles += &tile(&chart, &survey, &battle, x, y);
         }
         let rows = (count as usize).div_ceil(COLUMNS);
         let svg = format!(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" font-family="Helvetica" font-size="11"><rect width="100%" height="100%" fill="#1d3b52"/>{tiles}</svg>"##,
-            w = TILE * COLUMNS as f32,
-            h = TILE * rows as f32
+            w = tile_size() * COLUMNS.min(count as usize) as f32,
+            h = tile_size() * rows as f32
         );
         let path = format!("work/charts/{name}.svg");
         std::fs::write(&path, svg).expect("write chart sheet");
@@ -86,10 +98,14 @@ fn main() {
         let mut failures: BTreeMap<String, usize> = BTreeMap::new();
         let sketches = 400;
         let mut passed = 0;
+        let why = std::env::var_os("CHARTS_WHY").is_some();
         for seed in 0..sketches {
             let survey = Survey::of(&Chart::sketch_one(seed * 7919 + 13, waters));
             if survey.passed() {
                 passed += 1;
+            } else if why && seed < 12 {
+                let defects: Vec<String> = survey.defects.iter().map(|d| d.to_string()).collect();
+                println!("    sketch {seed}: {}", defects.join("; "));
             }
             for defect in &survey.defects {
                 let kind = format!("{defect:?}");
@@ -107,8 +123,10 @@ fn main() {
 }
 
 fn tile(chart: &Chart, survey: &Survey, battle: &Battle, ox: f32, oy: f32) -> String {
+    #[allow(non_snake_case)]
+    let TILE = tile_size();
     let mut points = vec![glam::Vec2::ZERO];
-    points.extend(chart.gates);
+    points.extend(chart.gates.iter().copied());
     points.extend(chart.harbours.iter().map(|h| h.pos));
     points.extend(chart.islets.iter().map(|i| i.pos));
     let low = points
@@ -147,7 +165,7 @@ fn tile(chart: &Chart, survey: &Survey, battle: &Battle, ox: f32, oy: f32) -> St
     let mut path = String::new();
     let lap = (chart.course == Course::Circuit).then_some(chart.gates[0]);
     for (i, p) in std::iter::once(glam::Vec2::ZERO)
-        .chain(chart.gates)
+        .chain(chart.gates.iter().copied())
         .chain(lap)
         .enumerate()
     {
@@ -197,12 +215,14 @@ fn tile(chart: &Chart, survey: &Survey, battle: &Battle, ox: f32, oy: f32) -> St
                 fy - 2.
             );
         }
+        // Each base is lettered, with the stage it rouses in.
         let _ = write!(
             s,
-            r##"<text x="{}" y="{}" fill="#ff8f70" font-weight="bold" font-size="14">{}</text>"##,
+            r##"<text x="{}" y="{}" fill="#ff8f70" font-weight="bold" font-size="14">{}<tspan font-size="9" font-weight="normal"> {}</tspan></text>"##,
             x + 10.,
             y - 10.,
-            ["A", "B", "C"][i]
+            char::from(b'A' + i as u8),
+            port.stage() + 1
         );
     }
     let mut previous = glam::Vec2::ZERO;

@@ -1,5 +1,5 @@
 //! What a ship is built from, and the figures that follow from the build.
-use shipvivor_artillery::ArmorGrade;
+use shipvivor_artillery::{ArmorGrade, TurretLayout};
 use std::ops::RangeInclusive;
 
 /// Top speed of the reference cruiser in metres per second.
@@ -174,18 +174,50 @@ impl Component {
     }
 }
 
+/// The most a turret can be raised: a third turret firing over a raised second.
+pub const MOST_TIER: u8 = 2;
+
+/// How the main turrets on one module are built. A wing pair is built alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Gunhouse {
+    /// Barrels in each turret.
+    pub barrels: TurretLayout,
+    /// Inches of bore.
+    pub bore: u16,
+    /// How many barbette steps the turrets stand above the deck. A turret fires over a
+    /// centreline turret that stands lower than itself.
+    pub tier: u8,
+}
+impl Default for Gunhouse {
+    /// A single four-inch gun on the deck.
+    fn default() -> Self {
+        Self {
+            barrels: TurretLayout::Single,
+            bore: 4,
+            tier: 0,
+        }
+    }
+}
+
 /// One hull module and what is fitted to it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Module {
     pub frame: Frame,
     pub fit: Vec<Component>,
+    /// How its main turrets are built, if it carries any.
+    pub gunhouse: Gunhouse,
 }
 impl Module {
     pub fn new(frame: Frame, fit: impl IntoIterator<Item = Component>) -> Self {
         Self {
             frame,
             fit: fit.into_iter().collect(),
+            gunhouse: Gunhouse::default(),
         }
+    }
+    /// The same frame carrying the same components, however its turrets are fitted.
+    pub fn same_kind(&self, other: &Self) -> bool {
+        self.frame == other.frame && self.fit == other.fit
     }
 }
 
@@ -277,6 +309,12 @@ pub struct Design {
     /// She founders once this share of her vital length is wrecked.
     pub sinks_at: f32,
     beam_factor: f32,
+    /// Pumping, as a multiple of a stock crew's. Better pumps clear water faster.
+    pumps: f32,
+    /// Whether her battered modules leak and fill, so that one floods before it is
+    /// holed to nothing and comes back once pumped out. Otherwise a module floods only
+    /// when holed to nothing, and is afloat again once patched to a quarter.
+    pub leaks: bool,
     modules: Vec<Module>,
 }
 
@@ -324,6 +362,8 @@ impl Design {
             reserve: 20.,
             sinks_at: 0.5,
             beam_factor: 1.,
+            pumps: 1.,
+            leaks: false,
             modules,
         })
     }
@@ -374,6 +414,16 @@ impl Design {
             return Err(Fault::Missing);
         }
         self.amend(|modules| modules[at] = with)
+    }
+
+    /// Rebuild the main turrets on a module.
+    pub fn rearm(&mut self, at: usize, gunhouse: Gunhouse) -> Result<(), Fault> {
+        let module = self.modules.get_mut(at).ok_or(Fault::Missing)?;
+        module.gunhouse = Gunhouse {
+            tier: gunhouse.tier.min(MOST_TIER),
+            ..gunhouse
+        };
+        Ok(())
     }
 
     pub fn fit(&mut self, module: usize, component: Component) -> Result<Berth, Fault> {
@@ -446,6 +496,15 @@ impl Design {
 
     pub fn beam_factor(&self) -> f32 {
         self.beam_factor
+    }
+
+    /// Pumping, as a multiple of a stock crew's.
+    pub fn pumps(&self) -> f32 {
+        self.pumps
+    }
+
+    pub fn fit_pumps(&mut self, pumps: f32) {
+        self.pumps = pumps.max(0.);
     }
 
     /// Her side plating and the strength of what she carries.

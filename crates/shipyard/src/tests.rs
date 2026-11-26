@@ -7,6 +7,29 @@ fn near(a: f32, b: f32) -> bool {
 fn berth(module: usize, index: usize) -> Berth {
     Berth { module, index }
 }
+/// Breakwater's hull with a stock crew, so the times in a test are the repair
+/// mechanics' own, not her crew's slower pace.
+fn stock_crew() -> Design {
+    let mut design = Design::breakwater();
+    design.repair = 1.;
+    design
+}
+
+#[test]
+fn her_crew_mends_and_pumps_at_two_thirds_of_a_stock_crews_pace() {
+    let mut ship = Ship::new(Design::breakwater());
+    let mut stock = Ship::new(stock_crew());
+    for ship in [&mut ship, &mut stock] {
+        ship.strike_hull(7.5, 10.);
+        ship.tend(60.);
+    }
+    let mended = |ship: &Ship| ship.compartments()[1].structure() - 8.;
+    assert!(near(mended(&stock), 60. * 0.002 * 18.));
+    assert!(near(
+        mended(&ship),
+        Design::BREAKWATER_REPAIR * mended(&stock)
+    ));
+}
 
 #[test]
 fn moving_a_compartment_moves_its_gun_damage_and_repair_party() {
@@ -360,7 +383,7 @@ fn turning_the_other_beam_brings_fresh_plating_to_bear() {
 
 #[test]
 fn plating_mends_with_the_crew_and_the_dock_replates_her() {
-    let mut ship = Ship::new(Design::breakwater());
+    let mut ship = Ship::new(stock_crew());
     let port = Panel::new(Side::Port, true);
     for _ in 0..3 {
         ship.strike_side(6., -2., 3., SIX_INCH);
@@ -385,7 +408,7 @@ fn breakwater_founders_with_four_of_her_six_modules_wrecked() {
     assert_eq!(Ship::new(Design::battleship()).flooding(), (0, 3));
     assert_eq!(Ship::new(Design::patrol_boat()).flooding(), (0, 1));
     assert!(
-        near(ship.propulsion(), 1. - 0.5 * 10. / 30.),
+        near(ship.propulsion(), 1. - 1.8 * 10. / 30.),
         "flooding drags"
     );
     assert_eq!(ship.strike_hull(12.5, 18.), [Loss::Wrecked(2)]);
@@ -414,7 +437,9 @@ fn a_citadel_ship_shrugs_off_wrecked_ends_and_dies_by_her_vitals() {
 
     let (fore, aft) = (berth(3, 1), berth(4, 0));
     assert_eq!(ship.strike_hull(25., 12.), [Loss::Knocked(fore)]);
-    assert!(ship.propulsion() > 0.3 && ship.propulsion() < 0.5);
+    // One engine of two, dragging her flooded ends.
+    let drag = 1. - 1.8 * ship.water_aboard();
+    assert!(near(ship.propulsion(), 0.5 * drag) && drag > 0.4, "{drag}");
     assert_eq!(ship.strike_hull(25., 12.), [Loss::Wrecked(3)]);
     assert_eq!(
         ship.strike_hull(32., 22.),
@@ -492,7 +517,7 @@ fn a_patrol_boat_is_adrift_after_one_hit_and_sunk_by_the_next() {
 
 #[test]
 fn the_crew_mends_slowly_and_only_up_to_what_the_damage_left_sound() {
-    let mut ship = Ship::new(Design::breakwater());
+    let mut ship = Ship::new(stock_crew());
     ship.strike_hull(7.5, 10.);
     let hold = |ship: &Ship| {
         let hold = &ship.compartments()[1];
@@ -513,10 +538,101 @@ fn the_crew_mends_slowly_and_only_up_to_what_the_damage_left_sound() {
 }
 
 #[test]
-fn a_knocked_out_engine_waits_for_the_repair_party() {
+fn a_battered_module_fills_unless_it_is_pumped() {
+    // Five sixths of the forward gun's module shot away: it leaks faster than the crew
+    // can pump, though nothing is wrecked yet.
+    let battered = || {
+        let mut ship = Ship::new(stock_crew());
+        assert!(ship.strike_hull(7.5, 15.).is_empty());
+        ship
+    };
+    let water = |ship: &Ship| ship.compartments()[1].water();
+    let mut ship = battered();
+    assert!(ship.compartments()[1].inflow() > PUMP);
+    assert!(
+        ship.compartments()[3].inflow() == 0.,
+        "a sound module stays dry"
+    );
+    tend(&mut ship, 10);
+    assert!(water(&ship) > 0.25 && water(&ship) < 1., "{}", water(&ship));
+    assert!(ship.propulsion() < 1., "water aboard drags on her");
+    // The party goes to it before it floods.
+    assert_eq!(ship.triage(), Some(Task::Module(1)));
+    // Left alone it floods within the minute, though the crew's own repairs slow the
+    // leak, and the gun on it falls silent.
+    tend(&mut ship, 50);
+    assert!(ship.compartments()[1].wrecked());
+    assert_eq!(ship.state(berth(1, 0)), State::Out);
+
+    // Sent in time, the party pumps it out and patches it.
+    let mut ship = battered();
+    tend(&mut ship, 10);
+    assert!(ship.assign(Some(Task::Module(1))));
+    tend(&mut ship, 20);
+    assert!(!ship.compartments()[1].wrecked());
+    assert!(water(&ship) < 0.05, "{}", water(&ship));
+
+    // Pumps twice as good keep it dry on their own.
+    let mut ship = battered();
+    ship.fit_pumps(2.);
+    tend(&mut ship, 60);
+    assert!(water(&ship) == 0., "{}", water(&ship));
+}
+
+#[test]
+fn a_flooded_module_drags_on_her_until_the_dock_pumps_her_dry() {
     let mut ship = Ship::new(Design::breakwater());
+    assert_eq!(ship.strike_hull(7.5, 18.), [Loss::Wrecked(1)]);
+    assert_eq!(ship.compartments()[1].water(), 1.);
+    assert!(near(ship.water_aboard(), 5. / 30.));
+    assert!(near(ship.propulsion(), 1. - 1.8 * 5. / 30.));
+    // Holed to nothing, it leaks faster than the crew alone can pump.
+    assert!(ship.compartments()[1].inflow() > PUMP);
+    assert_eq!(ship.dock(40.), [Mend::Refloated(1)]);
+    assert_eq!(ship.compartments()[1].water(), 0.);
+    assert_eq!(ship.propulsion(), 1.);
+}
+
+#[test]
+fn a_torpedo_lets_the_sea_in_and_slows_her_until_it_is_pumped_out() {
+    let mut ship = Ship::new(Design::breakwater());
+    let water = |ship: &Ship| ship.compartments()[1].water();
+    ship.breach(7.5);
+    assert!(ship.compartments()[1].breached() && water(&ship) == 0.);
+    tend(&mut ship, 3);
+    // The sea comes in faster than the pumps can clear it, and she is slower for it.
+    assert!(water(&ship) > 0.6, "{}", water(&ship));
+    assert!(ship.propulsion() < 0.9, "{}", ship.propulsion());
+    assert_eq!(ship.triage(), Some(Task::Module(1)));
+    // Once it is shored her pumps clear it, and she has her speed again.
+    tend(&mut ship, 2);
+    assert!(!ship.compartments()[1].breached());
+    let peak = water(&ship);
+    assert!(peak < BREACH && !ship.compartments()[1].wrecked(), "{peak}");
+    tend(&mut ship, 30);
+    assert_eq!(water(&ship), 0.);
+    assert_eq!(ship.propulsion(), 1.);
+
+    // A second torpedo into a module not yet pumped out floods it.
+    ship.breach(7.5);
+    tend(&mut ship, 1);
+    ship.breach(7.5);
+    tend(&mut ship, 5);
+    assert!(ship.compartments()[1].wrecked());
+
+    // A ship that does not leak takes no water from it.
+    let mut boat = Ship::new(Design::patrol_boat());
+    boat.breach(1.);
+    tend(&mut boat, 3);
+    assert_eq!(boat.compartments()[0].water(), 0.);
+}
+
+#[test]
+fn a_knocked_out_engine_waits_for_the_repair_party() {
+    let mut ship = Ship::new(stock_crew());
     let engine = berth(3, 2);
-    ship.strike_hull(17., 12.);
+    // A hit on the engine alone, so the machinery space stays tight.
+    ship.strike_fitting(engine, 12.);
     assert!(tend(&mut ship, 300).is_empty());
     assert_eq!(ship.state(engine), State::Out);
     assert_eq!(ship.propulsion(), Ship::RESERVE_SPEED);
@@ -541,7 +657,7 @@ fn a_knocked_out_engine_waits_for_the_repair_party() {
 
 #[test]
 fn the_repair_party_refloats_a_wrecked_module_and_its_fittings_return() {
-    let mut ship = Ship::new(Design::breakwater());
+    let mut ship = Ship::new(stock_crew());
     let gun = berth(1, 0);
     ship.strike_hull(7.5, 18.);
     assert_eq!(ship.state(gun), State::Out);
@@ -553,8 +669,13 @@ fn the_repair_party_refloats_a_wrecked_module_and_its_fittings_return() {
     assert_eq!(ship.party(), None);
     assert_eq!(ship.triage(), Some(Task::Module(1)));
     assert!(ship.assign(Some(Task::Module(1))));
-    assert!(tend(&mut ship, 20).is_empty());
-    assert_eq!(tend(&mut ship, 2), [Mend::Refloated(1)]);
+    // The party patches the hole until it leaks slower than her pumps clear it, and
+    // she is pumped down to half full within a quarter of a minute or so.
+    let refloated = (1..=30).find(|_| tend(&mut ship, 1) == [Mend::Refloated(1)]);
+    assert!(
+        refloated.is_some_and(|s| (10..=25).contains(&s)),
+        "{refloated:?}"
+    );
     assert_eq!(ship.state(gun), State::Working);
     tend(&mut ship, 60);
     let hold = &ship.compartments()[1];
@@ -594,7 +715,7 @@ fn the_party_keeps_her_afloat_then_moving_then_fighting() {
 
 #[test]
 fn reserve_power_lasts_until_either_engine_is_back_in_service() {
-    let mut ship = Ship::new(Design::breakwater());
+    let mut ship = Ship::new(stock_crew());
     ship.insert_module(4, Module::new(Frame::Straight, [Engine]))
         .unwrap();
     let (first, second) = (berth(3, 2), berth(4, 0));

@@ -1,9 +1,14 @@
 //! Mending a ship: the crew's steady repairs, the repair party, stores and the dock.
 //!
 //! Damage lingers. The crew restores each module only up to its ceiling, which every
-//! hit lowers, and cannot restart a component that was knocked out or pump out a
-//! wrecked module. Those wait for the repair party. Stores and the dock raise ceilings.
-//! Side plating mends at the same pace as the module beneath it, and the dock replates.
+//! hit lowers, and cannot restart a component that was knocked out or mend a wrecked
+//! module. Those wait for the repair party. Stores and the dock raise ceilings. Side
+//! plating mends at the same pace as the module beneath it, and the dock replates.
+//!
+//! A battered module leaks, the more the more it is battered, and the pumps clear
+//! water from every module at a steady rate, more where the party is sent. A torpedo's
+//! hole lets the sea pour in faster than that for a few seconds, until it is shored. A
+//! module that fills floods, and comes back into service once pumped down to half full.
 //!
 //! Ships running from a battery draw on its charge while the party works.
 use crate::design::{Berth, Component};
@@ -15,8 +20,18 @@ const AUTO: f32 = 0.002;
 const PARTY_HULL: f32 = 0.012;
 /// What the repair party adds on the component it is sent to.
 const PARTY_GEAR: f32 = 0.03;
-/// A wrecked module is afloat again at this share of its structure.
+/// The dock pumps out a wrecked module it brings back to this share of its structure.
 const REFLOAT: f32 = 0.25;
+/// Share of a module the crew's pumps clear each second, at the stock rate.
+pub const PUMP: f32 = 0.05;
+/// What the repair party's pumps add on the module it is sent to.
+pub const PARTY_PUMP: f32 = 0.1;
+/// A flooded module is back in service once pumped down to this share of water.
+pub const DRAINED: f32 = 0.5;
+/// The party goes to a module filling this far before it floods, and to one this full
+/// whether it is still filling or not.
+const FILLING: f32 = 0.25;
+const BAILING: f32 = 0.5;
 /// A knocked-out component is back in service at this share of its strength.
 const RESTORE: f32 = 0.3;
 
@@ -34,14 +49,22 @@ pub enum Mend {
     Refloated(usize),
 }
 
-/// A wrecked module with enough structure back is afloat. A badly scarred one
+/// A wrecked module is back in service once pumped down to half full, or on a ship
+/// that does not leak, once patched to a quarter of its structure. A badly scarred one
 /// refloats at its ceiling, which is all it can ever regain at sea.
-fn refloat(hold: &mut Compartment) -> bool {
+fn refloat(hold: &mut Compartment, leaks: bool) -> bool {
     let afloat = hold.wrecked
-        && hold.ceiling > 0.
-        && hold.structure >= (REFLOAT * hold.max).min(hold.ceiling);
+        && if leaks {
+            hold.structure > 0. && hold.water <= DRAINED
+        } else {
+            hold.ceiling > 0. && hold.structure >= (REFLOAT * hold.max).min(hold.ceiling)
+        };
     if afloat {
         hold.wrecked = false;
+        // A ship that does not leak is dry the moment she is afloat again.
+        if !leaks {
+            hold.water = 0.;
+        }
     }
     afloat
 }
@@ -60,7 +83,7 @@ impl Ship {
             Task::Module(module) => self
                 .holds
                 .get(module)
-                .is_some_and(|hold| hold.structure < hold.ceiling),
+                .is_some_and(|hold| hold.structure < hold.ceiling || hold.water > 0.),
             Task::Fitting(berth) => self.holds.get(berth.module).is_some_and(|hold| {
                 !hold.wrecked
                     && hold
@@ -97,6 +120,18 @@ impl Ship {
                 .filter(move |i| self.holds[*i].wrecked && vitals.contains(i) == inside)
                 .map(Task::Module)
         };
+        // A module filling faster than the crew can pump it is the next to go, and so is
+        // one still deep in the water a torpedo let in.
+        let filling = (0..self.holds.len())
+            .filter(|&i| {
+                let hold = &self.holds[i];
+                let leaking = hold.inflow() > PUMP * self.design().pumps() * self.design().repair;
+                !hold.wrecked
+                    && (hold.breached()
+                        || hold.water >= FILLING && (hold.water >= BAILING || leaking))
+            })
+            .max_by(|a, b| self.holds[*a].water.total_cmp(&self.holds[*b].water))
+            .map(Task::Module);
         let knocked = |engines: bool| {
             berths
                 .iter()
@@ -120,6 +155,7 @@ impl Ship {
             .map(Task::Module);
         flooded(true)
             .chain(knocked(true))
+            .chain(filling)
             .chain(knocked(false))
             .chain(flooded(false))
             .chain(weakest_fitting)
@@ -140,19 +176,30 @@ impl Ship {
             return mends;
         }
         let party = self.party;
+        let leaks = self.design().leaks;
+        let pumps = self.design().pumps() * self.design().repair;
+        let mut filled = false;
         for (module, hold) in self.holds.iter_mut().enumerate() {
             let crew = if hold.wrecked { 0. } else { AUTO };
-            let sent = if party == Some(Task::Module(module)) {
-                PARTY_HULL
-            } else {
-                0.
-            };
+            let here = party == Some(Task::Module(module));
+            let sent = if here { PARTY_HULL } else { 0. };
             hold.structure = (hold.structure + (crew + sent) * pace * hold.max).min(hold.ceiling);
             hold.mend_plates((crew + sent) * pace);
-            if refloat(hold) {
+            // The sea comes in through her damage and the pumps send it back out.
+            if leaks {
+                let pumping = (PUMP + if here { PARTY_PUMP } else { 0. }) * pumps;
+                let poured = hold.pour(dt);
+                hold.water = (hold.water + poured + (hold.inflow() - pumping) * dt).clamp(0., 1.);
+                if !hold.wrecked && hold.water >= 1. {
+                    hold.wrecked = true;
+                    filled = true;
+                }
+            }
+            if refloat(hold, leaks) {
                 mends.push(Mend::Refloated(module));
             }
             if hold.wrecked {
+                hold.inrush = 0.;
                 continue;
             }
             for (index, gear) in hold.gear.iter_mut().enumerate() {
@@ -170,6 +217,9 @@ impl Ship {
                 }
             }
         }
+        if filled {
+            self.settle(&mut Vec::new());
+        }
         if party.is_some_and(|task| !self.workable(task)) {
             self.party = None;
         }
@@ -180,6 +230,7 @@ impl Ship {
     /// own repairs this is new material, so it lifts the ceiling with the structure.
     pub fn patch(&mut self, points: f32) -> Vec<Mend> {
         let mut mends = Vec::new();
+        let leaks = self.design().leaks;
         let mut left = points;
         while self.afloat() && left > 1e-4 {
             let Some((module, hold)) = self
@@ -195,7 +246,7 @@ impl Ship {
             hold.structure += added;
             hold.ceiling = hold.ceiling.max(hold.structure);
             left -= added;
-            if refloat(hold) {
+            if refloat(hold, leaks) {
                 mends.push(Mend::Refloated(module));
             }
         }
@@ -208,10 +259,19 @@ impl Ship {
     /// the dock could not reach.
     pub fn dock(&mut self, points: f32) -> Vec<Mend> {
         let mut mends = self.patch(points);
+        let leaks = self.design().leaks;
         if !self.afloat() {
             return mends;
         }
         for (module, hold) in self.holds.iter_mut().enumerate() {
+            // In the dock she is pumped dry wherever the yard has made her good enough.
+            hold.inrush = 0.;
+            if hold.structure >= (REFLOAT * hold.max).min(hold.ceiling) && hold.ceiling > 0. {
+                hold.water = 0.;
+                if refloat(hold, leaks) {
+                    mends.push(Mend::Refloated(module));
+                }
+            }
             if hold.wrecked {
                 continue;
             }

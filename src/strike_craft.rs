@@ -1,6 +1,7 @@
 //! Breakwater's catapult, floatplane and missile launchers: the gear on deck, the plane
 //! in the air and the missiles with their smoke.
 use crate::battle_view::spotter_model;
+use crate::camera::{self, FollowCamera};
 use crate::scene::Facets;
 use crate::state::{Campaign, Encounter, Mode, Screen};
 use bevy::light::NotShadowCaster;
@@ -9,11 +10,12 @@ use shipvivor_campaign::DockModule;
 use std::collections::HashMap;
 
 /// The floatplane is drawn at this share of the harbours' spotter, to suit the ship.
-const PLANE_SCALE: f32 = 0.34;
+const PLANE_SCALE: f32 = 0.17;
 /// In the air it is drawn a little larger, so it can be followed at a distance.
-const AIRBORNE_SCALE: f32 = 0.5;
-/// Height of the catapult's trolley above the waterline, where the plane's floats rest.
-const TROLLEY: f32 = 2.36;
+const AIRBORNE_SCALE: f32 = 0.25;
+/// Height of the top of the catapult's trolley, where the plane's keel rests, its floats
+/// hanging clear either side of the girder.
+const TROLLEY: f32 = 2.32;
 /// Seconds a puff of missile smoke lasts, and between puffs.
 const PUFF_LIFE: f32 = 1.1;
 const PUFF_EVERY: f32 = 0.035;
@@ -124,7 +126,7 @@ pub(crate) fn equip(
                 gear,
                 &parts.cube,
                 &parts.iron,
-                at(0., 2.24, 0.25, 0.62, 0.16, 0.95),
+                at(0., TROLLEY - 0.08, 0.25, 0.62, 0.16, 0.95),
             );
             // The crane that hoists the plane back aboard, on the starboard quarter.
             part(
@@ -156,7 +158,8 @@ pub(crate) fn equip(
                 gear,
                 &parts.plane,
                 &parts.airframe,
-                Transform::from_xyz(0., TROLLEY + 0.2, 0.15).with_scale(Vec3::splat(PLANE_SCALE)),
+                Transform::from_xyz(0., TROLLEY + spotter_model::KEEL * PLANE_SCALE, 0.15)
+                    .with_scale(Vec3::splat(PLANE_SCALE)),
             );
             commands.entity(plane).insert(CatapultPlane);
             commands.spawn((
@@ -367,16 +370,26 @@ pub fn fly(
     battle: Res<Encounter>,
     mut plane: Single<(&mut Transform, &mut Visibility), With<Airborne>>,
     mut spinners: Query<&mut Transform, (With<Spinner>, Without<Airborne>)>,
+    lens: Option<
+        Single<
+            (&Transform, &Projection),
+            (With<FollowCamera>, Without<Airborne>, Without<Spinner>),
+        >,
+    >,
 ) {
     let sea = at_sea(&run);
     let (pose, shown) = &mut *plane;
     match battle.floatplane().filter(|p| sea && !p.aboard()) {
         Some(flying) => {
-            **pose = Transform::from_translation(flying.position_3d())
+            let at = flying.position_3d();
+            let clear = lens.as_ref().map_or(1., |lens| {
+                camera::lens_clearance(lens.0, lens.1, at, spotter_model::REACH * AIRBORNE_SCALE)
+            });
+            **pose = Transform::from_translation(at)
                 .with_rotation(
                     Quat::from_rotation_y(-flying.heading) * Quat::from_rotation_z(flying.bank),
                 )
-                .with_scale(Vec3::splat(AIRBORNE_SCALE));
+                .with_scale(Vec3::splat(AIRBORNE_SCALE * clear));
             shown.set_if_neq(Visibility::Inherited);
         }
         None => {

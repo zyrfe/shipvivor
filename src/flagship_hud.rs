@@ -1,12 +1,13 @@
-//! The flagship's place on the screen: a herald when she puts to sea, and a tag that
-//! rides over her, or on the edge of the screen towards her, for as long as she floats.
+//! The boss's place on the screen: a herald when smoke goes up over her yard, another
+//! when she puts to sea, and a tag that rides over her, or on the edge of the screen
+//! towards her, for as long as she floats.
 use crate::{
     camera::ShipView,
     mission_hud::{letter, ship_class},
     state::{Encounter, PlayerHelm},
 };
 use bevy::{camera::primitives::MeshAabb, prelude::*};
-use shipvivor_encounter::{EnemyClass, Raider, Sortie};
+use shipvivor_encounter::{EnemyClass, Raider, STEAM_WARNING, Sortie};
 
 /// Seconds the herald stays up after the flagship puts to sea.
 pub const HERALD_SECONDS: f32 = 7.;
@@ -152,22 +153,33 @@ pub fn spawn(cmd: &mut Commands, root: Entity) {
     ));
 }
 
-/// The flagship afloat in the sector, if there is one.
+/// The boss afloat in the sector, if there is one.
 fn flagship(battle: &Encounter) -> Option<&Raider> {
-    battle
-        .raiders()
-        .iter()
-        .find(|ship| ship.class.is_flagship())
+    battle.boss_ship()
 }
 
-/// Seconds since the flagship put to sea, while her herald is still up.
-fn herald_age(battle: &Encounter) -> Option<(usize, f32)> {
+/// What the herald announces.
+#[derive(Clone, Copy)]
+enum News {
+    /// Smoke over the yards: she will sail in this many seconds.
+    Steam(f32),
+    /// She has put to sea from this port.
+    Sailed(usize),
+}
+
+/// What the herald says and how long it has been up, while it is.
+fn herald_age(battle: &Encounter) -> Option<(News, f32)> {
     match battle.flagship() {
         Some(Sortie::Sailed { port, at }) => {
             let age = battle.at_sea() - at;
-            (age < HERALD_SECONDS).then_some((port, age))
+            (age < HERALD_SECONDS).then_some((News::Sailed(port), age))
         }
-        _ => None,
+        Some(Sortie::Due(_)) => {
+            let due = battle.raising_steam()?;
+            let age = STEAM_WARNING - due;
+            (age < HERALD_SECONDS).then_some((News::Steam(due), age))
+        }
+        None => None,
     }
 }
 
@@ -216,24 +228,38 @@ pub fn update(
             Display::None
         };
     }
-    if let Some((port, age)) = heralding {
+    if let Some((news, age)) = heralding {
         for (mut border, mut transform) in &mut panel {
             let lit = age < FLASH.0 && ((age * FLASH.1 * 2.).floor() as u32).is_multiple_of(2);
             border.set_if_neq(BorderColor::all(if lit { coral() } else { brass() }));
             transform.scale = Vec2::splat(1. + 0.35 * (1. - age / POP).clamp(0., 1.));
         }
-        let name =
-            ship_class(ship.map_or(EnemyClass::Parliament, |ship| ship.class)).to_uppercase();
+        let class = ship
+            .map(|ship| ship.class)
+            .or(battle.boss())
+            .unwrap_or(EnemyClass::Parliament);
+        let name = ship_class(class).to_uppercase();
         let whereabouts = ship.map_or(String::new(), |ship| {
             let d = ship.body.pos - helm.position;
             let range = (d.length() / 10.).round() as u32 * 10;
             format!("{} {range} m", cardinal(d))
         });
         for (line, mut text) in &mut lines {
-            let words = match line.0 {
-                0 => "ENEMY FLAGSHIP UNDER WAY".to_string(),
-                1 => name.clone(),
-                _ => format!("puts to sea from Base {}    {whereabouts}", letter(port)),
+            let words = match (line.0, news) {
+                (0, News::Steam(_)) => "SMOKE OVER THE ENEMY YARDS".to_string(),
+                (0, News::Sailed(_)) => "ENEMY FLAGSHIP UNDER WAY".to_string(),
+                (1, _) => name.clone(),
+                (_, News::Steam(due)) => {
+                    let due = due.ceil() as u32;
+                    format!(
+                        "raising steam    puts to sea in {}:{:02}",
+                        due / 60,
+                        due % 60
+                    )
+                }
+                (_, News::Sailed(port)) => {
+                    format!("puts to sea from Base {}    {whereabouts}", letter(port))
+                }
             };
             if text.0 != words {
                 text.0 = words;
@@ -294,8 +320,12 @@ pub fn update(
         format!("no helm {:.0} s", ship.helm_lost().ceil())
     } else if ship.protected() {
         format!("{}/{} turrets", ship.live_guns(), ship.guns().len())
-    } else {
+    } else if ship.class.is_flagship() {
         "hull exposed".to_string()
+    } else {
+        // A boss with no turret screen is sunk as any ship is, by flooding her.
+        let (flooded, fatal) = ship.vessel().flooding();
+        format!("{flooded}/{fatal} flooded")
     };
     let words = format!(
         "{}{edge}\n{range} m   {state}",

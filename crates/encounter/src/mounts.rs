@@ -4,6 +4,7 @@ use super::{
     projectile::{FlightPath, Trajectory},
 };
 use glam::{FloatExt, Vec2, Vec3, Vec3Swizzles};
+use shipvivor_artillery::ArmorGrade;
 use shipvivor_compass::direction;
 use shipvivor_shipyard::GunStation;
 use std::f32::consts::{PI, TAU};
@@ -55,6 +56,47 @@ impl Station {
             _ => "X",
         }
     }
+    /// The turret's number, counting from 1 at the bow, port before starboard abreast.
+    pub fn number(self, positions: &[GunStation]) -> usize {
+        let me = self.index();
+        let ahead = |j: usize| {
+            let (a, b) = (positions[j], positions[me]);
+            (b.fore.total_cmp(&a.fore))
+                .then(a.abeam.total_cmp(&b.abeam))
+                .then(j.cmp(&me))
+                .is_lt()
+        };
+        1 + (0..positions.len()).filter(|&j| ahead(j)).count()
+    }
+}
+
+/// Who lays and fires a main turret.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Control {
+    /// The sight lays it and only the trigger fires it.
+    #[default]
+    Manual,
+    /// The captain's while the scope is up and it bears on the sight, the crew's otherwise.
+    Scope,
+    /// The crew lays it on a target of its own and fires as it loads.
+    Auto,
+}
+impl Control {
+    /// The order Z steps through.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Manual => Self::Scope,
+            Self::Scope => Self::Auto,
+            Self::Auto => Self::Manual,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "MANUAL",
+            Self::Scope => "SCOPE",
+            Self::Auto => "AUTO",
+        }
+    }
 }
 /// Where a mount stands. `Ready` means it bears on the aim with at least one barrel loaded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,6 +138,17 @@ pub struct MainMount {
     next_tube: usize,
     /// The flight from this mount to the aim, once it bears.
     solution: Option<FlightPath>,
+    pub(super) control: Control,
+    /// The crew has the turret this step: it is on automatic, or on scope while the
+    /// captain's scope is down or it cannot bear on the sight.
+    pub(super) crewed: bool,
+    /// The crew has a target of its own and fires on it as the barrels load.
+    pub(super) engaged: bool,
+    /// Seconds since this turret last fired, which spaces the crew's rounds.
+    pub(super) since_fired: f32,
+    /// The round this turret's bore fires, with the ship's caps and charges, as it was
+    /// last laid.
+    shell: MainShell,
 }
 impl MainMount {
     pub(super) fn new(position: GunStation) -> Self {
@@ -114,15 +167,39 @@ impl MainMount {
             tubes: [Tube::default(); TurretLayout::Quad.count()],
             next_tube: 0,
             solution: None,
+            control: Control::Manual,
+            crewed: false,
+            engaged: false,
+            since_fired: 0.,
+            shell: MainShell::STOCK,
         }
+    }
+    pub fn control(&self) -> Control {
+        self.control
+    }
+    /// The crew, not the trigger, has the turret this step.
+    pub fn crewed(&self) -> bool {
+        self.crewed
+    }
+    /// The crew has the turret and a target of its own to fire on.
+    pub fn engaged(&self) -> bool {
+        self.crewed && self.engaged
+    }
+    /// Whether `target` lies inside the turret's arc, clear of its stops and masks.
+    pub fn bears_on(&self, player: Vec2, heading: f32, target: Vec3) -> bool {
+        let from = self.pivot(player, heading).xz();
+        target.xz().distance_squared(from) > 1e-4
+            && self
+                .position
+                .bears(shipvivor_compass::heading(target.xz() - from) - heading)
     }
     pub fn deck_bearing(&self) -> f32 {
         self.position.home + self.train
     }
-    fn pivot(&self, player: Vec2, heading: f32) -> Vec3 {
+    pub(super) fn pivot(&self, player: Vec2, heading: f32) -> Vec3 {
         let forward = direction(heading);
         (player + forward * self.position.fore + forward.perp() * self.position.abeam)
-            .extend(1.72 + 0.63 * self.scale)
+            .extend(1.72 + self.position.lift() + 0.63 * self.scale)
             .xzy()
     }
     pub fn layout(&self) -> TurretLayout {
@@ -141,6 +218,23 @@ impl MainMount {
             bore: self.fitted_bore.unwrap_or(round.bore),
             ..round
         }
+    }
+    /// Whether the round in the barrel this turret fires next, sent along the flight it
+    /// is laid on, would open sound plate of `grade`. A turret not laid can't say, and
+    /// counts as able.
+    pub fn hurts(&self, grade: ArmorGrade) -> bool {
+        let (Some(path), Some(tube)) = (self.solution, self.next_tube()) else {
+            return true;
+        };
+        let round = MainShell {
+            ammo: self.tubes[tube].ammo,
+            ..self.shell
+        };
+        round.at_contact(path.duration).opens(grade)
+    }
+    /// Inches of bore this turret fires, as it was last laid.
+    pub fn calibre(&self) -> f32 {
+        self.shell.calibre_inches()
     }
     /// Radians per second this gunhouse trains at full power. A heavier bore trains
     /// more slowly, and training gear wins it back.
@@ -211,6 +305,7 @@ impl MainMount {
         orders: &Orders,
         target: Option<Vec3>,
     ) {
+        self.since_fired += dt;
         if !self.in_service {
             self.solution = None;
             self.status = MountStatus::Disabled;
@@ -225,6 +320,7 @@ impl MainMount {
         }
         self.solution = None;
         let shell = self.round(orders.shell);
+        self.shell = shell;
         self.scale = shell.mount_scale();
         let pivot = self.pivot(orders.player, orders.heading);
         let Some((target, path)) =
@@ -292,6 +388,7 @@ impl MainMount {
         };
         self.next_tube = (tube + 1) % self.layout.count();
         self.status = self.settle();
+        self.since_fired = 0.;
         Some(path)
     }
 }
@@ -321,39 +418,95 @@ impl DeckOffsets {
     }
     pub fn wing_position(self, index: usize) -> (f32, f32) {
         let (x, fore) = WingGun::station(index);
-        let shift = if index / 2 == 2 {
-            self.machinery_z
-        } else {
-            self.bridge_z
+        let shift = match WING_STATIONS[(index / 2).min(WING_STATIONS.len() - 1)].mounting {
+            Mounting::Bridge => self.bridge_z,
+            Mounting::Machinery => self.machinery_z,
+            Mounting::Hull => 0.,
         };
         (x * self.beam_scale, fore - shift)
     }
 }
 
-/// Metres out from the centreline to each wing gun.
-const WING_X: f32 = 2.18;
-/// Wing gun stations along each beam in the order they are fitted, in metres forward of
-/// amidships: amidships, then beside the bridge, then aft of the launches.
-const WING_STATIONS: [f32; Secondaries::MOST_PER_SIDE] = [0., 3.8, -6.9];
+/// What a wing gun's deck goes with when the yard moves a deckhouse.
+#[derive(Clone, Copy)]
+enum Mounting {
+    Bridge,
+    Machinery,
+    /// The forecastle, which never moves.
+    Hull,
+}
 
-/// A shielded close-range gun on the beam, worked by the crew.
+/// Where a pair of wing guns stands: metres out from the centreline and forward of
+/// amidships, the bearing from the bow of the middle of the starboard gun's arc, and how
+/// far either way of that the guns train.
+struct WingStation {
+    x: f32,
+    fore: f32,
+    home: f32,
+    half_arc: f32,
+    mounting: Mounting,
+}
+/// A beam gun covers its own side, short of four degrees from the bow and the stern.
+const BEAM: (f32, f32) = (90_f32.to_radians(), 86_f32.to_radians());
+/// A bow gun covers from four degrees across the bow round to its own beam, so the pair
+/// overlap dead ahead.
+const BOW: (f32, f32) = (43_f32.to_radians(), 47_f32.to_radians());
+/// Wing gun stations in the order they are fitted, a pair to each. She is built with
+/// guns amidships and on the forecastle, between the forward turret and the capstans.
+/// More go beside the bridge, then aft of the launches.
+const WING_STATIONS: [WingStation; Secondaries::MOST_PER_SIDE] = [
+    WingStation {
+        x: 2.18,
+        fore: 0.,
+        home: BEAM.0,
+        half_arc: BEAM.1,
+        mounting: Mounting::Bridge,
+    },
+    WingStation {
+        x: 1.35,
+        fore: 10.6,
+        home: BOW.0,
+        half_arc: BOW.1,
+        mounting: Mounting::Hull,
+    },
+    WingStation {
+        x: 2.18,
+        fore: 3.8,
+        home: BEAM.0,
+        half_arc: BEAM.1,
+        mounting: Mounting::Bridge,
+    },
+    WingStation {
+        x: 2.18,
+        fore: -6.9,
+        home: BEAM.0,
+        half_arc: BEAM.1,
+        mounting: Mounting::Machinery,
+    },
+];
+
+/// A shielded close-range gun on the bow or the beam, worked by the crew.
 pub struct WingGun {
     pub(super) reload: f32,
-    side: f32,
     abeam: f32,
     fore: f32,
+    /// Bearing from the bow of the middle of its arc, and how far either way it trains.
+    home: f32,
+    half_arc: f32,
+    /// Bearing from `home`.
     train: f32,
 }
 impl WingGun {
-    /// The guns for `per_side` stations a beam, port before starboard at each.
+    /// The guns for `per_side` stations a side, port before starboard at each.
     pub(super) fn battery(per_side: usize) -> Vec<Self> {
         (0..per_side.min(Secondaries::MOST_PER_SIDE) * 2)
             .map(|index| {
                 let (x, fore) = Self::station(index);
                 Self {
-                    side: x.signum(),
                     abeam: x,
                     fore,
+                    home: Self::home(index),
+                    half_arc: WING_STATIONS[index / 2].half_arc,
                     train: 0.,
                     reload: 0.,
                 }
@@ -363,7 +516,14 @@ impl WingGun {
     /// Where the gun at `index` in fitting order stands: metres to starboard and forward.
     pub fn station(index: usize) -> (f32, f32) {
         let side = if index.is_multiple_of(2) { -1. } else { 1. };
-        (side * WING_X, WING_STATIONS[index / 2])
+        let station = &WING_STATIONS[index / 2];
+        (side * station.x, station.fore)
+    }
+    /// The bearing from the bow of the middle of the arc of the gun at `index`, where it
+    /// lies trained fore and aft.
+    pub fn home(index: usize) -> f32 {
+        let side = if index.is_multiple_of(2) { -1. } else { 1. };
+        side * WING_STATIONS[index / 2].home
     }
     pub(super) fn set_position(&mut self, index: usize, deck: DeckOffsets) {
         (self.abeam, self.fore) = deck.wing_position(index);
@@ -376,7 +536,7 @@ impl WingGun {
         self.fore
     }
     pub fn deck_bearing(&self) -> f32 {
-        self.side * std::f32::consts::FRAC_PI_2 + self.train
+        self.home + self.train
     }
     pub(super) fn pivot(&self, player: Vec2, heading: f32) -> Vec3 {
         (player + direction(heading).perp() * self.deck_x() + direction(heading) * self.fore)
@@ -384,10 +544,13 @@ impl WingGun {
             .xzy()
     }
 
-    pub(super) fn covers(&self, player: Vec2, heading: f32, target: Vec2) -> bool {
-        let beam = direction(heading).perp() * self.side;
+    /// The bearing of `target` from the middle of the gun's arc.
+    fn off_home(&self, player: Vec2, heading: f32, target: Vec2) -> f32 {
         let delta = target - self.pivot(player, heading).xz();
-        delta.dot(beam) >= delta.length() * 4_f32.to_radians().sin()
+        signed(shipvivor_compass::heading(delta) - heading - self.home)
+    }
+    pub(super) fn covers(&self, player: Vec2, heading: f32, target: Vec2) -> bool {
+        self.off_home(player, heading, target).abs() <= self.half_arc
     }
     pub(super) fn track(
         &mut self,
@@ -397,12 +560,8 @@ impl WingGun {
         target: Vec2,
     ) -> Option<Vec3> {
         let pivot = self.pivot(player, heading);
-        let wanted = signed(
-            shipvivor_compass::heading(target - pivot.xz())
-                - heading
-                - self.side * std::f32::consts::FRAC_PI_2,
-        );
-        let limit = 86_f32.to_radians();
+        let wanted = self.off_home(player, heading, target);
+        let limit = self.half_arc;
         self.train = self
             .train
             .move_towards(wanted.clamp(-limit, limit), 68_f32.to_radians() * dt);
@@ -473,6 +632,128 @@ mod tests {
         assert_eq!(mount.next_tube(), Some(0));
         assert!(!mount.loaded(1) && (mount.load_fraction(1) - 5.5 / 6.4).abs() < 1e-4);
     }
+    #[test]
+    fn turrets_number_from_the_bow_with_port_before_starboard() {
+        let stock = Design::breakwater().gun_stations();
+        assert_eq!(Station::Bow.number(&stock), 1);
+        assert_eq!(Station::Stern.number(&stock), 2);
+        // A wing pair abreast amidships comes between them, port first, whatever the
+        // order the yard lists them in.
+        let wing = |abeam: f32| GunStation {
+            fore: 0.,
+            abeam,
+            ..stock[0]
+        };
+        let ship = [stock[0], stock[1], wing(2.5), wing(-2.5)];
+        let numbers: Vec<_> = Station::SLOTS.iter().map(|s| s.number(&ship)).collect();
+        assert_eq!(numbers, [1, 4, 3, 2]);
+    }
+
+    /// Out at sea, clear of the route's harbours and their guns.
+    const OFFING: Vec2 = Vec2::new(2000., 2000.);
+    fn off(x: f32, z: f32) -> Vec3 {
+        Vec3::new(OFFING.x + x, 1.7, OFFING.y + z)
+    }
+    /// A battle with nothing at sea and no secondaries to steal the main battery's shots,
+    /// Breakwater in the offing heading north.
+    fn quiet() -> (crate::Battle, Orders) {
+        let mut b = crate::Battle::for_route(
+            14.,
+            [
+                (0., -152.),
+                (168., -424.),
+                (496., -300.),
+                (416., 76.),
+                (72., 164.),
+            ]
+            .map(Vec2::from),
+        );
+        b.raiders.clear();
+        b.wing_guns.clear();
+        b.aa_mounts.clear();
+        b.next_wave = 1000.;
+        let orders = Orders {
+            player: OFFING,
+            heading: 0.,
+            speed: 0.,
+            hull: crate::Hull::CRUISER,
+            aim: Aim::Hold,
+            shell: crate::MainShell::STOCK,
+            reload: 3.2,
+        };
+        (b, orders)
+    }
+    fn fired(b: &crate::Battle) -> Vec<Vec2> {
+        (b.effects.iter())
+            .filter(|fx| fx.kind == crate::EffectKind::Muzzle(crate::Battery::Main) && fx.age == 0.)
+            .map(|fx| fx.body.pos)
+            .collect()
+    }
+
+    #[test]
+    fn an_automatic_turret_fights_a_ship_in_its_arc_and_the_trigger_keeps_the_rest() {
+        let (mut b, mut orders) = quiet();
+        b.spawn(crate::EnemyClass::Cruiser, off(150., -40.).xz(), OFFING);
+        // The sight looks out to port, where the manual stern turret follows it.
+        orders.aim = Aim::Track(off(-175., 0.));
+        b.direct(&[Control::Auto, Control::Manual], false);
+        let mut bow_shots = 0;
+        for _ in 0..480 {
+            b.raiders[0].has_contact = true;
+            b.step(1. / 60., &orders);
+            assert_ne!(b.next_barrel().map(|(s, _)| s), Some(Station::Bow));
+            let shots = fired(&b);
+            assert!(
+                shots.iter().all(|p| p.y < OFFING.y),
+                "only the bow fires: {shots:?}"
+            );
+            bow_shots += shots.len();
+        }
+        let bow = b.main_mount(Station::Bow);
+        assert!(bow.crewed() && bow.engaged());
+        assert!(bow_shots >= 2, "{bow_shots}");
+        assert!(bow.deck_bearing() > 0.5, "trained to starboard");
+        let stern = b.main_mount(Station::Stern);
+        assert!(!stern.crewed());
+        assert_eq!(stern.status(), MountStatus::Ready);
+        assert!(
+            stern.aim_mark(OFFING, 0.).x < OFFING.x - 100.,
+            "laid on the sight to port"
+        );
+    }
+
+    #[test]
+    fn a_turret_on_scope_is_the_triggers_through_the_scope_while_it_bears() {
+        let (mut b, mut orders) = quiet();
+        let beam = off(175., 0.);
+        let astern = off(0., 175.);
+        let scope = [Control::Scope, Control::Scope];
+        let crewed = |b: &crate::Battle| Station::ALL.map(|s| b.main_mount(s).crewed());
+
+        orders.aim = Aim::Track(beam);
+        b.direct(&scope, true);
+        b.step(1. / 60., &orders);
+        assert_eq!(crewed(&b), [false, false], "both bear on the beam");
+
+        // The bridge stands between the forward turret and the water astern.
+        assert!(!b.main_mount(Station::Bow).bears_on(OFFING, 0., astern));
+        orders.aim = Aim::Track(astern);
+        b.step(1. / 60., &orders);
+        assert_eq!(crewed(&b), [true, false]);
+
+        // With the scope down the crew has them both, and with nothing to fight they
+        // stay on the sight without firing.
+        b.direct(&scope, false);
+        for _ in 0..300 {
+            b.step(1. / 60., &orders);
+            assert!(fired(&b).is_empty());
+        }
+        assert_eq!(crewed(&b), [true, true]);
+        assert!(!b.main_mount(Station::Stern).engaged());
+        assert_eq!(b.main_mount(Station::Stern).status(), MountStatus::Ready);
+        assert_eq!(b.next_barrel(), None, "the trigger has no turret");
+    }
+
     #[test]
     fn moving_a_deckhouse_opens_a_bearing_and_the_gun_still_answers_for_its_own_berth() {
         use shipvivor_shipyard::{Frame, Module, Ship};

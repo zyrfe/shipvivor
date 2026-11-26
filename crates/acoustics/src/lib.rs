@@ -8,10 +8,12 @@
 //! stands in the open, and back from the whole sea as a long dark tail. Each ear hears
 //! it at its own moment.
 //!
-//! Four things are made as they play. The ship's own engine, wash and wind follow the
+//! Five things are made as they play. The ship's own engine, wash and wind follow the
 //! speed, the engine order and the state of her engines last given. A shell in flight is heard from where it was when
 //! the sound left it, which for a fast shell is a crack and then a tearing fall in pitch.
 //! A base's siren is a rotor that winds up and runs down for as long as its alarm is up.
+//! A big ship's horn sounds the prolonged blasts of a ship putting out, deeper the
+//! longer she is.
 //! An aeroplane's engine and propeller are heard sharp as it closes and flat as it goes.
 //!
 //! The places the ship passes make sounds of their own, which [`Ambience`] decides the
@@ -25,6 +27,7 @@ mod engine;
 mod filter;
 mod flight;
 mod foundry;
+mod horn;
 mod hull;
 mod line;
 mod mixer;
@@ -38,7 +41,7 @@ mod voice;
 pub use ambience::{Ambience, Haunt, Place};
 pub use foundry::Bank;
 use glam::Vec3;
-pub use mixer::{Cues, Feed, Mixer, console};
+pub use mixer::{AIRCRAFT, Cues, Feed, Mixer, console};
 
 pub const SAMPLE_RATE: u32 = 48_000;
 const RATE: f32 = SAMPLE_RATE as f32;
@@ -93,9 +96,43 @@ pub enum Sound {
     RollChart,
     /// The ship's klaxon, which is sounded when she is close to sinking.
     Klaxon,
+    /// A small brass handbell struck once, for a yard point won from cargo sunk. It is
+    /// the game speaking, as the upgrade is.
+    Chime,
+    /// A heavy shore battery's long gun: a slow, deep push and a long roll that carries.
+    HeavyGun,
+    /// A heavy shell falling in the sea: a tall column that goes up deep and comes down
+    /// for longer.
+    Column,
+    /// A torpedo boat's tube firing: the cough of its impulse charge and the hiss of the
+    /// air behind it, then the slap of the torpedo striking the water.
+    TorpedoLaunch,
+    /// The bridge's alarm bell, rung when a torpedo's track is seen closing on her. It
+    /// is an electric bell, its clapper hammering a gong a dozen and more times a second.
+    TorpedoAlarm,
+    /// An enemy torpedo bursting against her side under water: a deep, smothered blow
+    /// that shakes her frames, and the column it threw up coming down on her deck.
+    Torpedoed,
+    /// The scope's magnification ring clicking into a detent, close at hand on the bridge.
+    Detent,
+    /// An engine hurt and running on damaged: a clank in the engine room and the grind
+    /// of something loose in the running gear, felt up through the ship.
+    EngineHurt,
+    /// An engine giving out: a part letting go, the last of it coasting round under a
+    /// falling whine, the clunk as the crank comes to rest, and air sighing out of it.
+    EngineStall,
+    /// The repair party knocking a fitting true with a hand hammer.
+    Hammer,
+    /// The repair party's cutting torch, roaring and spitting.
+    Torch,
+    /// The repair party's spanner: a ratchet worked in short strokes.
+    Ratchet,
+    /// One beat of the bridge clock, counting out the leg's last minute. Even takes are
+    /// the tick and odd ones the tock. It is the game speaking, as the upgrade is.
+    Tick,
 }
 impl Sound {
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 40] = [
         Self::MainGun,
         Self::SecondaryGun,
         Self::RaiderGun,
@@ -123,6 +160,19 @@ impl Sound {
         Self::UnrollChart,
         Self::RollChart,
         Self::Klaxon,
+        Self::Chime,
+        Self::HeavyGun,
+        Self::Column,
+        Self::TorpedoLaunch,
+        Self::TorpedoAlarm,
+        Self::Torpedoed,
+        Self::Detent,
+        Self::EngineHurt,
+        Self::EngineStall,
+        Self::Hammer,
+        Self::Torch,
+        Self::Ratchet,
+        Self::Tick,
     ];
 
     /// Level of the detail, body and rumble layers at close range.
@@ -131,7 +181,9 @@ impl Sound {
             Self::MainGun => [0.9, 1., 0.6],
             Self::SecondaryGun => [0.45, 0.36, 0.14],
             Self::RaiderGun => [0.6, 0.54, 0.2],
-            Self::ShoreGun => [0.8, 1., 0.6],
+            // A shore gun's twelve inches and a heavy battery's fifteen are far heavier
+            // than anything she carries, and their reports carry over her own noise.
+            Self::ShoreGun => [0.9, 1.8, 2.],
             Self::Splash => [0.55, 0.9, 0.55],
             Self::Burst => [0.5, 0.8, 0.4],
             Self::Wreck => [0.5, 1., 0.8],
@@ -154,6 +206,20 @@ impl Sound {
             Self::Upgrade => [0.18, 0.5, 0.25],
             Self::UnrollChart | Self::RollChart => [0.28, 0.39, 0.],
             Self::Klaxon => [0.35, 0.6, 0.],
+            Self::Chime => [0.2, 0.42, 0.],
+            Self::HeavyGun => [0.7, 2.4, 3.],
+            Self::Column => [0.5, 1., 0.9],
+            Self::TorpedoLaunch => [0.5, 0.62, 0.3],
+            Self::TorpedoAlarm => [0.3, 0.5, 0.],
+            Self::Torpedoed => [0.55, 1.1, 1.2],
+            Self::Detent => [0.12, 0.18, 0.],
+            Self::EngineHurt => [0.5, 0.75, 0.45],
+            Self::EngineStall => [0.22, 0.42, 0.3],
+            Self::Hammer => [0.33, 0.18, 0.],
+            Self::Torch => [0.16, 0.19, 0.],
+            Self::Ratchet => [0.5, 0.28, 0.],
+            // At full strength, which the clock reaches only in its last seconds.
+            Self::Tick => [0.3, 0.4, 0.],
         }
     }
 
@@ -172,6 +238,11 @@ impl Sound {
                 | Self::UnrollChart
                 | Self::RollChart
                 | Self::Klaxon
+                | Self::Chime
+                | Self::TorpedoAlarm
+                | Self::Detent
+                | Self::EngineHurt
+                | Self::EngineStall
         )
     }
 
@@ -179,14 +250,21 @@ impl Sound {
     fn tuned(self) -> bool {
         matches!(
             self,
-            Self::Trumpet | Self::Fanfare | Self::Telegraph | Self::Upgrade | Self::Klaxon
+            Self::Trumpet
+                | Self::Fanfare
+                | Self::Telegraph
+                | Self::Upgrade
+                | Self::Klaxon
+                | Self::Chime
+                | Self::TorpedoAlarm
+                | Self::Tick
         )
     }
 
     /// The game speaking to the player. It belongs to no moment of the battle, so it
     /// is heard whether the world's time runs or holds, and a hush leaves it be.
     fn notice(self) -> bool {
-        self == Self::Upgrade || self.chart_paper()
+        matches!(self, Self::Upgrade | Self::Chime | Self::Tick) || self.chart_paper()
     }
 
     fn chart_paper(self) -> bool {
@@ -200,6 +278,7 @@ impl Sound {
             Self::MainGun
                 | Self::RaiderGun
                 | Self::ShoreGun
+                | Self::HeavyGun
                 | Self::Wreck
                 | Self::Ruin
                 | Self::Calving
@@ -331,6 +410,15 @@ pub enum Cue {
     /// damaged and still running, which stumble and bang in their exhaust, and those
     /// knocked out, which are silent. It holds until the next is sent.
     Engines { damaged: f32, stopped: f32 },
+    /// A ship's horn, aboard a ship this many metres long, which sets it: the longer
+    /// the ship, the deeper and louder the horn and the longer each blast. With `blow`
+    /// she sounds her signal of prolonged blasts, as a ship putting out does. Without
+    /// it the horn is only carried to where she now is. One horn is heard at a time.
+    Horn {
+        position: Vec3,
+        length: f32,
+        blow: bool,
+    },
     /// The machinery is shut down and only the sea is heard. Any alarm is lowered, and
     /// no aeroplane is heard any longer.
     Moored,
@@ -340,4 +428,12 @@ pub enum Cue {
     /// Drop every sound of the world still in the air. The next ears are taken up
     /// without a glide.
     Hush,
+    /// The game speaking at a strength of its own, from 0 for silence to 1 for the
+    /// sound's usual level, so that a run of them can swell or fade. The serial picks
+    /// its take.
+    Notice {
+        sound: Sound,
+        level: f32,
+        serial: u64,
+    },
 }

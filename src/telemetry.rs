@@ -134,6 +134,10 @@ impl Logbook {
             format!("# Shipvivor run {}", log.code),
             format!("# started: {started}"),
             format!(
+                "# build: {} (the number at the foot of the title screen)",
+                crate::ui::BUILD.unwrap_or("dev")
+            ),
+            format!(
                 "# launched: {} (runs with the same launch were one sitting)",
                 self.launch
             ),
@@ -279,12 +283,16 @@ struct Tally {
     secondary_hits: u32,
     torpedoes: u32,
     torpedo_hits: u32,
+    /// Torpedoes fired at her by torpedo boats, and those that struck her.
+    torpedoes_at_her: u32,
+    torpedoed: u32,
     aa_fired: u32,
     /// Enemy aircraft her AA guns brought down.
     planes: u32,
     /// Rounds fired at her by ships, shore guns and aircraft.
     ship_fire: u32,
     shore_fire: u32,
+    heavy_fire: u32,
     air_fire: u32,
     hits_taken: u32,
     /// Hull points lost, in all and by section.
@@ -369,6 +377,13 @@ impl Tally {
         if self.collisions > 0 {
             parts.push(count(self.collisions, "collision", "collisions"));
         }
+        if self.torpedoes_at_her > 0 || self.torpedoed > 0 {
+            parts.push(format!(
+                "{} fired at her ({} struck)",
+                count(self.torpedoes_at_her, "torpedo", "torpedoes"),
+                self.torpedoed
+            ));
+        }
         let gains: Vec<String> = [
             (self.sunk, "ship sunk", "ships sunk"),
             (self.planes, "aircraft shot down", "aircraft shot down"),
@@ -392,6 +407,7 @@ impl Tally {
         let incoming: Vec<String> = [
             (self.ship_fire, "ships"),
             (self.shore_fire, "shore"),
+            (self.heavy_fire, "heavy battery"),
             (self.air_fire, "aircraft"),
         ]
         .into_iter()
@@ -449,12 +465,19 @@ struct Waters {
     at_sea: f32,
     raiders: HashSet<u64>,
     torpedoes: HashSet<u64>,
-    /// Each base's yard, working factories and live shore guns.
-    ports: Vec<(YardState, usize, usize)>,
+    /// Each base: wrecked, working factories, live shore guns and roused.
+    ports: Vec<(bool, usize, usize, bool)>,
+    /// The state of each base's drydocks.
+    docks: Vec<Vec<YardState>>,
+    /// Each base's heavy battery, if it has one: standing, and the salvos of its plot.
+    heavy: Vec<Option<(bool, u32)>>,
     spotted: Vec<bool>,
     flagship: Option<Sortie>,
+    /// Seconds until a boss raising steam is due.
+    steam: Option<f32>,
     /// Ships with their bridge shot away and nobody yet at the helm.
     helmless: HashSet<u64>,
+    harriers: HashSet<u64>,
 }
 impl Waters {
     fn of(battle: &Encounter) -> Self {
@@ -466,12 +489,24 @@ impl Waters {
                 .ports()
                 .iter()
                 .map(|p| {
-                    let guns = p.turrets().iter().filter(|g| g.live()).count();
-                    (p.yard_state(), p.live_factories(), guns)
+                    let light = p.turrets().iter().filter(|g| !g.heavy_battery());
+                    let guns = light.filter(|g| g.live()).count();
+                    (p.wrecked(), p.live_factories(), guns, p.roused())
+                })
+                .collect(),
+            docks: (battle.ports().iter())
+                .map(|p| p.docks().iter().map(|d| d.state()).collect())
+                .collect(),
+            heavy: (battle.ports().iter())
+                .map(|p| {
+                    let gun = p.turrets().iter().find(|g| g.heavy_battery())?;
+                    Some((gun.live(), gun.ranging()?.salvos()))
                 })
                 .collect(),
             spotted: battle.spotters().iter().map(|s| s.reporting).collect(),
+            harriers: battle.harriers().iter().map(|p| p.body.id).collect(),
             flagship: battle.flagship(),
+            steam: battle.raising_steam(),
             helmless: battle
                 .raiders()
                 .iter()
@@ -509,9 +544,14 @@ struct RunLog {
     sections: Vec<String>,
     hits: u32,
     level: u32,
+    /// Yard points the cargo sunk had made this leg at the last look.
+    cargo_points: u16,
     objectives: (u16, u16, bool),
     goals: [bool; 3],
-    can_extract: bool,
+    /// Past the leg's clock at the last look.
+    late: bool,
+    /// Seconds on the leg's clock at the last look, bases' time and all.
+    on_clock: f32,
     fittings: Fittings,
     hull: Hull,
     waters: Waters,
@@ -539,9 +579,11 @@ impl RunLog {
             sections: section_names(run),
             hits: run.hits,
             level: run.level,
+            cargo_points: run.cargo_points(),
             objectives: objectives(run),
             goals: goals(run),
-            can_extract: run.can_extract(),
+            late: run.late(),
+            on_clock: run.clock(),
             fittings: run.fittings,
             hull: Hull::of(run),
             waters: Waters::of(battle),
@@ -576,15 +618,21 @@ impl RunLog {
         let goals = if run.stage == Stage::CrownDeep {
             "sink the Regent".to_string()
         } else {
+            let boss = battle.boss().map_or(String::new(), |class| {
+                format!(", then the {}", crate::mission_hud::ship_class(class))
+            });
             format!(
-                "goals {} sunk, {} stores, a drydock",
-                mission.kills, mission.crates
+                "goals {} sunk, {} stores, a drydock{boss}; {} points a star and as many for beating the clock, which gains {:.0} s a base",
+                mission.kills,
+                mission.crates,
+                run.stage.star_points(),
+                shipvivor_campaign::BASE_TIME
             )
         };
         self.write(
             "leg",
             format!(
-                "{} {}: {} min, {goals}; hull {}%, level {}",
+                "{} {}: {} min to beat, {goals}; hull {}%, level {}",
                 self.leg,
                 mission.name,
                 mission.minutes,
@@ -596,7 +644,7 @@ impl RunLog {
         self.sections = section_names(run);
         let mut fleet: Vec<(String, u32)> = Vec::new();
         for r in battle.raiders().iter().filter(|r| r.afloat()) {
-            let class = format!("{:?}", r.class);
+            let class = r.weight().name(&format!("{:?}", r.class));
             match fleet.iter_mut().find(|(c, _)| *c == class) {
                 Some((_, n)) => *n += 1,
                 None => fleet.push((class, 1)),
@@ -618,8 +666,10 @@ impl RunLog {
         }
         self.begin_leg(run, battle);
         self.objectives = objectives(run);
+        self.cargo_points = run.cargo_points();
         self.goals = goals(run);
-        self.can_extract = run.can_extract();
+        self.late = run.late();
+        self.on_clock = run.clock();
         self.hull = Hull::of(run);
         self.waters = Waters::of(battle);
     }
@@ -645,6 +695,7 @@ impl RunLog {
                     self.bump(|t| t.ship_fire += 1)
                 }
                 EffectKind::Muzzle(Battery::Shore) => self.bump(|t| t.shore_fire += 1),
+                EffectKind::Muzzle(Battery::Heavy) => self.bump(|t| t.heavy_fire += 1),
                 EffectKind::Muzzle(Battery::Aircraft) => self.bump(|t| t.air_fire += 1),
                 EffectKind::Muzzle(Battery::AntiAir) => self.bump(|t| t.aa_fired += 1),
                 EffectKind::Downed(frame) => {
@@ -676,6 +727,19 @@ impl RunLog {
                 EffectKind::MountLost(_) => self.bump(|t| t.enemy_guns += 1),
                 EffectKind::Burst if near(fx.body.pos) => bursts += 1,
                 EffectKind::Crunch if near(fx.body.pos) => crunches.push(fx.body.pos),
+                EffectKind::Torpedoed => {
+                    self.bump(|t| t.torpedoed += 1);
+                    let off = fx.body.pos - helm.position;
+                    let side = if off.dot(helm.forward().perp()) < 0. {
+                        "port"
+                    } else {
+                        "starboard"
+                    };
+                    self.write(
+                        "torpedoed",
+                        format!("a torpedo struck her {side} side below the waterline"),
+                    );
+                }
                 _ => {}
             }
         }
@@ -684,16 +748,24 @@ impl RunLog {
         let torpedo_hits = landed.saturating_sub(armour_hits);
         self.bump(|t| t.torpedo_hits += torpedo_hits);
         self.hits = run.hits;
-        let fish: Vec<u64> = battle
+        let fish: Vec<&shipvivor_encounter::Torpedo> = battle
             .torpedoes()
             .iter()
-            .map(|t| t.body.id)
-            .filter(|id| !self.waters.torpedoes.contains(id))
+            .filter(|t| !self.waters.torpedoes.contains(&t.body.id))
             .collect();
-        if !fish.is_empty() {
-            let n = fish.len() as u32;
-            self.bump(|t| t.torpedoes += n);
-            self.write("torpedo", format!("a spread of {n} away"));
+        let spread = fish.iter().filter(|t| !t.hostile()).count() as u32;
+        if spread > 0 {
+            self.bump(|t| t.torpedoes += spread);
+            self.write("torpedo", format!("a spread of {spread} away"));
+        }
+        for t in fish.iter().filter(|t| t.hostile()) {
+            self.bump(|t| t.torpedoes_at_her += 1);
+            let place = whereabouts(helm, t.body.pos);
+            let course = degrees(t.body.heading);
+            self.write(
+                "torpedo",
+                format!("a torpedo boat fired at her from {place}, running {course} deg"),
+            );
         }
         self.sightings(battle, helm);
         self.damage(run, battle, bursts, &crunches);
@@ -714,7 +786,8 @@ impl RunLog {
             use shipvivor_encounter::EnemyClass::*;
             if matches!(r.class, Cruiser | Battleship | Parliament | Regent) {
                 let place = whereabouts(helm, r.body.pos);
-                self.write("contact", format!("{:?} put to sea {place}", r.class));
+                let name = r.weight().name(&format!("{:?}", r.class));
+                self.write("contact", format!("{name} put to sea {place}"));
             }
         }
         for (i, spotter) in battle.spotters().iter().enumerate() {
@@ -722,13 +795,43 @@ impl RunLog {
                 self.write("spotted", "a spotter plane is reporting her position");
             }
         }
+        let mut scrambled: Vec<usize> = (battle.harriers().iter())
+            .filter(|plane| !self.waters.harriers.contains(&plane.body.id))
+            .map(|plane| plane.base)
+            .collect();
+        scrambled.dedup();
+        for base in scrambled {
+            let port = &battle.ports()[base];
+            let place = whereabouts(helm, port.body.pos);
+            let size = battle.harriers().iter().filter(|p| p.base == base).count();
+            let flight = if size == 2 {
+                "a pair".to_string()
+            } else {
+                format!("a flight of {size}")
+            };
+            self.write(
+                "harriers",
+                format!("{flight} took off from base {} {place}", base + 1),
+            );
+        }
+        let boss = battle
+            .boss()
+            .map_or("flagship", crate::mission_hud::ship_class);
+        if let Some(due) = battle.raising_steam()
+            && self.waters.steam.is_none()
+        {
+            self.write(
+                "steam",
+                format!("the {boss} is raising steam, due in {:.0} s", due),
+            );
+        }
         let flagship = battle.flagship();
         if let Some(Sortie::Sailed { port, .. }) = flagship
             && flagship != self.waters.flagship
         {
             self.write(
                 "flagship",
-                format!("the flagship sailed from base {}", port + 1),
+                format!("the {boss} sailed from base {}", port + 1),
             );
         }
         for r in battle.raiders() {
@@ -857,29 +960,62 @@ impl RunLog {
     }
 
     fn bases(&mut self, battle: &Encounter, helm: &PlayerHelm) {
+        // A stage further up the channel stirs: its bases put their steel to work and
+        // their floatplanes up, and the chart shows them.
+        let stirring: Vec<&str> = (battle.ports().iter().enumerate())
+            .filter(|(i, port)| {
+                port.roused() && self.waters.ports.get(*i).is_some_and(|was| !was.3)
+            })
+            .map(|(i, _)| crate::mission_hud::letter(i))
+            .collect();
+        if !stirring.is_empty() {
+            let stages = battle.ports().iter().map(|p| p.stage()).max().unwrap_or(0) + 1;
+            let deepest = (battle.ports().iter())
+                .filter(|p| p.roused())
+                .map(|p| p.stage())
+                .max()
+                .unwrap_or(0)
+                + 1;
+            self.write(
+                "base",
+                format!(
+                    "base {} stirring (stage {deepest} of {stages})",
+                    stirring.join(" + ")
+                ),
+            );
+        }
+        let total = battle.ports().len();
         for (i, port) in battle.ports().iter().enumerate() {
-            let Some(&(yard, factories, guns)) = self.waters.ports.get(i) else {
+            let Some(&(was_wrecked, factories, guns, _)) = self.waters.ports.get(i) else {
                 continue;
             };
-            let place = whereabouts(helm, port.yard_position());
-            let base = i + 1;
-            let state = port.yard_state();
-            if state != yard {
-                let ruined = battle
-                    .ports()
-                    .iter()
-                    .filter(|p| p.yard_state() == YardState::Ruined)
-                    .count();
-                let news = match state {
-                    YardState::Ruined => {
-                        self.bump(|t| t.yards += 1);
-                        format!("yard wrecked ({ruined} of 3 down)")
-                    }
-                    YardState::Burning => "yard burning".into(),
-                    YardState::Damaged => "yard damaged".into(),
-                    YardState::Working => "yard back at work".into(),
+            let place = whereabouts(helm, crate::mission_hud::anchor(port));
+            let base = crate::mission_hud::letter(i);
+            let before = self.waters.docks.get(i).cloned().unwrap_or_default();
+            for (slip, (dock, &was)) in port.docks().iter().zip(&before).enumerate() {
+                let state = dock.state();
+                if state == was {
+                    continue;
+                }
+                let news = match (was, state) {
+                    (_, YardState::Ruined) => "wrecked",
+                    (YardState::Ruined, _) => "raised again by its factories",
+                    (_, YardState::Burning) => "burning",
+                    (_, YardState::Damaged) => "damaged",
+                    (_, YardState::Working) => "back at work",
                 };
-                self.write("base", format!("base {base} {place}: {news}"));
+                self.write(
+                    "base",
+                    format!("base {base} {place}: drydock {} {news}", slip + 1),
+                );
+            }
+            if port.wrecked() && !was_wrecked {
+                let ruined = battle.ruined_yards();
+                self.bump(|t| t.yards += 1);
+                self.write(
+                    "base",
+                    format!("base {base} {place}: base wrecked ({ruined} of {total} down)"),
+                );
             }
             let left = port.live_factories();
             if left < factories {
@@ -890,7 +1026,8 @@ impl RunLog {
                     format!("base {base}: factory wrecked, {left} left there"),
                 );
             }
-            let live = port.turrets().iter().filter(|g| g.live()).count();
+            let light = port.turrets().iter().filter(|g| !g.heavy_battery());
+            let live = light.filter(|g| g.live()).count();
             if live < guns {
                 let n = (guns - live) as u32;
                 self.bump(|t| t.shore_guns += n);
@@ -898,6 +1035,31 @@ impl RunLog {
                     "base",
                     format!("base {base}: shore gun silenced, {live} left there"),
                 );
+            }
+            // A heavy battery is news when it first lays a salvo on her, and again
+            // when it is silenced.
+            let Some(gun) = port.turrets().iter().find(|g| g.heavy_battery()) else {
+                continue;
+            };
+            let Some(&Some((was_live, was_laid))) = self.waters.heavy.get(i) else {
+                continue;
+            };
+            let plot = gun.ranging().copied().unwrap_or_default();
+            if was_laid == 0 && plot.salvos() > 0 {
+                let range = gun.position(&port.body).distance(helm.position);
+                let spotter = if plot.spotted() {
+                    ", a spotter reporting her"
+                } else {
+                    ""
+                };
+                self.write(
+                    "battery",
+                    format!("base {base}: heavy battery opened fire at {range:.0} m{spotter}"),
+                );
+            }
+            if was_live && !gun.live() {
+                self.bump(|t| t.shore_guns += 1);
+                self.write("battery", format!("base {base}: heavy battery silenced"));
             }
         }
     }
@@ -932,10 +1094,39 @@ impl RunLog {
             }
         }
         self.goals = now;
-        if run.can_extract() && !self.can_extract {
-            self.write("extract", "extraction is open");
+        // A base wrecked puts time on the clock, even one that has run out.
+        if run.clock() > self.on_clock && run.stage != Stage::CrownDeep {
+            let left = run.remaining();
+            let whole = left.abs().round() as u32;
+            let state = if left < 0. { "over" } else { "left" };
+            let back = if self.late && !run.late() {
+                ", back inside the clock"
+            } else {
+                ""
+            };
+            self.write(
+                "time",
+                format!(
+                    "+{:.0} s for a base wrecked, {}:{:02} {state}{back}",
+                    run.clock() - self.on_clock,
+                    whole / 60,
+                    whole % 60
+                ),
+            );
         }
-        self.can_extract = run.can_extract();
+        self.on_clock = run.clock();
+        if run.late() && !self.late && run.phase() == Phase::Sailing {
+            let fate = if run.stage == Stage::CrownDeep {
+                "she fights on".to_string()
+            } else {
+                format!(
+                    "she sails on until her bases are down, and the clock's {} points go unless a base wins time back",
+                    run.stage.star_points()
+                )
+            };
+            self.write("clock", format!("the clock ran out: {fate}"));
+        }
+        self.late = run.late();
         if run.level > self.level {
             self.write(
                 "level",
@@ -943,6 +1134,19 @@ impl RunLog {
             );
         }
         self.level = run.level;
+        // Cargo sunk ranks up into yard points on its own, a point at a time.
+        let cargo = run.cargo_points();
+        for point in self.cargo_points + 1..=cargo {
+            self.write(
+                "cargo",
+                format!(
+                    "yard point {point} this leg from cargo sunk ({:.2} points of cargo this leg), {:.0}% toward the next",
+                    run.objectives.cargo,
+                    100. * run.cargo_progress()
+                ),
+            );
+        }
+        self.cargo_points = cargo;
     }
 
     fn write_pulse(&mut self, run: &Campaign, battle: &Encounter, helm: &PlayerHelm) {
@@ -973,10 +1177,9 @@ impl RunLog {
     /// Refits, pauses and the end of each leg, which happen between steps.
     fn follow(&mut self, run: &Campaign) {
         if run.fittings != self.fittings {
-            let card = self
-                .fittings
-                .offers()
-                .into_iter()
+            let card = shipvivor_campaign::DECK
+                .iter()
+                .map(|&(card, _)| card)
                 .find(|&card| self.fittings.with(card) == run.fittings);
             let news = match card {
                 Some(card) => format!("fitted {}", words(&format!("{card:?}"))),
@@ -1048,12 +1251,13 @@ impl RunLog {
         self.pulse = Tally::default();
         let mission = run.stage.mission();
         let (kills, crates, drydock) = objectives(run);
-        let left = run.remaining().max(0.) as u32;
+        let left = run.remaining().abs().round() as u32;
+        let timing = if run.late() { "over the clock" } else { "left" };
         let score = if run.stage == Stage::CrownDeep {
             String::new()
         } else {
             format!(
-                ": {} (sunk {kills} of {}, stores {crates} of {}, {})",
+                ": {} (sunk {kills} of {}, stores {crates} of {}, {}){}",
                 count(u32::from(run.stars()), "star", "stars"),
                 mission.kills,
                 mission.crates,
@@ -1061,11 +1265,16 @@ impl RunLog {
                     "a drydock destroyed"
                 } else {
                     "no drydock destroyed"
+                },
+                if run.beat_clock() {
+                    format!(", and the clock pays {}", run.clock_points())
+                } else {
+                    String::new()
                 }
             )
         };
         let summary = format!(
-            "{why} with {}:{:02} left{score}; hull {}%, lowest {}%; level {}",
+            "{why} with {}:{:02} {timing}{score}; hull {}%, lowest {}%; level {}",
             left / 60,
             left % 60,
             run.hull_percent(),
@@ -1131,9 +1340,7 @@ fn goals(run: &Campaign) -> [bool; 3] {
 
 fn leg_end(end: LegEnd) -> &'static str {
     match end {
-        LegEnd::BasesDestroyed => "all three bases destroyed",
-        LegEnd::TimeExpired => "time ran out",
-        LegEnd::Extracted => "extracted",
+        LegEnd::BasesDestroyed => "every base destroyed",
         LegEnd::RegentSunk => "the Regent sunk",
     }
 }
@@ -1186,7 +1393,6 @@ fn describe_fittings(run: &Campaign) -> String {
         (f.training_gear, "training gear"),
         (f.armor, "armor plate"),
         (f.hardening, "hardening"),
-        (f.anti_air, "AA guns"),
         (f.aa_mounts, "more AA"),
         (f.aa_shells, "heavy flak"),
         (f.aa_loaders, "AA loaders"),
@@ -1293,6 +1499,7 @@ mod tests {
             .add_plugins(TelemetryPlugin)
             .init_resource::<Time>()
             .init_resource::<bevy::input::mouse::AccumulatedMouseMotion>()
+            .init_resource::<bevy::input::mouse::AccumulatedMouseScroll>()
             .init_resource::<UiScale>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
@@ -1348,11 +1555,20 @@ mod tests {
         let code = w.resource::<Logbook>().code().unwrap().to_owned();
         let lines = w.resource::<Logbook>().lines();
         assert_eq!(lines[0], format!("# Shipvivor run {code}"));
-        assert!(lines[3].contains("SHIPVIVOR_SEED=4 cargo run"));
+        // The header says how to sail these waters again, wherever it stands in it.
+        let header = lines.iter().take_while(|line| line.starts_with('#'));
+        assert!(
+            header
+                .clone()
+                .any(|line| line.contains("SHIPVIVOR_SEED=4 cargo run")),
+            "{:?}",
+            header.collect::<Vec<_>>()
+        );
         let leg = logged(w, "leg");
         assert_eq!(leg.len(), 1);
         assert!(logged(w, "fleet")[0].contains("afloat at the start: "));
-        assert!(leg[0].contains("1 The Iron Narrows: 10 min, goals 4 sunk"));
+        assert!(leg[0].contains("1 The Iron Narrows: 5 min to beat, goals 4 sunk"));
+        assert!(leg[0].contains("2 points a star"), "{}", leg[0]);
 
         // A shell on the bridge between steps reads as a hit on the next one.
         let at = w.resource::<Campaign>().ship.design().length() * 0.3;
@@ -1369,14 +1585,53 @@ mod tests {
         assert_eq!(logged(w, "pause").len(), 1);
         assert!(logged(w, "resume")[0].contains("after 0:00"));
 
-        // The clock runs out on the first leg: into the drydock.
+        // Cargo sunk ranks up into yard points on its own, and each is written down.
+        let cargo = Objectives {
+            cargo: 1.25,
+            ..default()
+        };
+        w.resource_mut::<Campaign>().tick(0., cargo, 0);
+        sail(w, 0.1);
+        let cargo = logged(w, "cargo");
+        assert_eq!(cargo.len(), 1, "{cargo:?}");
+        assert!(
+            cargo[0].contains("yard point 1 this leg from cargo sunk"),
+            "{}",
+            cargo[0]
+        );
+
+        // The clock runs out on the first leg and she sails on, until her bases are down
+        // and she goes into the drydock with her stars but not the clock's points.
         w.resource_mut::<Campaign>()
             .tick(600., Objectives::default(), 0);
+        sail(w, 0.1);
+        let clock = logged(w, "clock");
+        assert_eq!(clock.len(), 1, "{clock:?}");
+        assert!(clock[0].contains("the clock ran out: she sails on"));
+        assert!(logged(w, "leg-end").is_empty());
+        // A base wrecked puts time back on the clock, though not enough here.
+        let base = Objectives {
+            yards: 1,
+            ..default()
+        };
+        w.resource_mut::<Campaign>().tick(0., base, 0);
+        sail(w, 0.1);
+        let time = logged(w, "time");
+        assert_eq!(time.len(), 1, "{time:?}");
+        assert!(
+            time[0].contains("+45 s for a base wrecked, ") && time[0].ends_with(" over"),
+            "{}",
+            time[0]
+        );
+        w.resource_mut::<Campaign>()
+            .tick_sector(0., Objectives::default(), 0, true);
         sail(w, 0.1);
         let end = logged(w, "leg-end");
         assert_eq!(end.len(), 1);
         assert!(
-            end[0].contains("time ran out with 0:00 left: 0 stars"),
+            end[0].contains("every base destroyed with ")
+                && end[0].contains(" over the clock: 1 star")
+                && !end[0].contains("the clock pays"),
             "{}",
             end[0]
         );
@@ -1395,7 +1650,7 @@ mod tests {
         w.resource_mut::<Campaign>().mode = Mode::Title;
         sail(w, 0.1);
         let end = logged(w, "end");
-        assert!(end[0].contains("10:00  end      given up"), "{end:?}");
+        assert!(end[0].contains("  end      given up"), "{end:?}");
         assert!(logged(w, "tally").iter().all(|t| !t.contains("this leg")));
         let tallies = logged(w, "tally");
         assert!(

@@ -6,8 +6,12 @@
 //! drifting ice neither piles up nor thins out in open water, and no water crosses a
 //! coast. Each island holds one streamline as its shore and carries no net circulation,
 //! so the stream parts round it and closes again behind it, as it would in nature. A
+//! coast that runs off the chart holds the streamline it meets the open sea on there, so
+//! whatever turns in the water it encloses turns along its shore. A
 //! pair of opposed vortices in each island's lee makes the slack water and back eddy
-//! seen downstream of real islands.
+//! seen downstream of real islands. In a channel closed at its head the set reaches only
+//! a little way in, so the chart can turn the water of each reach slowly round on
+//! itself with gyres, in along one shore and out along the other.
 use super::Vec2;
 use std::f32::consts::TAU;
 
@@ -67,6 +71,28 @@ impl Set {
     }
 }
 
+/// A slow turning of the water over a stretch of enclosed channel, as the tide and the
+/// melt off the ice keep it going: in along one shore and out along the other. A chain
+/// of them down the middle of a channel turns it as one, and the water along each shore
+/// runs at about half their circulation over the spacing between them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gyre {
+    pub centre: Vec2,
+    /// Metres across the turning water, about half the channel's width.
+    pub width: f32,
+    /// Square metres a second. Its sign gives the way it turns.
+    pub circulation: f32,
+}
+impl Gyre {
+    fn eddy(&self) -> Eddy {
+        Eddy {
+            centre: self.centre,
+            width: self.width * 0.5,
+            circulation: self.circulation,
+        }
+    }
+}
+
 /// A vortex spread over a small patch of water, for the eddies behind an island.
 #[derive(Clone, Copy)]
 struct Eddy {
@@ -75,6 +101,15 @@ struct Eddy {
     circulation: f32,
 }
 impl Eddy {
+    /// The water it turns at a point, in open water with no shore to bound it.
+    fn velocity(&self, p: Vec2) -> Vec2 {
+        let out = p - self.centre;
+        let d2 = out.length_squared().max(1e-6);
+        let held = 1. - (-d2 / (2. * self.width * self.width)).exp();
+        // Velocity is (∂ψ/∂y, −∂ψ/∂x) and the vorticity is −∇²ψ, so a positive
+        // circulation turns the water from +x toward +y.
+        Vec2::new(out.y, -out.x) * (-self.circulation * held / (TAU * d2))
+    }
     fn vorticity(&self, p: Vec2) -> f32 {
         let s2 = self.width * self.width;
         let d2 = p.distance_squared(self.centre);
@@ -111,14 +146,25 @@ impl Currents {
     }
 
     /// Solve the stream round circular islands of land, given as centre and radius, over
-    /// the water from `lo` to `hi` and a margin beyond.
-    pub fn solve(set: Set, land: &[(Vec2, f32)], lo: Vec2, hi: Vec2) -> Self {
+    /// the water from `lo` to `hi` and a margin beyond, with any gyres turning in it.
+    pub fn solve(set: Set, land: &[(Vec2, f32)], gyres: &[Gyre], lo: Vec2, hi: Vec2) -> Self {
         if set.flow.length_squared() < 1e-8 {
             return Self::slack();
         }
         let charted = (lo, hi);
         let (lo, hi) = (lo - MARGIN, hi + MARGIN);
-        let eddies = lee_eddies(&set, land);
+        // An island sheds its eddies into the stream that passes it: the set, or in a
+        // channel the turning of its gyres, which the set does not reach.
+        let turning: Vec<Eddy> = gyres.iter().map(Gyre::eddy).collect();
+        let stream = |p: Vec2| {
+            if turning.is_empty() {
+                set.velocity(p)
+            } else {
+                turning.iter().map(|eddy| eddy.velocity(p)).sum()
+            }
+        };
+        let mut eddies = lee_eddies(stream, land);
+        eddies.extend(turning);
         let mut solved: Option<Level> = None;
         // Coarse levels settle the broad stream cheaply. The finest only sharpens it.
         for (cell, sweeps) in [(CELL * 4., 240), (CELL * 2., 90), (CELL, 36)] {
@@ -196,7 +242,7 @@ impl Currents {
 /// A vortex pair behind each island of any size that stands alone, turning so the water
 /// between them runs back toward the shore. Land that runs into other land, such as the
 /// pieces of a coast, sheds no eddies of its own.
-fn lee_eddies(set: &Set, land: &[(Vec2, f32)]) -> Vec<Eddy> {
+fn lee_eddies(stream: impl Fn(Vec2) -> Vec2, land: &[(Vec2, f32)]) -> Vec<Eddy> {
     let mut eddies = vec![];
     let alone = |k: usize| {
         let (centre, radius) = land[k];
@@ -208,8 +254,11 @@ fn lee_eddies(set: &Set, land: &[(Vec2, f32)]) -> Vec<Eddy> {
         .filter(|&k| land[k].1 >= EDDY_RADIUS && alone(k))
         .map(|k| &land[k])
     {
-        let stream = set.velocity(centre);
+        let stream = stream(centre);
         let speed = stream.length();
+        if speed < 1e-4 {
+            continue;
+        }
         let down = stream / speed.max(1e-6);
         let lee = centre + down * radius * 1.45;
         let circulation = EDDY_STRENGTH * speed * radius;
@@ -248,6 +297,10 @@ struct Landfall {
 struct Mass {
     /// The stream function along the shore.
     level: f32,
+    /// The stream function where land running off the grid meets the open sea at its
+    /// edge, which holds the shore there. Land wholly on the grid takes the level that
+    /// leaves no net circulation round it.
+    anchor: Option<f32>,
     nodes: Vec<usize>,
     /// Water nodes beside the shore, each weighted by how close it stands.
     rim: Vec<(usize, f32)>,
@@ -328,6 +381,59 @@ impl Level {
         let step = |n: usize, (di, dj): (i32, i32)| {
             (n as isize + di as isize + dj as isize * cols as isize) as usize
         };
+        // The frame holds the open-water set, so its nodes are never dry, but land that
+        // runs off the grid is found where it crosses the frame.
+        let on_frame = |n: usize| {
+            let (i, j) = (n % cols, n / cols);
+            i == 0 || j == 0 || i == cols - 1 || j == rows - 1
+        };
+        let frame_land: Vec<bool> = (0..count)
+            .map(|n| {
+                on_frame(n)
+                    && land
+                        .iter()
+                        .any(|&(c, r)| node(n).distance_squared(c) < r * r)
+            })
+            .collect();
+        let along_frame = |n: usize| {
+            let (i, j) = ((n % cols) as isize, (n / cols) as isize);
+            ARMS.into_iter().filter_map(move |(di, dj)| {
+                let (a, b) = (i + di as isize, j + dj as isize);
+                (a >= 0 && b >= 0 && a < cols as isize && b < rows as isize)
+                    .then(|| b as usize * cols + a as usize)
+            })
+        };
+        // Water cut off from where the ship enters, behind a coast that runs off the
+        // grid, is none of the sea she sails. It is taken for land, so it neither holds
+        // a stream of its own nor gives a coast a false level where it meets the frame.
+        let mut frame_land = frame_land;
+        let entry = ((-lo) / cell).round();
+        let inside =
+            entry.cmpge(Vec2::ZERO).all() && (entry.x as usize) < cols && (entry.y as usize) < rows;
+        let start = entry.y as usize * cols + entry.x as usize;
+        if inside && !dry[start] && !frame_land[start] {
+            let mut sea = vec![false; count];
+            let mut stack = vec![start];
+            sea[start] = true;
+            while let Some(n) = stack.pop() {
+                for m in along_frame(n) {
+                    if !sea[m] && !dry[m] && !frame_land[m] {
+                        sea[m] = true;
+                        stack.push(m);
+                    }
+                }
+            }
+            for n in 0..count {
+                if !sea[n] {
+                    if on_frame(n) {
+                        frame_land[n] = true;
+                    } else {
+                        dry[n] = true;
+                    }
+                }
+            }
+        }
+        let mut walked = vec![false; count];
         // Touching islands share one shore streamline, so label land by connection.
         let mut masses = vec![];
         for start in 0..count {
@@ -336,6 +442,7 @@ impl Level {
             }
             let label = masses.len() as u32;
             let mut nodes = vec![];
+            let mut junctions = vec![];
             let mut stack = vec![start];
             kind[start] = label;
             while let Some(n) = stack.pop() {
@@ -345,11 +452,28 @@ impl Level {
                     if dry[m] && kind[m] == WATER {
                         kind[m] = label;
                         stack.push(m);
+                    } else if frame_land[m] && !walked[m] {
+                        // Walk the land along the frame to where it meets open water.
+                        walked[m] = true;
+                        let mut ahead = vec![m];
+                        while let Some(f) = ahead.pop() {
+                            for g in along_frame(f).filter(|&g| on_frame(g)) {
+                                if !frame_land[g] {
+                                    junctions.push(f);
+                                } else if !walked[g] {
+                                    walked[g] = true;
+                                    ahead.push(g);
+                                }
+                            }
+                        }
                     }
                 }
             }
+            let anchor = (!junctions.is_empty())
+                .then(|| junctions.iter().map(|&f| open[f]).sum::<f32>() / junctions.len() as f32);
             masses.push(Mass {
-                level: 0.,
+                level: anchor.unwrap_or(0.),
+                anchor,
                 nodes,
                 rim: vec![],
             });
@@ -449,15 +573,15 @@ impl Level {
         (value, length)
     }
 
-    /// Successive over-relaxation. Before each sweep every landmass takes the shore value
-    /// that leaves no net circulation round it.
+    /// Successive over-relaxation. Before each sweep every landmass on the grid takes the
+    /// shore value that leaves no net circulation round it.
     fn relax(&mut self, sweeps: usize, speed: f32) {
         let side = self.cols.max(self.rows) as f32;
         let omega = (2. / (1. + std::f32::consts::PI / side)).min(OMEGA_CAP);
         let settled = 2e-5 * speed * self.cell;
         let cols = self.cols;
         for _ in 0..sweeps {
-            for mass in &mut self.masses {
+            for mass in self.masses.iter_mut().filter(|mass| mass.anchor.is_none()) {
                 let (sum, weight) = mass.rim.iter().fold((0., 0.), |(s, w), &(m, k)| {
                     (s + k * (self.phi[m] + self.open[m]), w + k)
                 });
@@ -556,7 +680,7 @@ mod tests {
     };
 
     fn field(land: &[(Vec2, f32)]) -> Currents {
-        Currents::solve(EAST, land, Vec2::splat(-300.), Vec2::splat(300.))
+        Currents::solve(EAST, land, &[], Vec2::splat(-300.), Vec2::splat(300.))
     }
 
     #[test]

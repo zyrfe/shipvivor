@@ -23,6 +23,11 @@ perf.data.old
 /work/screenshots/
 # A debug build logs each patrol run here, one <CODE>.log per run, for /recap.
 /work/runs/
+# Bot-sailed legs from `cargo run -p shipvivor-sim --example sim`.
+/work/sims/
+# The release build counter `build.rs` keeps (and its staging file).
+/work/build-number
+/work/build-number.tmp
 
 # --- macOS --------------------------------------------------------------------
 .DS_Store

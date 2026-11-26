@@ -226,6 +226,7 @@ impl Battle {
                         damage: hit.damage[0],
                         calibre: None,
                         reach: shipvivor_shipyard::Reach::Bays,
+                        breach: false,
                     });
                 }
                 self.effects.push(Effect {

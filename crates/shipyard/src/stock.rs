@@ -39,10 +39,15 @@ impl Design {
     pub const BREAKWATER_LENGTH: f32 = 30.;
     /// The yard splices midship frames between the original machinery space and after gun.
     pub const BREAKWATER_SPLICE: usize = 4;
+    /// Pace of her crew's repairs and pumps against a stock crew's. A flooded module or a
+    /// knocked-out gun stays down long enough to matter, so a ship that has been badly
+    /// knocked about stays that way for a while.
+    pub const BREAKWATER_REPAIR: f32 = 0.65;
 
     /// The player's cruiser: 30 metres and 100 hull points, a main gun fore and aft,
     /// the director and close guns amidships, and the torpedo racks over the engine.
-    /// She stays afloat until four of her six modules are wrecked.
+    /// She stays afloat until four of her six modules are wrecked, and her crew mends
+    /// at [`Design::BREAKWATER_REPAIR`] pace.
     pub fn breakwater() -> Self {
         let mut ship = Self::new(
             "Breakwater",
@@ -57,8 +62,10 @@ impl Design {
         )
         .expect("a stock design");
         ship.sinks_at = 2. / 3.;
+        ship.repair = Self::BREAKWATER_REPAIR;
         ship.protect(Protection::BREAKWATER);
         ship.auxiliary_drive = true;
+        ship.leaks = true;
         ship
     }
 
@@ -71,6 +78,20 @@ impl Design {
             15.,
             (Boat, 4.),
             2.,
+            0.,
+        )
+    }
+
+    /// A torpedo boat: one 3-point hull of 12 metres with her engine in it and nobody
+    /// aboard to mend it. Her one small gun goes out at the first hit on it. Her engine
+    /// fails at half structure, so one main round sinks her or leaves her adrift.
+    pub fn torpedo_boat() -> Self {
+        enemy(
+            "Torpedo boat",
+            vec![Module::new(Boat, [MainGun, Engine])],
+            12.,
+            (Boat, 3.),
+            1.,
             0.,
         )
     }
@@ -108,6 +129,20 @@ impl Design {
             ],
             30.1,
             (Straight, 4.),
+            0.,
+            0.,
+        )
+    }
+
+    /// A coastal trader a quarter of a freighter's length: one 3-point hull with her
+    /// engine in it and nobody aboard to mend it. Her engine fails at half structure, so
+    /// one main round leaves her adrift and a secondary round more sinks her.
+    pub fn coaster() -> Self {
+        enemy(
+            "Coaster",
+            vec![Module::new(Boat, [Engine])],
+            8.,
+            (Boat, 3.),
             0.,
             0.,
         )
@@ -151,6 +186,31 @@ impl Design {
             (Wide, 21.),
             6.,
             0.5,
+        );
+        ship.citadel = Some(ArmorGrade::Capital);
+        ship
+    }
+
+    /// The commodore's battleship: a battleship lengthened by a turret, with superfiring
+    /// pairs fore and aft, a magazine under each end pair, the director over the after
+    /// engine, and a tougher hull and turrets in the same capital-grade citadel.
+    pub fn commodore() -> Self {
+        let mut ship = enemy(
+            "Commodore",
+            vec![
+                Module::new(Bow, []),
+                Module::new(Wide, [MainGun, Magazine]),
+                Module::new(Wide, [MainGun]),
+                Module::new(Wide, [Engine]),
+                Module::new(Wide, [Director, Engine]),
+                Module::new(Wide, [MainGun]),
+                Module::new(Wide, [MainGun, Magazine]),
+                Module::new(Stern, []),
+            ],
+            58.,
+            (Wide, 24.),
+            7.,
+            0.6,
         );
         ship.citadel = Some(ArmorGrade::Capital);
         ship

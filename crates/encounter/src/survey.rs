@@ -4,8 +4,8 @@
 //! she cannot get a clear shot at, a slip the raiders cannot leave, a freighter with no
 //! way in, bases bunched together or under each other's guns. Reachability is worked
 //! out on a grid of the actual shoals and piers, using the same land tests that keep the
-//! ships afloat. A passage must also take its bases in order, the heaviest last, and
-//! run past each under its guns. What passes is scored, so the generator can prefer
+//! ships afloat. A passage must also take its bases stage by stage, the heavy yard last,
+//! and run past each under its guns. What passes is scored, so the generator can prefer
 //! bases spread along the course, easy turns and islands that give cover without
 //! walling off the course.
 use super::chart::{IceKeepout, segment_distance};
@@ -49,7 +49,7 @@ const FIRING_RANGE: f32 = 400.;
 /// Water path over straight line, at most, on any leg.
 const MAX_DETOUR: f32 = 1.7;
 const MIN_ISLANDS: usize = 4;
-/// Least distance along a passage from one base to the next, in metres.
+/// Least distance along a passage from a base to any base of a later stage, in metres.
 const MIN_STAGE: f32 = 380.;
 /// The heavy yard stands within this distance of the end of a passage.
 const MAX_SHORT_OF_END: f32 = 260.;
@@ -62,7 +62,7 @@ const COVER_RANGE: f32 = 150.;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Defect {
-    /// Two gates, or the start (index 5) and a gate, too close together.
+    /// Two gates, or the start (numbered after the last gate) and a gate, too close.
     GatesCrowded {
         a: usize,
         b: usize,
@@ -91,13 +91,14 @@ pub enum Defect {
     BasesOneSided {
         degrees: f32,
     },
-    /// On a passage, base `b` comes before base `a` along the course, or too soon after it.
+    /// On a passage, base `b` comes before base `a` along the course, or too soon after
+    /// it, though `b` belongs to a later stage or is the heavy yard.
     BasesOutOfOrder {
         a: usize,
         b: usize,
         metres: f32,
     },
-    /// The heavy yard stands this far short of the end of a passage.
+    /// The heavy yard, the last base, stands this far short of the end of a passage.
     LastBaseShort {
         metres: f32,
     },
@@ -115,7 +116,7 @@ pub enum Defect {
         gate: usize,
         metres: f32,
     },
-    /// Leg 5 is the run in from the start to gate 0.
+    /// The leg numbered after the last is the run in from the start to gate 0.
     BaseOnFairway {
         base: usize,
         leg: usize,
@@ -193,7 +194,7 @@ pub enum Defect {
 }
 impl fmt::Display for Defect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let base = |i: usize| ["A", "B", "C"][i.min(2)];
+        let base = |i: usize| char::from(b'A' + i.min(25) as u8);
         match *self {
             Self::GatesCrowded { a, b, metres } => {
                 write!(f, "gates {a} and {b} only {metres:.0} m apart")
@@ -222,7 +223,7 @@ impl fmt::Display for Defect {
                 base(a)
             ),
             Self::LastBaseShort { metres } => {
-                write!(f, "base C stands {metres:.0} m short of the end")
+                write!(f, "the heavy yard stands {metres:.0} m short of the end")
             }
             Self::BaseOffCourse { base: i, metres } => {
                 write!(f, "the passage keeps {metres:.0} m from base {}", base(i))
@@ -283,8 +284,8 @@ pub struct Metrics {
     pub base_spacing: f32,
     /// Narrowest angle between two bases, seen from the middle of the circuit, in degrees.
     pub base_sector: f32,
-    /// On a passage, the shortest run from the start to base A, A to B or B to C, over
-    /// the longest.
+    /// On a passage, the shortest run from the start to the first base or from one
+    /// base to the next, over the longest.
     pub stage_balance: f32,
     /// Closest pair of factories at different bases, in metres.
     pub factory_spacing: f32,
@@ -372,12 +373,13 @@ impl Survey {
     }
 
     fn layout(&mut self, chart: &Chart) {
-        let gates = chart.gates;
+        let gates = &chart.gates;
+        let n = gates.len();
         let circuit = chart.course == Course::Circuit;
         let defects = &mut self.defects;
         let m = &mut self.metrics;
-        for a in 0..5 {
-            for b in a + 1..5 {
+        for a in 0..n {
+            for b in a + 1..n {
                 let metres = gates[a].distance(gates[b]);
                 if metres < MIN_GATE_SPACING {
                     defects.push(Defect::GatesCrowded { a, b, metres });
@@ -385,11 +387,11 @@ impl Survey {
             }
             let metres = gates[a].length();
             if metres < MIN_START_TO_GATE {
-                defects.push(Defect::GatesCrowded { a: 5, b: a, metres });
+                defects.push(Defect::GatesCrowded { a: n, b: a, metres });
             }
         }
         let legs = chart.legs();
-        let lengths = legs.map(|(a, b)| a.distance(b));
+        let lengths: Vec<f32> = legs.iter().map(|&(a, b)| a.distance(b)).collect();
         for (leg, &metres) in lengths.iter().enumerate() {
             if metres < MIN_LEG {
                 defects.push(Defect::ShortLeg { leg, metres });
@@ -407,8 +409,8 @@ impl Survey {
         m.sharpest_turn = 0.;
         // A passage turns at each mark but the last. A circuit turns at every gate, and
         // at the first both from the start and from the last gate.
-        for gate in 0..if circuit { 5 } else { 4 } {
-            let next = gates[(gate + 1) % 5];
+        for gate in 0..if circuit { n } else { n - 1 } {
+            let next = gates[(gate + 1) % n];
             let from = if gate == 0 {
                 Vec2::ZERO
             } else {
@@ -416,7 +418,7 @@ impl Survey {
             };
             let mut sharpest = turn(from, gates[gate], next);
             if circuit && gate == 0 {
-                sharpest = sharpest.max(turn(gates[4], gates[0], next));
+                sharpest = sharpest.max(turn(gates[n - 1], gates[0], next));
             }
             m.sharpest_turn = m.sharpest_turn.max(sharpest);
             if sharpest > HAIRPIN_DEGREES {
@@ -426,15 +428,19 @@ impl Survey {
                 });
             }
         }
-        let lap = gates[0].angle_to(gates[0] - gates[4]).abs().to_degrees();
+        let lap = gates[0]
+            .angle_to(gates[0] - gates[n - 1])
+            .abs()
+            .to_degrees();
         if circuit && lap > LAP_APPROACH_DEGREES {
             defects.push(Defect::LapApproach { degrees: lap });
         }
 
-        let bases = chart.harbours.map(|h| h.pos);
+        let bases: Vec<Vec2> = chart.harbours.iter().map(|h| h.pos).collect();
+        let count = bases.len();
         m.base_spacing = f32::MAX;
-        for a in 0..3 {
-            for b in a + 1..3 {
+        for a in 0..count {
+            for b in a + 1..count {
                 let metres = bases[a].distance(bases[b]);
                 m.base_spacing = m.base_spacing.min(metres);
                 if metres < MIN_BASE_SPACING {
@@ -444,10 +450,13 @@ impl Survey {
         }
         if circuit {
             let middle = chart.middle();
-            let mut bearings = bases.map(|p| shipvivor_compass::heading(p - middle).to_degrees());
+            let mut bearings: Vec<f32> = bases
+                .iter()
+                .map(|&p| shipvivor_compass::heading(p - middle).to_degrees())
+                .collect();
             bearings.sort_by(f32::total_cmp);
-            m.base_sector = (0..3)
-                .map(|i| (bearings[(i + 1) % 3] - bearings[i]).rem_euclid(360.))
+            m.base_sector = (0..count)
+                .map(|i| (bearings[(i + 1) % count] - bearings[i]).rem_euclid(360.))
                 .fold(f32::MAX, f32::min);
             if m.base_sector < MIN_BASE_SECTOR_DEGREES {
                 defects.push(Defect::BasesOneSided {
@@ -455,20 +464,24 @@ impl Survey {
                 });
             }
         } else {
-            // The bases come in order along the passage, the heavy yard at its end, and
-            // the course runs past each within reach of its guns.
-            let along = bases.map(|p| course_run(&legs, p));
+            // The bases come stage by stage along the passage, the heavy yard last at its
+            // end, and the course runs past each within reach of its guns.
+            let along: Vec<(f32, f32)> = bases.iter().map(|&p| course_run(&legs, p)).collect();
             let end: f32 = lengths.iter().sum();
-            let stages = [along[0].0, along[1].0 - along[0].0, along[2].0 - along[1].0];
-            for (a, b) in [(0, 1), (1, 2)] {
-                let metres = along[b].0 - along[a].0;
-                if metres < MIN_STAGE {
-                    defects.push(Defect::BasesOutOfOrder { a, b, metres });
+            let stage = |i: usize| chart.harbours[i].stage;
+            let last = count - 1;
+            for a in 0..count {
+                for b in 0..count {
+                    let later = stage(a) < stage(b) || (b == last && a != last);
+                    let metres = along[b].0 - along[a].0;
+                    if later && metres < MIN_STAGE {
+                        defects.push(Defect::BasesOutOfOrder { a, b, metres });
+                    }
                 }
             }
-            if end - along[2].0 > MAX_SHORT_OF_END {
+            if end - along[last].0 > MAX_SHORT_OF_END {
                 defects.push(Defect::LastBaseShort {
-                    metres: end - along[2].0,
+                    metres: end - along[last].0,
                 });
             }
             for (base, &(_, metres)) in along.iter().enumerate() {
@@ -476,10 +489,21 @@ impl Survey {
                     defects.push(Defect::BaseOffCourse { base, metres });
                 }
             }
+            let mut runs: Vec<f32> = along.iter().map(|&(run, _)| run).collect();
+            runs.sort_by(f32::total_cmp);
+            let mut previous = 0.;
+            let stages: Vec<f32> = runs
+                .iter()
+                .map(|&run| {
+                    let gap = run - previous;
+                    previous = run;
+                    gap
+                })
+                .collect();
             m.stage_balance = stages.iter().copied().fold(f32::MAX, f32::min).max(0.)
                 / stages.iter().copied().fold(0., f32::max).max(1.);
         }
-        let mut fairways = legs.to_vec();
+        let mut fairways = legs.clone();
         fairways.push((Vec2::ZERO, gates[0]));
         for (base, &pos) in bases.iter().enumerate() {
             let metres = pos.length();
@@ -501,8 +525,8 @@ impl Survey {
         }
         let ports = Port::chart(&chart.harbours, 9999., &mut 0);
         m.factory_spacing = f32::MAX;
-        for a in 0..3 {
-            for b in a + 1..3 {
+        for a in 0..count {
+            for b in a + 1..count {
                 for i in 0..ports[a].factories().len() {
                     for j in 0..ports[b].factories().len() {
                         let metres = ports[a]
@@ -591,13 +615,7 @@ impl Survey {
                     .any(|&(a, b)| segment_distance(i.pos, a, b) - i.radius <= COVER_RANGE)
             })
             .count();
-        let keepout = IceKeepout::new(
-            &gates,
-            &chart.harbours,
-            islets,
-            &chart.coast,
-            &chart.pickets,
-        );
+        let keepout = IceKeepout::new(gates, &chart.harbours, islets, &chart.coast, &chart.pickets);
         for (piece, ice) in chart.ice.iter().enumerate() {
             if let Some(near) = keepout.clear(ice) {
                 defects.push(Defect::IceInTheWay { piece, near });
@@ -606,10 +624,10 @@ impl Survey {
     }
 
     fn water(&mut self, chart: &Chart, battle: &Battle) {
-        let gates = chart.gates;
+        let gates = &chart.gates;
         // The grid covers the water: the coast's hinterland is all land.
         let mut extent: Vec<Vec2> = vec![Vec2::ZERO];
-        extent.extend(gates);
+        extent.extend(gates.iter().copied());
         extent.extend(chart.harbours.iter().map(|h| h.pos));
         extent.extend(chart.islets.iter().map(|i| i.pos));
         extent.extend(battle.raiders().iter().map(|r| r.body.pos));
@@ -640,13 +658,21 @@ impl Survey {
 
         let ports = battle.ports();
         for (base, port) in ports.iter().enumerate() {
-            let (berth, f) = (port.berth(), port.body.forward());
-            if !(12..=90)
-                .step_by(4)
-                .all(|t| afloat(berth + f * t as f32, 7.))
-            {
+            // Every slip launches into open water that reaches the fairway.
+            let f = port.body.forward();
+            let berths: Vec<Vec2> = (0..port.docks().len())
+                .map(|i| port.dock_berth(i))
+                .collect();
+            if !berths.iter().all(|&berth| {
+                (12..=90)
+                    .step_by(4)
+                    .all(|t| afloat(berth + f * t as f32, 7.))
+            }) {
                 defects.push(Defect::BerthBlocked { base });
-            } else if !reached(berth + f * 90., CELL * 1.5) {
+            } else if !berths
+                .iter()
+                .all(|&berth| reached(berth + f * 90., CELL * 1.5))
+            {
                 defects.push(Defect::BerthUnreachable { base });
             }
             // On the second leg the flagship may sail from any working yard.
@@ -662,7 +688,7 @@ impl Survey {
                         && clear_shot(at, target, base, battle)
                 })
             };
-            if !sighted(port.yard_position()) {
+            if !(0..port.docks().len()).all(|i| sighted(port.dock_position(i))) {
                 defects.push(Defect::YardHidden { base });
             }
             for factory in 0..port.factories().len() {
@@ -700,7 +726,7 @@ impl Survey {
         }
 
         // Each leg, sailed on the grid, against the same leg across open water. A
-        // circuit's run in from the start comes first, as leg 5.
+        // circuit's run in from the start comes first, numbered after its own legs.
         let mut worst: f32 = 1.;
         let mut legs = vec![];
         if chart.course == Course::Circuit {
@@ -708,7 +734,7 @@ impl Survey {
         }
         legs.extend(chart.legs());
         let first = if chart.course == Course::Circuit {
-            5
+            gates.len()
         } else {
             0
         };
@@ -726,7 +752,7 @@ impl Survey {
             worst = worst.max(ratio);
             if ratio > MAX_DETOUR {
                 defects.push(Defect::Detour {
-                    leg: (index + first) % 6,
+                    leg: (index + first) % (gates.len() + 1),
                     ratio,
                 });
             }
@@ -739,7 +765,7 @@ impl Survey {
 mod tests;
 
 /// How far along a course of legs the point nearest `p` lies, and how far off it `p` is.
-fn course_run(legs: &[(Vec2, Vec2); 5], p: Vec2) -> (f32, f32) {
+fn course_run(legs: &[(Vec2, Vec2)], p: Vec2) -> (f32, f32) {
     let mut run = 0.;
     let mut best = (0., f32::MAX);
     for &(a, b) in legs {

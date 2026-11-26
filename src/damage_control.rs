@@ -14,6 +14,9 @@ pub struct Fill(usize);
 /// The tick inside a cell: as far as the crew can mend the module at sea.
 #[derive(Component)]
 pub struct Limit(usize);
+/// The water inside a cell, rising from the bottom as the module fills.
+#[derive(Component)]
+pub struct Water(usize);
 /// One stretch of side plating on a module. Port runs above the cell and starboard
 /// below it, as she lies with her bow to the right.
 #[derive(Component)]
@@ -48,6 +51,9 @@ fn alarm() -> Color {
 }
 fn flooded() -> Color {
     Color::srgb_u8(46, 78, 112)
+}
+fn water() -> Color {
+    Color::srgba_u8(84, 150, 214, 225)
 }
 
 fn label(gear: Gear) -> &'static str {
@@ -144,7 +150,7 @@ pub fn spawn(cmd: &mut Commands, panel: Entity, run: &Campaign) {
                 Cell(module),
                 Node {
                     width: percent(100),
-                    height: px(14),
+                    height: px(16),
                     border: UiRect::all(px(1)),
                     ..default()
                 },
@@ -175,6 +181,19 @@ pub fn spawn(cmd: &mut Commands, panel: Entity, run: &Campaign) {
                 ..default()
             },
             BackgroundColor(ink()),
+            ChildOf(cell),
+        ));
+        cmd.spawn((
+            Water(module),
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                bottom: px(0),
+                width: percent(100),
+                height: percent(0),
+                ..default()
+            },
+            BackgroundColor(water()),
             ChildOf(cell),
         ));
         if run
@@ -237,6 +256,7 @@ pub fn update(
     mut cells: Query<(&Cell, &mut BorderColor)>,
     mut fills: Query<(&Fill, &mut Node, &mut BackgroundColor), Without<Limit>>,
     mut limits: Query<(&Limit, &mut Node), Without<Fill>>,
+    mut waters: Query<(&Water, &mut Node, &mut Visibility), (Without<Fill>, Without<Limit>)>,
     mut plates: Query<(&Plate, &mut BackgroundColor), Without<Fill>>,
     mut pips: Query<(&Pip, &mut Text, &mut TextColor)>,
     mut summary: Query<(&mut Text, &mut TextColor), SummaryOnly>,
@@ -287,6 +307,20 @@ pub fn update(
             node.width = width;
         }
         paint.set_if_neq(BackgroundColor(color));
+    }
+    for (level, mut node, mut shown) in &mut waters {
+        let hold = &holds[level.0];
+        // A flooded module already shows full of water in its bar.
+        let depth = if hold.wrecked() { 0. } else { hold.water() };
+        let height = percent((depth * 100.).round());
+        if node.height != height {
+            node.height = height;
+        }
+        shown.set_if_neq(if depth > 0. {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
     }
     for (limit, mut node) in &mut limits {
         let hold = &holds[limit.0];

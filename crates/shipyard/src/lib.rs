@@ -15,15 +15,16 @@ mod repair;
 mod ship;
 mod stock;
 
-pub use battery::GunStation;
+pub use battery::{BARBETTE, GunStation};
 pub use design::{
     BOMB_DAMAGE, Berth, Component, Design, FLOATPLANE_REACH, Fault, Fitting, Frame, FrameSpec,
-    MISSILE_DAMAGE, MISSILE_RANGE, MISSILE_RELOAD, MISSILE_SALVO, Module, Protection,
-    SORTIE_SECONDS, Sheet, Slot,
+    Gunhouse, MISSILE_DAMAGE, MISSILE_RANGE, MISSILE_RELOAD, MISSILE_SALVO, MOST_TIER, Module,
+    Protection, SORTIE_SECONDS, Sheet, Slot,
 };
-pub use repair::{Mend, Task};
-pub use ship::{Compartment, Loss, Panel, Reach, Ship, Side, State};
+pub use repair::{DRAINED, Mend, PARTY_PUMP, PUMP, Task};
+pub use ship::{BREACH, Compartment, INFLOW, Loss, Panel, Reach, Ship, Side, State};
 pub use shipvivor_artillery::ArmorGrade;
+pub use shipvivor_artillery::TurretLayout;
 
 #[cfg(test)]
 mod tests;

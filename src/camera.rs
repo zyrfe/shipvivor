@@ -2,7 +2,8 @@
 use crate::state::{Campaign, Mode, PlayerHelm};
 use bevy::{
     core_pipeline::tonemapping::Tonemapping,
-    input::mouse::AccumulatedMouseMotion,
+    input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit},
+    post_process::effect_stack::ChromaticAberration,
     prelude::*,
     window::{CursorGrabMode, CursorOptions},
 };
@@ -149,6 +150,53 @@ pub struct ShipView {
     /// Shift is held: the lens is narrowing or narrowed, and the guns follow the reticle.
     scoped: bool,
     zero: Option<Zero>,
+    ring: Ring,
+}
+
+/// The scope's magnification ring, which the mouse wheel turns a detent at a time.
+#[derive(Clone, Copy, Default)]
+struct Ring {
+    /// The detent it rests in, and the one the wheel has turned it toward.
+    detent: i8,
+    wanted: i8,
+    /// Wheel travel short of the next detent.
+    travel: f32,
+    /// Seconds before the next detent can click home.
+    ratchet: f32,
+    /// Where the lens has got to, in detents. It follows the ring a moment behind.
+    lens: f32,
+}
+
+/// Detents on the scope's ring below and above the stock 3×. Each is a third of an
+/// octave, so three clicks double the power: from about 1.9× up to 7.6×.
+const RING_LOW: i8 = -2;
+const RING_HIGH: i8 = 4;
+/// Seconds between clicks while the ring is spun, and how quickly the lens follows it.
+const DETENT_GAP: f32 = 0.05;
+const LENS_SETTLE: f32 = 0.07;
+/// Trackpad travel, in pixels, that turns the ring one detent.
+const PIXELS_PER_DETENT: f32 = 40.;
+
+impl Ring {
+    /// Turn by `detents` of wheel travel. Clicks come one at a time, a moment apart, and
+    /// the lens follows. Returns whether a detent clicked home on this frame.
+    fn turn(&mut self, detents: f32, dt: f32) -> bool {
+        self.travel += detents;
+        let whole = self.travel.trunc();
+        self.travel -= whole;
+        // Turned past either stop, the ring goes no further and the wheel's travel is lost.
+        let wanted =
+            (f32::from(self.wanted) + whole).clamp(f32::from(RING_LOW), f32::from(RING_HIGH));
+        self.wanted = wanted as i8;
+        self.ratchet = (self.ratchet - dt).max(0.);
+        let click = self.ratchet == 0. && self.detent != self.wanted;
+        if click {
+            self.detent += (self.wanted - self.detent).signum();
+            self.ratchet = DETENT_GAP;
+        }
+        self.lens += (f32::from(self.detent) - self.lens) * (1. - (-dt / LENS_SETTLE).exp());
+        click
+    }
 }
 
 impl Default for ShipView {
@@ -169,6 +217,7 @@ impl ShipView {
             soft_target: None,
             scoped: false,
             zero: None,
+            ring: Ring::default(),
         }
     }
     fn boom_length(&self) -> f32 {
@@ -177,7 +226,15 @@ impl ShipView {
     }
 
     fn fov(&self) -> f32 {
-        CRUISE_FOV.lerp(SIGHT_FOV, self.zoom)
+        // Each detent of the scope's ring narrows the lens by a third of an octave.
+        let sight = 2. * ((SIGHT_FOV * 0.5).tan() * (-self.ring.lens / 3.).exp2()).atan();
+        CRUISE_FOV.lerp(sight, self.zoom)
+    }
+
+    /// Turn the scope's magnification ring by `detents` of wheel travel, toward more power
+    /// when positive. Returns whether a detent clicked home on this frame.
+    pub fn turn_ring(&mut self, detents: f32, dt: f32) -> bool {
+        self.ring.turn(detents, dt)
     }
 
     fn look(&mut self, delta: Vec2, precision: bool, dt: f32) {
@@ -194,6 +251,10 @@ impl ShipView {
 
     pub fn locked(&self) -> bool {
         self.lock.is_some()
+    }
+    /// Shift is held and the sight is through the scope.
+    pub fn scoped(&self) -> bool {
+        self.scoped
     }
     /// The ship or gun pinned or picked, while she is still a threat.
     pub fn quarry(&self, battle: &Battle) -> Option<Quarry> {
@@ -532,6 +593,20 @@ impl ShipView {
             self.sight_target(ship),
         )
     }
+
+    /// What the rangefinder reads: the point the sight lands on, be it sea, shore or a
+    /// contact, or `None` when the sightline runs on past the sight limit into the sky.
+    pub fn ranged(&self, ship: Vec2, battle: &Battle) -> Option<Vec3> {
+        let pose = self.pose(ship);
+        let ray = pose.forward().as_vec3();
+        let point = self.sight(ship, battle).point;
+        // With nothing on the sightline the sight falls back to the sea at its limit,
+        // which lies below a sightline that never comes down to the water.
+        let along = point - pose.translation;
+        let off_line = (along - ray * along.dot(ray)).length();
+        let short = point.xz().distance(ship) < shipvivor_encounter::SIGHT_LIMIT - 1.;
+        (off_line < 0.5 || short).then_some(point)
+    }
 }
 
 pub fn setup(mut commands: Commands) {
@@ -555,6 +630,12 @@ pub fn setup(mut commands: Commands) {
             far: FAR_CLIP,
             ..default()
         }),
+        // The scope's colour fringes, which `eyepiece` brings up as the lens narrows.
+        ChromaticAberration {
+            intensity: 0.,
+            max_samples: 16,
+            ..default()
+        },
     ));
 }
 
@@ -608,13 +689,14 @@ fn flag_pose(
 }
 
 pub fn mouse_look(
-    motion: Res<AccumulatedMouseMotion>,
+    (motion, wheel): (Res<AccumulatedMouseMotion>, Res<AccumulatedMouseScroll>),
     input: (Res<ButtonInput<KeyCode>>, Res<ButtonInput<MouseButton>>),
     time: Res<Time>,
     run: Res<Campaign>,
     navigation: (Res<PlayerHelm>, Res<crate::state::Encounter>),
     window: Single<(&Window, &CursorOptions)>,
     mut view: ResMut<ShipView>,
+    mut commands: Commands,
 ) {
     let (helm, battle) = navigation;
     let (keys, mouse) = input;
@@ -640,6 +722,15 @@ pub fn mouse_look(
         view.trim(helm.position, &battle, delta);
     } else {
         view.look(delta, shift, time.delta_secs());
+    }
+    // Through the scope the wheel turns its magnification ring, which clicks at each detent.
+    let detents = match wheel.unit {
+        _ if !shift => 0.,
+        MouseScrollUnit::Line => wheel.delta.y,
+        MouseScrollUnit::Pixel => wheel.delta.y / PIXELS_PER_DETENT,
+    };
+    if view.turn_ring(detents, time.delta_secs()) {
+        commands.trigger(crate::sound::Notice(shipvivor_acoustics::Sound::Detent));
     }
     if run.mode == Mode::Patrol {
         view.update_contact(helm.position, &battle);
@@ -709,6 +800,21 @@ pub fn follow(
     }
 }
 
+/// Share of the view's height an aircraft may span as it flies close past the lens.
+const AIRCRAFT_COVER: f32 = 0.3;
+
+/// The share of its size to draw an aircraft at, centred on `at` with wingtips `reach`
+/// metres out, so that one passing close by the lens never blots out the view. It is 1
+/// while the aircraft is clear, then shrinks it as it comes in, so that it never spans
+/// more than `AIRCRAFT_COVER` of the view, however narrow the lens.
+pub fn lens_clearance(pose: &Transform, projection: &Projection, at: Vec3, reach: f32) -> f32 {
+    let Projection::Perspective(lens) = projection else {
+        return 1.;
+    };
+    let room = AIRCRAFT_COVER * pose.translation.distance(at) * (lens.fov * 0.5).tan();
+    (room / reach.max(1e-3)).min(1.)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -730,6 +836,28 @@ mod tests {
             assert!(
                 (shifted.translation - pose.translation).abs_diff_eq(Vec3::new(7., 0., -5.), 1e-5)
             );
+        }
+    }
+
+    #[test]
+    fn an_aircraft_passing_the_lens_shrinks_so_it_never_fills_the_view() {
+        let pose = Transform::from_xyz(0., 20., 40.).looking_at(Vec3::ZERO, Vec3::Y);
+        let reach = 2.9;
+        for fov in [CRUISE_FOV, SIGHT_FOV, 3_f32.to_radians()] {
+            let lens = Projection::Perspective(PerspectiveProjection { fov, ..default() });
+            assert_eq!(
+                lens_clearance(&pose, &lens, Vec3::new(0., 30., -600.), reach),
+                1.
+            );
+            for metres in [40., 12., 3., 0.5] {
+                let at = pose.translation + pose.forward() * metres;
+                let drawn = reach * lens_clearance(&pose, &lens, at, reach);
+                let share = drawn / (metres * (fov * 0.5).tan());
+                assert!(
+                    share <= AIRCRAFT_COVER + 1e-4,
+                    "{share} of the view at {metres} m"
+                );
+            }
         }
     }
 
@@ -763,13 +891,21 @@ mod tests {
         assert!((sight.fov() - CRUISE_FOV).abs() < 1e-6);
     }
 
-    /// The classic Iron Narrows, base C's first gun, and a place with a clear view of her.
+    /// The classic Iron Narrows, base C's first gun, and a place with a clear view of her
+    /// and no ship, such as a coaster at anchor, near the line of sight.
     fn harbour_gun() -> (Battle, Vec2, Quarry) {
         let stage = shipvivor_campaign::Stage::IronNarrows;
         let battle = Battle::for_chart(60., &crate::passage::Passage::of(stage).classic());
         let quarry = Quarry::Battery(2, 0);
         let (at, facing) = quarry.frame(&battle).unwrap();
         let mark = quarry.mark(&battle).unwrap();
+        let unobstructed = |player: Vec2| {
+            battle.raiders().iter().all(|r| {
+                let line = at - player;
+                let along = ((r.body.pos - player).dot(line) / line.length_squared()).clamp(0., 1.);
+                r.body.pos.distance(player + line * along) > 40.
+            })
+        };
         let player = (0..24)
             .flat_map(|k| [300., 500., 800.].map(move |d| (k, d)))
             .find_map(|(k, d): (i32, f32)| {
@@ -777,7 +913,8 @@ mod tests {
                 let player = at + way * d;
                 let mut view = ShipView::default();
                 view.center_on(player, mark);
-                quarry.seen(&view.sight(player, &battle)).then_some(player)
+                (quarry.seen(&view.sight(player, &battle)) && unobstructed(player))
+                    .then_some(player)
             })
             .expect("a clear view of the gun");
         (battle, player, quarry)
@@ -804,7 +941,9 @@ mod tests {
                 let mut off = ShipView::default();
                 off.center_on(player, mark);
                 off.bearing += turn;
-                Quarry::sighted(&off.sight(player, &battle)).is_none()
+                // Open water beside her, not a building of her base.
+                let sight = off.sight(player, &battle);
+                Quarry::sighted(&sight).is_none() && sight.yard.is_none() && sight.factory.is_none()
             })
             .unwrap();
         view.bearing += near;
@@ -834,5 +973,79 @@ mod tests {
         assert!(view.locked());
         assert_eq!(view.quarry(&battle), Some(quarry));
         assert!(view.tracked_point(&battle).unwrap().distance(mark) < 0.01);
+    }
+
+    #[test]
+    fn the_rangefinder_reads_the_gun_and_the_sea_but_not_the_open_sky() {
+        let (battle, player, quarry) = harbour_gun();
+        let (at, _) = quarry.frame(&battle).unwrap();
+        let mut view = ShipView::default();
+        view.center_on(player, quarry.mark(&battle).unwrap());
+        let gun = view.ranged(player, &battle).expect("the gun is ranged");
+        assert!(quarry.seen(&view.sight(player, &battle)));
+        let range = gun.xz().distance(player);
+        assert!(
+            (range - at.distance(player)).abs() < Quarry::GUN_RADIUS + 1.,
+            "{range}"
+        );
+
+        // Looking down over the side, the sea is close aboard.
+        view.look(Vec2::new(0., 1e5), false, 0.);
+        let sea = view.ranged(player, &battle).expect("the sea is ranged");
+        assert!(
+            sea.y.abs() < 0.01 && sea.xz().distance(player) < 100.,
+            "{sea}"
+        );
+
+        // Up into the sky there is nothing to range, unless a crag stands on the sightline.
+        let mut blank = 0;
+        for k in 0..12 {
+            view.bearing = k as f32 * TAU / 12.;
+            view.look(Vec2::new(0., -1e5), false, 0.);
+            let Some(point) = view.ranged(player, &battle) else {
+                blank += 1;
+                continue;
+            };
+            let pose = view.pose(player);
+            let (along, ray) = (point - pose.translation, pose.forward().as_vec3());
+            assert!(
+                (along - ray * along.dot(ray)).length() < 0.5,
+                "{point} is off the line"
+            );
+        }
+        assert!(blank > 0);
+    }
+
+    #[test]
+    fn the_wheel_clicks_the_scope_ring_a_detent_at_a_time_up_to_its_stops() {
+        let dt = 1. / 120.;
+        let mut view = ShipView::default();
+        view.look(Vec2::ZERO, true, 1.);
+        let stock = view.fov();
+        // Three notches at once click home one after another, not all on one frame.
+        let mut clicks = vec![view.turn_ring(3., dt)];
+        clicks.extend((0..60).map(|_| view.turn_ring(0., dt)));
+        let at: Vec<usize> = (0..clicks.len()).filter(|&i| clicks[i]).collect();
+        assert_eq!(at.len(), 3);
+        assert!(
+            at.windows(2)
+                .all(|w| (w[1] - w[0]) as f32 * dt >= DETENT_GAP - 1e-4)
+        );
+        // Three detents double the power.
+        let gain = (stock * 0.5).tan() / (view.fov() * 0.5).tan();
+        assert!((gain - 2.).abs() < 0.01, "{gain}");
+
+        // A long spin stops at the top detent, and the travel past it is lost.
+        let mut more = 0;
+        for i in 0..240 {
+            more += usize::from(view.turn_ring(if i == 0 { 20. } else { 0. }, dt));
+        }
+        assert_eq!(more, (RING_HIGH - 3) as usize);
+        assert!(!view.turn_ring(-0.5, dt) && !view.turn_ring(0.4, dt));
+        assert_eq!(view.ring.detent, RING_HIGH);
+
+        // Back to the cruising lens, the ring's power stays set for the next look.
+        view.look(Vec2::ZERO, false, 1.);
+        assert!((view.fov() - CRUISE_FOV).abs() < 1e-6);
     }
 }

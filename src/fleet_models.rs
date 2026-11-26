@@ -10,9 +10,16 @@ const IRON: Color = Color::srgb(0.16, 0.21, 0.24);
 const RED: Color = Color::srgb(0.80, 0.23, 0.16);
 const GOLD: Color = Color::srgb(1.0, 0.72, 0.23);
 const GLASS: Color = Color::srgb(0.09, 0.22, 0.26);
+/// Canvas lashed over a coaster's deck cargo.
+const TARP: Color = Color::srgb(0.42, 0.45, 0.30);
+/// A coaster flies her colours from her masthead: its distance abaft amidships and its
+/// height above the deck.
+const COASTER_MAST: (f32, f32) = (-2.2, 2.7);
 /// A patrol boat has no mast, so she wears her flag on a staff aft: its distance abaft
 /// amidships and its height above the deck.
 const PATROL_STAFF: (f32, f32) = (5.5, 2.4);
+/// A torpedo boat wears hers on a short staff right aft, over the tube's breech.
+const TORPEDO_BOAT_STAFF: (f32, f32) = (5.1, 1.9);
 
 #[derive(Default)]
 struct Metal(Facets);
@@ -50,6 +57,12 @@ pub fn ensigns(class: EnemyClass) -> Vec<(Vec3, f32)> {
     let mut flags = vec![if class == Patrol {
         let (aft, height) = PATROL_STAFF;
         (Vec3::new(0., d + height - 0.05, aft), 0.42 * s)
+    } else if class == Coaster {
+        let (aft, height) = COASTER_MAST;
+        (Vec3::new(0., d + height - 0.05, aft), 0.3)
+    } else if class == TorpedoBoat {
+        let (aft, height) = TORPEDO_BOAT_STAFF;
+        (Vec3::new(0., d + height - 0.05, aft), 0.3)
     } else {
         (Vec3::new(0., d + 4.55 * s, -0.2 * s), 0.44 * s)
     }];
@@ -60,7 +73,60 @@ pub fn ensigns(class: EnemyClass) -> Vec<(Vec3, f32)> {
     flags
 }
 
+/// Where along the hull each funnel stands, in metres abaft amidships, for the classes
+/// whose deckwork is built around the common bridge. The coaster and the torpedo boat
+/// carry theirs in their own deckwork.
+fn stacks(class: EnemyClass) -> &'static [f32] {
+    match class {
+        Freighter => &[-8.],
+        Coaster | TorpedoBoat => &[],
+        Patrol => &[2.7],
+        // One funnel between the bridge and the after gun.
+        Destroyer => &[2.3],
+        Cruiser => &[3.0, 5.35],
+        Battleship => &[4.4, 9.2],
+        // Close together between the bridge and the superfiring after pair.
+        Commodore => &[0.8, 5.],
+        Parliament => &[-13., 8., 17.],
+        Regent => &[-27., -14., 14., 27.],
+    }
+}
+
+/// The height of a funnel's casing at `z`, under its red band and cap.
+fn stack_height(class: EnemyClass, z: f32) -> f32 {
+    let s = class.profile().gun_scale;
+    if class.is_flagship() {
+        (2.4 + 0.8 * (1. - z.abs() / 20.)) * s
+    } else {
+        1.65 * s
+    }
+}
+
+/// The open lip of each of a class's funnels, in hull coordinates (bow towards -z), and
+/// the width of its mouth. Smoke rises from here.
+pub fn funnels(class: EnemyClass) -> Vec<(Vec3, f32)> {
+    let p = class.profile();
+    let (d, s) = (p.deck, p.gun_scale);
+    match class {
+        Coaster => vec![(Vec3::new(0., d + 1.21, 2.8), 0.4)],
+        TorpedoBoat => vec![(Vec3::new(0., d + 1.36, 0.42), 0.52)],
+        _ => stacks(class)
+            .iter()
+            .map(|&z| {
+                let lip = d + stack_height(class, z) + 0.52 * s;
+                (Vec3::new(0., lip, z), 1.08 * s)
+            })
+            .collect(),
+    }
+}
+
 pub fn superstructure(class: EnemyClass) -> Mesh {
+    if class == Coaster {
+        return coaster();
+    }
+    if class == TorpedoBoat {
+        return torpedo_boat();
+    }
     let mut m = Metal::default();
     let p = class.profile();
     let v = Vec3::new;
@@ -115,27 +181,14 @@ pub fn superstructure(class: EnemyClass) -> Mesh {
         let (aft, height) = PATROL_STAFF;
         m.tier(v(0., d, aft), v(0.13, height, 0.13), 0.7, IRON, PALE);
     }
-    let stacks: &[f32] = match class {
-        Freighter => &[-8.],
-        Patrol => &[2.7],
-        // One funnel between the bridge and the after gun.
-        Destroyer => &[2.3],
-        Cruiser => &[3.0, 5.35],
-        Battleship => &[4.4, 9.2],
-        Parliament => &[-13., 8., 17.],
-        Regent => &[-27., -14., 14., 27.],
-    };
-    for &z in stacks {
+    for &z in stacks(class) {
         // The flagship has split, flared scarlet funnel caps.
         let w = if class.is_flagship() { 1.42 } else { 1.2 };
         let foot = v(0., d, z);
-        let height = if class.is_flagship() {
-            (2.4 + 0.8 * (1. - z.abs() / 20.)) * s
-        } else {
-            1.65 * s
-        };
+        let height = stack_height(class, z);
         m.tier(foot, v(w * s, height, 1.48 * s), 0.89, STEEL, IRON);
-        if class.is_flagship() {
+        // A boss's funnels are banded in pale paint.
+        if class.is_boss() {
             for y in [0.32, 0.78] {
                 m.tier(
                     foot + Vec3::Y * height * y,
@@ -161,7 +214,7 @@ pub fn superstructure(class: EnemyClass) -> Mesh {
             IRON,
         );
     }
-    if matches!(class, Battleship | Parliament | Regent) {
+    if matches!(class, Battleship | Commodore | Parliament | Regent) {
         // Exposed deck-edge armour with light caps and repeated red identification stripes.
         for side in [-1., 1.] {
             for bay in -3_i8..=3 {
@@ -268,15 +321,88 @@ pub fn superstructure(class: EnemyClass) -> Mesh {
     m.0.finish()
 }
 
-pub fn gun(class: EnemyClass) -> Mesh {
+/// A small coastal trader: a raised forecastle, a mast and derrick, a deck cargo of
+/// crates, drums and a tarpaulin-covered stack, and her wheelhouse and funnel aft. The
+/// wheelhouse roof and funnel band wear the same red as every enemy bridge.
+fn coaster() -> Mesh {
+    let mut m = Metal::default();
+    let p = Coaster.profile();
+    let v = Vec3::new;
+    let d = p.deck;
+    // The forecastle stands a little above the well deck.
+    m.tier(v(0., d - 0.05, -2.9), v(1.22, 0.36, 1.25), 0.9, STEEL, PALE);
+    // The mast, its crosstree, and the derrick topped up over the hold.
+    let (mast, height) = COASTER_MAST;
+    m.tier(v(0., d, mast), v(0.14, height, 0.14), 0.65, IRON, PALE);
+    m.tier(v(0., d + 2.0, mast), v(0.95, 0.07, 0.08), 1., PALE, PALE);
+    m.0.tube(
+        v(0., d + 0.35, mast + 0.12),
+        v(0., d + 1.75, -0.55),
+        0.055,
+        0.035,
+        IRON,
+    );
+    // Crates two abreast, lashed down, with canvas over the after stack and drums abaft it.
+    for z in [-1.2, 0.15] {
+        for x in [-0.42, 0.42] {
+            m.tier(v(x, d, z), v(0.78, 0.62, 1.2), 1., GOLD, PALE);
+        }
+        m.tier(v(0., d + 0.62, z), v(1.62, 0.05, 0.16), 1., IRON, IRON);
+    }
+    m.tier(v(0., d + 0.62, -1.15), v(0.82, 0.48, 1.05), 1., GOLD, PALE);
+    m.tier(v(0., d + 0.62, 0.2), v(1.3, 0.42, 1.1), 0.82, TARP, TARP);
+    for x in [-0.8, 0.8] {
+        m.tier(v(x, d, 0.98), v(0.36, 0.5, 0.36), 1., IRON, PALE);
+    }
+    // The wheelhouse aft: steel walls, a band of windows and a red roof.
+    m.tier(v(0., d, 1.8), v(1.55, 0.72, 1.15), 0.94, STEEL, PALE);
+    m.tier(v(0., d + 0.72, 1.8), v(1.4, 0.27, 1.02), 1., GLASS, IRON);
+    m.tier(v(0., d + 0.99, 1.8), v(1.66, 0.11, 1.26), 0.95, RED, PALE);
+    // A stubby funnel behind it, with a red band under the cap.
+    m.tier(v(0., d, 2.8), v(0.44, 0.92, 0.5), 0.92, STEEL, IRON);
+    m.tier(v(0., d + 0.92, 2.8), v(0.42, 0.22, 0.48), 1.06, RED, IRON);
+    m.tier(v(0., d + 1.14, 2.8), v(0.4, 0.07, 0.45), 1., IRON, IRON);
+    m.0.finish()
+}
+
+/// A torpedo boat: low and lean, a turtle-backed forecastle, a small bridge with the
+/// enemy's red roof, one raked funnel and the single long tube on its mount aft,
+/// trained fore and aft, with the ensign staff over its breech.
+fn torpedo_boat() -> Mesh {
+    let mut m = Metal::default();
+    let p = TorpedoBoat.profile();
+    let v = Vec3::new;
+    let d = p.deck;
+    // The turtleback sheds the sea she throws up at speed.
+    m.tier(v(0., d - 0.1, -4.), v(1.5, 0.34, 3.), 0.7, STEEL, PALE);
+    // The bridge: steel walls, a band of windows and a red roof.
+    m.tier(v(0., d, -1.7), v(1.45, 0.7, 1.35), 0.92, STEEL, PALE);
+    m.tier(v(0., d + 0.7, -1.7), v(1.3, 0.26, 1.2), 1., GLASS, IRON);
+    m.tier(v(0., d + 0.96, -1.7), v(1.55, 0.1, 1.45), 0.95, RED, PALE);
+    // A raked funnel abaft it with a red band under the cap.
+    m.tier(v(0., d, 0.3), v(0.62, 1.05, 0.8), 0.86, STEEL, IRON);
+    m.tier(v(0., d + 1.05, 0.38), v(0.56, 0.24, 0.72), 1.04, RED, IRON);
+    m.tier(v(0., d + 1.29, 0.42), v(0.52, 0.07, 0.66), 1., IRON, IRON);
+    // The tube on its turntable, its muzzle forward and its breech over the stern.
+    m.tier(v(0., d, 2.9), v(0.95, 0.32, 0.95), 0.9, IRON, PALE);
+    m.0.tube(v(0., d + 0.5, 1.1), v(0., d + 0.5, 4.7), 0.25, 0.25, IRON);
+    m.tier(v(0., d + 0.25, 4.6), v(0.58, 0.5, 0.3), 1., STEEL, PALE);
+    let (aft, height) = TORPEDO_BOAT_STAFF;
+    m.tier(v(0., d, aft), v(0.11, height, 0.11), 0.7, IRON, PALE);
+    m.0.finish()
+}
+
+/// One of her turrets, with `barrels` guns side by side: from one on a light ship to
+/// four on an ultra heavy one.
+pub fn gun(class: EnemyClass, barrels: u8) -> Mesh {
     let mut m = Metal::default();
     let v = Vec3::new;
-    let stripe = if class.is_flagship() { GOLD } else { RED };
+    // A boss's turrets carry gold bands, the rest red.
+    let stripe = if class.is_boss() { GOLD } else { RED };
     m.tier(Vec3::ZERO, v(2.3, 0.24, 2.3), 1., IRON, IRON);
     m.tier(v(0., 0.22, 0.), v(2.22, 0.72, 2.05), 0.88, STEEL, PALE);
     m.tier(v(0., 0.92, 0.), v(1.98, 0.31, 1.86), 0.86, stripe, stripe);
     m.tier(v(0., 1.22, 0.), v(1.67, 0.14, 1.57), 0.92, PALE, PALE);
-    let barrels = class.profile().barrels;
     for i in 0..barrels {
         let x = (f32::from(i) - f32::from(barrels - 1) * 0.5) * 0.55;
         m.tier(v(x, 0.58, -1.9), v(0.26, 0.27, 2.6), 1., IRON, STEEL);

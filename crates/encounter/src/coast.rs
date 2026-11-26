@@ -79,6 +79,15 @@ impl Landmark {
             (self.body.pos, self.radius * width, top),
         ]
     }
+    /// Its volumes, leaving out a pine islet's stand of trees when `trees` is false.
+    /// The captain's sight passes over the trees, which are nothing the main guns engage.
+    pub fn volumes_seen(&self, trees: bool) -> impl Iterator<Item = (Vec2, f32, f32)> {
+        // The second volume is the islet's upper part: on a pine islet, its trees.
+        let canopy = !trees && self.kind == LandmarkKind::Pines;
+        (self.volumes().into_iter().enumerate())
+            .filter(move |&(i, _)| !(canopy && i == 1))
+            .map(|(_, volume)| volume)
+    }
     pub(super) fn clear(&self, pos: Vec2, margin: f32) -> Vec2 {
         let d = pos - self.body.pos;
         if d.length_squared() < (self.radius + margin).powi(2) {

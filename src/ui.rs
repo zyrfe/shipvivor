@@ -5,7 +5,7 @@ mod title;
 use crate::state::{Campaign, Encounter, PlayerHelm, Screen, TrialCourse};
 use bevy::{prelude::*, ui::RelativeCursorPosition};
 use shipvivor_campaign::{
-    ANCHORAGES, Card, EXITS, EXTRACT_SECONDS, Fittings, LegEnd, MAX_STARS, Perk, Stage,
+    ANCHORAGES, Card, Fittings, LegEnd, MAX_STARS, PATROLS, Perk, ROUNDS, Stage,
 };
 
 const KNOTS_PER_MPS: f32 = 1.94384;
@@ -18,21 +18,27 @@ fn degrees(heading: f32) -> i32 {
 fn knots(metres_per_second: f32) -> f32 {
     metres_per_second * KNOTS_PER_MPS
 }
-fn extraction_rule() -> String {
-    let seconds = EXTRACT_SECONDS as u32;
-    format!(
-        "Extract at {:02}:{:02} or first drydock",
-        seconds / 60,
-        seconds % 60
-    )
+/// The leg's clock as the instruments read it: the time left to beat, or once it has
+/// run out, how far over she is.
+pub(crate) fn clock_reading(run: &Campaign) -> String {
+    let left = run.remaining();
+    let whole = left.abs().ceil() as u32;
+    let sign = if run.late() { "+" } else { "" };
+    format!("{sign}{:02}:{:02}", whole / 60, whole % 60)
+}
+
+/// This release build's number, counted up by `build.rs`. Dev builds have none.
+pub(crate) const BUILD: Option<&str> = option_env!("SHIPVIVOR_BUILD");
+
+/// "Build 42", or "Dev build", as the title screen shows it.
+pub(crate) fn build_label() -> String {
+    BUILD.map_or_else(|| "Dev build".into(), |number| format!("Build {number}"))
 }
 
 pub(crate) fn leg_result(reason: LegEnd) -> &'static str {
     match reason {
         LegEnd::RegentSunk => "Iron Regent sunk",
         LegEnd::BasesDestroyed => "Sector cleared",
-        LegEnd::TimeExpired => "Time expired",
-        LegEnd::Extracted => "Early extraction",
     }
 }
 
@@ -51,6 +57,10 @@ fn navy() -> Color {
 fn trim() -> Color {
     Color::srgb_u8(74, 106, 108)
 }
+/// The fill of the yard-point meter, set apart from the brass of the level bar.
+fn cyan() -> Color {
+    Color::srgb_u8(124, 229, 218)
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Component)]
 pub(crate) enum Action {
     Start,
@@ -60,13 +70,21 @@ pub(crate) enum Action {
     Resume,
     Pause,
     ToggleChart,
-    Extract,
     Card(Card),
     /// Select a section of the ship in the drydock, counted from the bow.
     Module(usize),
+    /// Pick out a refit on the selected section's list, to read its figures.
     Preview(usize),
-    /// Preview work from the hull panel or the yard's stock.
+    /// Order a refit on the selected section's list.
+    Order(usize),
+    /// Pick out work on the hull panel, to read its figures.
+    Pick(shipvivor_campaign::DockJob),
+    /// Order work from the hull panel, or a section from the yard's stock dropped onto
+    /// the ship.
     Draft(shipvivor_campaign::DockJob),
+    /// Take back an order the yard has not yet built.
+    Undo(usize),
+    /// Order the refit picked out, or with none picked out, build every order.
     Confirm,
     /// Leave the drydock for the chart once every work order is spent.
     Sail,
@@ -162,9 +180,6 @@ pub fn intent(
         }
         Screen::Paused if key(KeyCode::Escape) || key(KeyCode::Enter) => Some(Action::Resume),
         Screen::Paused if key(KeyCode::KeyM) => Some(Action::Title),
-        // Extraction ends the leg, so it waits behind the pause menu rather than sitting
-        // one key away from the helm.
-        Screen::Paused if key(KeyCode::KeyE) && run.can_extract() => Some(Action::Extract),
         Screen::Drydock(_) => {
             // The ship is the menu: a click on her selects the section under the cursor.
             let count = run.dock_jobs().len();
@@ -189,14 +204,20 @@ pub fn intent(
             } else if mouse.just_pressed(MouseButton::Left) && !pointer.over_panel {
                 pointer.hovered.map(Action::Module)
             } else if key(KeyCode::Enter) {
-                // With nothing previewed and every order spent, Enter sails.
-                Some(
-                    if run.dock_job().is_none() && run.fittings_remaining() == 0 {
-                        Action::Sail
-                    } else {
-                        Action::Confirm
-                    },
-                )
+                // Enter orders the refit picked out, and one the yard cannot make stays
+                // picked out, its figures saying why: it never sails her by mistake. With
+                // nothing picked out it does what the big button does: locks in the
+                // orders, then sails.
+                Some(if run.dock_job().is_some() {
+                    Action::Confirm
+                } else {
+                    Action::Sail
+                })
+            } else if key(KeyCode::Backspace) {
+                // The last order made is taken back.
+                run.plan()
+                    .and_then(|plan| plan.orders().len().checked_sub(1))
+                    .map(Action::Undo)
             } else if key(KeyCode::Escape) {
                 Some(Action::Module(run.dock_module))
             } else if key(KeyCode::BracketLeft) {
@@ -224,11 +245,9 @@ pub fn intent(
                 .map(Action::Preview)
             }
         }
-        Screen::Refit => {
-            choice.and_then(|i| run.fittings.offers().get(i).copied().map(Action::Card))
-        }
+        Screen::Refit => choice.and_then(|i| run.offers().get(i).copied().map(Action::Card)),
         Screen::Intercept(_) if key(KeyCode::Enter) => Some(Action::Engage),
-        Screen::Chart => choice.map(|i| Action::Depart(EXITS[i].stage)),
+        Screen::Chart => choice.and_then(|i| Some(Action::Depart(run.exits()?[i].stage))),
         Screen::Won(_) | Screen::Lost if key(KeyCode::Enter) => Some(Action::Start),
         _ => None,
     }
@@ -247,6 +266,12 @@ pub fn scale(window: Single<&Window>, run: Res<Campaign>, mut scale: ResMut<UiSc
         .clamp(0.45, 1.);
     let size = if screen == Screen::PassageMap {
         passage_chart::reading_scale(window.size())
+    } else if matches!(screen, Screen::Drydock(_)) {
+        // The yard's panels grow on a large screen, so its controls stay easy to hit.
+        (window.width() / 2000.)
+            .min(window.height() / 1150.)
+            .max(bridge_scale)
+            .min(1.6)
     } else if shows_chart_table(screen) {
         // Leave the table its usual side margins and room for the longest set of orders.
         (window.width() * 0.92 / CHART_TABLE_WIDTH)
@@ -394,7 +419,7 @@ type ScreenKey = (
     u16,
     Option<usize>,
     usize,
-    Option<shipvivor_campaign::DockJob>,
+    (u32, Option<shipvivor_campaign::DockJob>),
 );
 
 pub fn rebuild_screen(
@@ -415,7 +440,7 @@ pub fn rebuild_screen(
         run.fittings_remaining(),
         run.dock_option,
         run.dock_module,
-        run.dock_draft,
+        (run.dock_revision, run.dock_draft),
     );
     if *last == Some(key) {
         return;
@@ -455,7 +480,7 @@ pub fn rebuild_screen(
             root,
             &run,
             chart.0.clone(),
-            art.contact.clone(),
+            (art.contact.clone(), art.order.clone()),
             deck,
             &captain,
         );
@@ -524,8 +549,11 @@ pub fn rebuild_screen(
             text(
                 &mut cmd,
                 panel,
-                if run.stage == Stage::PilotsCut && run.elapsed == 0. {
-                    "PILOT'S CUT   /   DOCKYARD FITTING".into()
+                if run.stage.exit().perk == Perk::FreeFitting && run.elapsed == 0. {
+                    format!(
+                        "{}   /   DOCKYARD FITTING",
+                        run.stage.mission().name.to_uppercase()
+                    )
                 } else {
                     format!("LEVEL {}   /   FIELD REFIT", run.level)
                 },
@@ -540,22 +568,31 @@ pub fn rebuild_screen(
                 16.,
                 pale(),
             );
-            crate::cards::hand(&mut cmd, panel, run.fittings, run.ship.design(), &art);
+            crate::cards::hand(&mut cmd, panel, &run, &art);
         }
         Screen::Chart => {
             text(&mut cmd, panel, "Choose your passage", 26., ink());
+            // Every passage of a round leads to the same flagship, so the chart leaves
+            // it to this heading.
+            let flagship = run
+                .exits()
+                .and_then(|exits| shipvivor_sim::Sector::of(exits[0].stage).boss())
+                .map_or(String::new(), |class| {
+                    format!("\nFlagship: {}", crate::mission_hud::ship_class(class))
+                });
             text(
                 &mut cmd,
                 panel,
                 format!(
-                    "{}   /   {} / {MAX_STARS} stars",
-                    run.origin.mission().name,
-                    run.stars()
+                    "{}   /   {} / {MAX_STARS} stars\nNext: round {} of {ROUNDS}{flagship}",
+                    run.stage.mission().name,
+                    run.stars(),
+                    run.stage.round() + 1
                 ),
                 16.,
                 brass(),
             );
-            for (i, exit) in EXITS.into_iter().enumerate() {
+            for (i, exit) in run.exits().into_iter().flatten().enumerate() {
                 let (stage, required) = (exit.stage, exit.stars);
                 let open = run.stars() >= required;
                 let description = match exit.perk {
@@ -563,20 +600,28 @@ pub fn rebuild_screen(
                     Perk::Repair(hull) => format!("Repair up to {hull} hull"),
                     Perk::FreeFitting => "Free fitting on arrival".to_string(),
                 };
-                let air = if stage.enters_air_cover() {
-                    "\nStrafers here, bombers at Crown Deep"
-                } else {
-                    ""
-                };
-                let detail = format!(
-                    "{}   /   {}{air}",
-                    if open {
-                        "Open".into()
-                    } else {
-                        format!("Locked - needs {required} stars")
-                    },
-                    description
+                // The spanner count on the chart, spelled out: every star at the
+                // lane's rate, the same again for beating the clock, and every base,
+                // before any cargo. Two lines, so the narrow card never breaks a phrase.
+                let pay = format!(
+                    "\nUp to {} points:\n{} a star and the clock, {} a base",
+                    shipvivor_sim::Sector::of(stage).most_points(),
+                    stage.star_points(),
+                    shipvivor_campaign::YARD_POINTS
                 );
+                let air = match (stage.enters_air_cover(), stage.is_last_patrol()) {
+                    (true, true) => "\nStrafers here, bombers at Crown Deep",
+                    (true, false) => "\nStrafers fly from an air station here",
+                    _ => "",
+                };
+                // One fact a line, so a narrow card never wraps the lock or the perk
+                // into the line beside it. The lit card already says it is open.
+                let lock = if open {
+                    String::new()
+                } else {
+                    format!("Locked - needs {required} stars\n")
+                };
+                let detail = format!("{lock}{description}{pay}{air}");
                 action(
                     &mut cmd,
                     panel,
@@ -606,7 +651,7 @@ pub fn rebuild_screen(
             text(
                 &mut cmd,
                 panel,
-                "A 168-metre dreadnought is crossing the deep with her escorts. Break her twelve gold turrets to expose the hull. Change course when a turret flashes. She escapes in fifteen minutes.",
+                "A 168-metre dreadnought is crossing the deep with her escorts. Break her twelve gold turrets to expose the hull. Change course when a turret flashes. She escapes after eight minutes.",
                 18.,
                 ink(),
             );
@@ -615,7 +660,7 @@ pub fn rebuild_screen(
                 panel,
                 Some(Action::Engage),
                 "Intercept     [Enter]",
-                "Repair crews restore up to 40 hull before departure.",
+                "She sails as the yard left her. The crossing mends nothing more.",
                 false,
             );
         }
@@ -640,13 +685,16 @@ pub fn rebuild_screen(
                 38.,
                 ink(),
             );
+            // Stars out of every patrol sailed, the one she ended on included.
+            let sailed = run.stage.round().min(PATROLS) as u8;
             let tally = if run.stage.is_opening() {
                 format!("{} / {MAX_STARS} stars", run.stars())
             } else {
                 format!(
-                    "{} / {} run stars",
+                    "{} / {} run stars   /   round {} of {ROUNDS}",
                     run.previous_stars + run.stars(),
-                    2 * MAX_STARS
+                    sailed * MAX_STARS,
+                    run.stage.round()
                 )
             };
             text(
@@ -664,7 +712,7 @@ pub fn rebuild_screen(
                 17.,
                 pale(),
             );
-            if run.passage.is_some_and(Stage::enters_air_cover) {
+            if run.under_air_cover() {
                 text(
                     &mut cmd,
                     panel,
@@ -692,19 +740,7 @@ pub fn rebuild_screen(
         }
         Screen::Paused => {
             text(&mut cmd, panel, run.stage.mission().name, 26., ink());
-            text(
-                &mut cmd,
-                panel,
-                if run.passage.is_none() {
-                    "Outer Road is always open. Two stars unlock Greywater Sound. Three unlock Pilot's Cut and its enemy air cover."
-                } else if run.passage.is_some_and(Stage::enters_air_cover) {
-                    "Pilot's Cut brings strafers. At Crown Deep the air station also launches bombers."
-                } else {
-                    "Your passage leads to the Iron Regent at Crown Deep."
-                },
-                16.,
-                pale(),
-            );
+            text(&mut cmd, panel, pause_note(&run), 16., pale());
             action(
                 &mut cmd,
                 panel,
@@ -713,21 +749,6 @@ pub fn rebuild_screen(
                 "",
                 false,
             );
-            if run.stage != Stage::CrownDeep {
-                let open = run.can_extract();
-                action(
-                    &mut cmd,
-                    panel,
-                    open.then_some(Action::Extract),
-                    "Extract     [E]",
-                    &if open {
-                        "Ends the leg now.".to_string()
-                    } else {
-                        extraction_rule()
-                    },
-                    false,
-                );
-            }
             action(
                 &mut cmd,
                 panel,
@@ -740,17 +761,45 @@ pub fn rebuild_screen(
         _ => {}
     }
 }
+/// Where this leg stands in the run, and what the yard after it will offer.
+fn pause_note(run: &Campaign) -> String {
+    let round = run.stage.round();
+    if run.stage == Stage::CrownDeep {
+        return if run.under_air_cover() {
+            format!(
+                "Round {round} of {ROUNDS}. The air station here launches bombers as well as strafers."
+            )
+        } else {
+            format!("Round {round} of {ROUNDS}. Sink the Iron Regent: there is no going home.")
+        };
+    }
+    let air = if run.under_air_cover() {
+        " Strafers fly from the air station here."
+    } else {
+        ""
+    };
+    let next = if run.stage.is_last_patrol() {
+        "This yard sails her on to the Iron Regent at Crown Deep."
+    } else {
+        "Each yard charts three passages: open water, a sheltered sound for two stars and a hard passage for three, under enemy air cover. The harder the passage, the more each star pays."
+    };
+    let clock = "Sink every base to finish the patrol. Each base wrecked puts 45 seconds on the clock, and finishing inside it pays a star's worth of yard points.";
+    format!("Round {round} of {ROUNDS}.{air} {clock} {next}")
+}
+
+/// The patrol's instruments. `icons` are the contact mark and the yard's spanner.
 fn hud(
     cmd: &mut Commands,
     root: Entity,
     run: &Campaign,
     chart: Handle<Image>,
-    contact_icon: Handle<Image>,
+    (contact_icon, spanner): (Handle<Image>, Handle<Image>),
     deck: Option<Handle<Image>>,
     captain: &crate::captain::CaptainArt,
 ) {
     if run.screen() == Screen::Sailing {
         crate::mission_hud::spawn(cmd, root, run.stage);
+        crate::slip_badges::spawn(cmd, root, spanner.clone());
         crate::flagship_hud::spawn(cmd, root);
         crate::gun_sight::spawn(cmd, root, run);
         crate::fire_control::spawn(cmd, root, contact_icon);
@@ -790,7 +839,7 @@ fn hud(
         cmd.entity(target).insert(Instrument::Target);
         let spotted = text(cmd, panel, "", 12., ink());
         cmd.entity(spotted).insert(Instrument::Spotting);
-        if run.passage.is_some_and(Stage::enters_air_cover) {
+        if run.under_air_cover() {
             let raid = text(cmd, panel, "", 13., brass());
             cmd.entity(raid).insert(Instrument::AirRaid);
         }
@@ -918,14 +967,17 @@ fn hud(
         let e = text(cmd, heading, "", 14., ink());
         if matches!(inst, Instrument::Navigation)
             && run.screen() == Screen::Sailing
-            && run.stage.is_opening()
+            && run.stage != Stage::CrownDeep
         {
             text(
                 cmd,
                 panel,
                 format!(
-                    "{} stars   Reserve hold\n3 docks   Engine room",
-                    shipvivor_campaign::RESERVE_STARS
+                    "Each star   {} yard points\nEach base   {} yard point, +{:.0} s\nInside the clock   {} yard points",
+                    run.stage.star_points(),
+                    shipvivor_campaign::YARD_POINTS,
+                    shipvivor_campaign::BASE_TIME,
+                    run.stage.star_points()
                 ),
                 12.,
                 pale(),
@@ -990,6 +1042,9 @@ fn hud(
                     BackgroundColor(brass()),
                     ChildOf(track),
                 ));
+                if run.stage != Stage::CrownDeep {
+                    dock_meter_gauge(cmd, panel, run, spanner.clone());
+                }
             }
         }
         cmd.entity(e).insert(inst);
@@ -999,6 +1054,144 @@ fn hud(
 pub struct Notch(i8);
 #[derive(Component)]
 pub struct XpBar;
+
+/// Seconds of the flourish when cargo sunk makes a whole yard point.
+const FLOURISH: f32 = 0.9;
+/// The yard-point meter under the level bar. Cargo sunk ranks up into yard points on
+/// its own: it shows the points banked this leg and how far it is to the next, and
+/// flourishes as each one comes.
+#[derive(Component)]
+pub struct DockMeter {
+    shown: u16,
+    /// Seconds since the last point came, while its flourish plays.
+    since: Option<f32>,
+}
+#[derive(Component)]
+pub struct DockMeterBadge;
+#[derive(Component)]
+pub struct DockMeterCount;
+#[derive(Component)]
+pub struct DockMeterBar;
+
+/// The spanner the yard prices its work with, the yard points cargo has made this leg,
+/// and a bar filling toward the next.
+fn dock_meter_gauge(cmd: &mut Commands, panel: Entity, run: &Campaign, spanner: Handle<Image>) {
+    let points = run.cargo_points();
+    let meter = cmd
+        .spawn((
+            DockMeter {
+                shown: points,
+                since: None,
+            },
+            Node {
+                width: percent(100),
+                align_items: AlignItems::Center,
+                column_gap: px(7),
+                margin: UiRect::top(px(2)),
+                ..default()
+            },
+            ChildOf(panel),
+        ))
+        .id();
+    let badge = cmd
+        .spawn((
+            DockMeterBadge,
+            UiTransform::default(),
+            Node {
+                align_items: AlignItems::Center,
+                column_gap: px(3),
+                ..default()
+            },
+            ChildOf(meter),
+        ))
+        .id();
+    cmd.spawn((
+        ImageNode {
+            image: spanner,
+            color: brass(),
+            ..default()
+        },
+        Node {
+            width: px(13),
+            height: px(13),
+            ..default()
+        },
+        ChildOf(badge),
+    ));
+    let count = text(cmd, badge, points.to_string(), 13., brass());
+    cmd.entity(count).insert(DockMeterCount);
+    let track = cmd
+        .spawn((
+            Node {
+                flex_grow: 1.,
+                height: px(4),
+                ..default()
+            },
+            BackgroundColor(trim()),
+            ChildOf(meter),
+        ))
+        .id();
+    cmd.spawn((
+        DockMeterBar,
+        Node {
+            width: percent(100. * run.cargo_progress()),
+            height: percent(100),
+            ..default()
+        },
+        BackgroundColor(cyan()),
+        ChildOf(track),
+    ));
+}
+
+/// Fill the yard-point meter, and flourish when a whole point comes: the spanner and
+/// its count spring up and flash, and the bar brims white before it drains to what is
+/// left over toward the next.
+pub fn dock_meter(
+    time: Res<Time>,
+    run: Res<Campaign>,
+    mut meters: Query<&mut DockMeter>,
+    mut badges: Query<&mut UiTransform, With<DockMeterBadge>>,
+    mut counts: Query<(&mut Text, &mut TextColor), With<DockMeterCount>>,
+    mut bars: Query<(&mut Node, &mut BackgroundColor), With<DockMeterBar>>,
+) {
+    let points = run.cargo_points();
+    let mut since = None;
+    for mut meter in &mut meters {
+        if points > meter.shown {
+            meter.since = Some(0.);
+        }
+        meter.shown = points;
+        meter.since = meter
+            .since
+            .map(|t| t + time.delta_secs().min(0.05))
+            .filter(|&t| t < FLOURISH);
+        since = meter.since;
+    }
+    let flash = |base: Color, t: f32| base.mix(&Color::WHITE, (1. - t / 0.45).max(0.));
+    for mut pose in &mut badges {
+        let spring = since.map_or(0., |t| 0.6 * (-6. * t).exp() * (14. * t).sin());
+        pose.scale = Vec2::splat(1. + spring);
+    }
+    for (mut label, mut color) in &mut counts {
+        if label.0 != points.to_string() {
+            label.0 = points.to_string();
+        }
+        color.0 = since.map_or(brass(), |t| flash(brass(), t));
+    }
+    let progress = run.cargo_progress();
+    for (mut node, mut fill) in &mut bars {
+        let (share, ink) = match since {
+            Some(t) => {
+                let drain = ((t - 0.45) / 0.3).clamp(0., 1.);
+                let drain = drain * drain * (3. - 2. * drain);
+                (1. + (progress - 1.) * drain, flash(cyan(), t))
+            }
+            None => (progress, cyan()),
+        };
+        node.width = percent(100. * share);
+        fill.0 = ink;
+    }
+}
 pub fn gauges(
     helm: Res<PlayerHelm>,
     run: Res<Campaign>,
@@ -1056,10 +1249,18 @@ pub fn instruments(
                         u8::from(g.destroyed_drydock),
                         run.hits,
                         run.sunk,
-                        if run.can_extract() {
-                            "Extraction open     [Esc]".to_string()
+                        if run.late() {
+                            format!(
+                                "Past the clock  {}  : a base wrecked wins back {:.0} s",
+                                clock_reading(&run),
+                                shipvivor_campaign::BASE_TIME
+                            )
                         } else {
-                            extraction_rule()
+                            format!(
+                                "Clear it inside  {}  for {} more points",
+                                clock_reading(&run),
+                                run.stage.star_points()
+                            )
                         }
                     )
                 }
@@ -1092,7 +1293,11 @@ pub fn instruments(
             Instrument::Spotting => {
                 let contact = view.sight(helm.position, &battle);
                 if let Some(class) = contact.ship {
-                    let name = crate::mission_hud::ship_class(class);
+                    let class_name = crate::mission_hud::ship_class(class);
+                    // Her weight before her class: a light cruiser, a heavy battleship.
+                    let name = (contact.ship_id)
+                        .and_then(|id| battle.ship(id))
+                        .map_or_else(|| class_name.to_owned(), |r| r.weight().name(class_name));
                     if let Some(live) = contact.director {
                         format!(
                             "{name}  /  {}",
@@ -1109,9 +1314,7 @@ pub fn instruments(
                     }
                 } else if let Some((base, factory)) = contact.factory {
                     let port = &battle.ports()[base];
-                    let condition = if port.factories()[factory].live()
-                        && port.yard_state() != shipvivor_encounter::YardState::Ruined
-                    {
+                    let condition = if port.factories()[factory].live() {
                         "Online"
                     } else {
                         "Offline"
@@ -1136,8 +1339,13 @@ pub fn instruments(
                 } else if let Some((base, index)) = contact.shore_turret {
                     let gun = &battle.ports()[base].turrets()[index];
                     let id = crate::mission_hud::letter(base);
+                    let kind = if gun.heavy_battery() {
+                        "Heavy battery"
+                    } else {
+                        "Shore turret"
+                    };
                     format!(
-                        "Shore turret {id}{}  /  {} {}\nMount strength   {} / {}",
+                        "{kind} {id}{}  /  {} {}\nMount strength   {} / {}",
                         index + 1,
                         gun.barrels,
                         if gun.barrels == 1 {
@@ -1148,25 +1356,43 @@ pub fn instruments(
                         gun.strength(),
                         gun.max_strength()
                     )
-                } else if let Some(index) = contact.yard {
+                } else if let Some((index, slip)) = contact.yard {
                     let port = &battle.ports()[index];
-                    let id = crate::mission_hud::letter(index);
-                    if port.yard_state() == shipvivor_encounter::YardState::Ruined {
-                        format!("Base {id} destroyed\nLaunch slip closed")
+                    let dock = &port.docks()[slip];
+                    let base = crate::mission_hud::letter(index);
+                    // A base with two slips numbers them.
+                    let id = if port.docks().len() > 1 {
+                        format!("{base}{}", slip + 1)
                     } else {
-                        let (class, cost) = port.build_order();
-                        let order = if port.stock >= cost {
+                        base.to_owned()
+                    };
+                    let factories = format!(
+                        "Factories online   {} / {}",
+                        port.live_factories(),
+                        port.factories().len()
+                    );
+                    if port.wrecked() {
+                        format!("Base {base} destroyed\nLaunch slip closed")
+                    } else if dock.rebuilding().is_some() {
+                        match port.rebuild_eta() {
+                            Some(eta) => format!(
+                                "Drydock {id}  /  Wrecked\nFactories rebuilding   {:.0} s\n{factories}",
+                                eta.ceil()
+                            ),
+                            None => format!("Drydock {id}  /  Wrecked\nLaunch slip closed"),
+                        }
+                    } else {
+                        let (class, cost) = dock.order();
+                        let order = if dock.laid() >= cost {
                             "Funded"
                         } else {
                             "Building"
                         };
                         format!(
-                            "Drydock {id}  /  {:?}\n{order}  {}\nSteel   {} stored / {cost} needed\nFactories online   {} / {}",
-                            port.yard_state(),
+                            "Drydock {id}  /  {:?}\n{order}  {}\nSteel   {} laid / {cost} needed\n{factories}",
+                            dock.state(),
                             crate::mission_hud::ship_class(class),
-                            port.stock,
-                            port.live_factories(),
-                            port.factories().len()
+                            dock.laid(),
                         )
                     }
                 } else {
@@ -1184,23 +1410,42 @@ pub fn instruments(
                 }
             }
             Instrument::Impact => {
-                use shipvivor_encounter::Impact;
-                match battle.salvo_report() {
+                use shipvivor_encounter::{Ammo, Impact};
+                let report = match battle.salvo_report() {
                     Some(Impact::Bounced) => "RICOCHET",
                     Some(Impact::Embedded) => "ARMOR HELD",
                     Some(Impact::Penetrated) => "PENETRATION",
                     Some(Impact::PassedThrough) => "OPEN BREACH",
                     Some(Impact::Overpenetrated) => "OVERPENETRATION",
                     None => "",
+                };
+                // Her plate is holding HE that the AP aboard would open. The call sits on
+                // a line of its own and stands until Q switches the crew to AP.
+                if battle.ap_called_for() && run.fittings.armor_piercing() && guns.ammo == Ammo::He
+                {
+                    format!("{report}\nPRESS Q TO USE AP")
+                } else {
+                    report.into()
                 }
-                .into()
             }
             Instrument::Flagship => {
-                if let Some(ship) = battle.raiders().iter().find(|s| s.class.is_flagship()) {
+                let boss = crate::mission_hud::ship_class(
+                    battle
+                        .boss()
+                        .unwrap_or(shipvivor_encounter::EnemyClass::Parliament),
+                )
+                .to_uppercase();
+                if let Some(ship) = battle.boss_ship() {
                     let n = ship.live_guns();
                     let range = helm.position.distance(ship.body.pos).round() as u32;
                     let name = crate::mission_hud::ship_class(ship.class).to_uppercase();
-                    if n > 0 {
+                    if !ship.class.is_flagship() {
+                        let (flooded, fatal) = ship.vessel().flooding();
+                        format!(
+                            "{name}    {range} m\n{n} / {} turrets firing  /  {flooded} / {fatal} flooded\nSink her to clear the patrol",
+                            ship.guns().len()
+                        )
+                    } else if n > 0 {
                         format!(
                             "{name}    {range} m\n{n} / {} gun mounts intact\nBreak the gold turrets",
                             ship.guns().len()
@@ -1215,15 +1460,15 @@ pub fn instruments(
                     let left = (due - battle.at_sea()).max(0.).ceil() as u32;
                     if left > 0 {
                         format!(
-                            "BRASS PARLIAMENT    fitting out\nPuts to sea in {}:{:02}",
+                            "{boss}    fitting out\nPuts to sea in {}:{:02}",
                             left / 60,
                             left % 60
                         )
                     } else {
-                        "BRASS PARLIAMENT    fitting out\nPutting to sea".into()
+                        format!("{boss}    fitting out\nPutting to sea")
                     }
                 } else {
-                    "BRASS PARLIAMENT SUNK".into()
+                    format!("{boss} SUNK")
                 }
             }
             Instrument::Experience => format!(
@@ -1285,7 +1530,7 @@ pub fn instruments(
                         ""
                     };
                     format!(
-                        "W/S  Engine   A/D  Rudder   C  Astern\nX  Pin / release   T  Gun / torpedo\nMouse  Look   RMB + drag  Trim lock\n{weapon}\nShift  Scope{ammo}   Tab  Chart   Esc  Pause"
+                        "W/S  Engine   A/D  Rudder   C  Astern\nX  Pin / release   T  Gun / torpedo\nMouse  Look   RMB + drag  Trim lock\n{weapon}\n1-9  Turret   Z  Manual / Scope / Auto\nShift  Scope{ammo}   Tab  Chart   Esc  Pause"
                     )
                 }
             }

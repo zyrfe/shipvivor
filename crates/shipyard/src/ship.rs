@@ -9,8 +9,15 @@ const SCAR: f32 = 0.35;
 const SPILL: f32 = 0.5;
 /// A detonating magazine strikes each neighbour with this share of its module's structure.
 const BLAST: f32 = 0.5;
-/// Speed lost when the whole hull is flooded. A part-flooded hull loses its share.
-const FLOOD_DRAG: f32 = 0.5;
+/// Speed lost for each share of her length full of water: water aboard is weight to
+/// drag through the sea, so one module of six flooded costs her three tenths of her
+/// speed.
+const FLOOD_DRAG: f32 = 1.8;
+/// Share of a module the sea pours into through a torpedo's hole before the crew
+/// shores it, and the share a second it pours in at. It comes in faster than any pump
+/// can clear it, so a module struck twice before it is pumped out floods.
+pub const BREACH: f32 = 0.9;
+const RUSH: f32 = 0.5;
 /// Seconds of reserve power regained for each second an engine runs.
 const RECHARGE: f32 = 0.5;
 /// Strength of each stretch of stock side plating, as a share of its module's structure.
@@ -20,6 +27,10 @@ const PLATE: f32 = 0.5;
 const BARE: f32 = 2.;
 /// Share of a round's damage that wears the plate when the plate turns it aside.
 const SCUFF: f32 = 0.25;
+/// Share of a module the sea fills each second once it is holed to nothing. A module
+/// less battered leaks by the cube of the share of its structure lost, so a sound one
+/// stays dry and a stock crew's pumps hold one down to about a third of its structure.
+pub const INFLOW: f32 = 0.15;
 /// The bays stand this far inside their module's bulkheads, fore and aft, in metres.
 const BAY_INSET: f32 = 0.6;
 /// Share of their module's beam the bays fill, about the centreline. The rest is
@@ -130,6 +141,7 @@ fn crosses(a: (f32, f32), b: (f32, f32), low: (f32, f32), high: (f32, f32)) -> b
     enter <= leave
 }
 
+#[derive(Clone)]
 pub(crate) struct Gear {
     pub health: f32,
     pub max: f32,
@@ -139,11 +151,18 @@ pub(crate) struct Gear {
 
 /// The condition of one module: the watertight space inside, and the four stretches
 /// of side plating over it, each worn by the hits that land on it.
+#[derive(Clone)]
 pub struct Compartment {
     pub(crate) structure: f32,
     pub(crate) ceiling: f32,
     pub(crate) max: f32,
     pub(crate) wrecked: bool,
+    /// Share of the space full of water, from 0 to 1. A module fills once it is
+    /// battered enough to leak faster than the pumps can clear it.
+    pub(crate) water: f32,
+    /// Share of the space the sea has still to pour in through a hole below the
+    /// waterline before it is shored.
+    pub(crate) inrush: f32,
     pub(crate) gear: Vec<Gear>,
     /// Strength left in each panel, in [`Panel::index`] order.
     pub(crate) plates: [f32; 4],
@@ -170,6 +189,8 @@ impl Compartment {
             ceiling: max,
             max,
             wrecked: false,
+            water: 0.,
+            inrush: 0.,
             gear,
             plates: [plate; 4],
             plate_max: plate,
@@ -208,6 +229,31 @@ impl Compartment {
     pub fn wrecked(&self) -> bool {
         self.wrecked
     }
+    /// Share of the space full of water, from 0 to 1. A flooded module is full.
+    pub fn water(&self) -> f32 {
+        if self.wrecked {
+            1_f32.max(self.water)
+        } else {
+            self.water
+        }
+    }
+    /// Holed below the waterline, with the sea still pouring in.
+    pub fn breached(&self) -> bool {
+        self.inrush > 0.
+    }
+    /// The sea pouring in through a breach this step of `dt` seconds, taken from what
+    /// it has still to let in.
+    pub(crate) fn pour(&mut self, dt: f32) -> f32 {
+        let poured = (RUSH * dt).min(self.inrush);
+        self.inrush -= poured;
+        poured
+    }
+    /// Share of the space the sea fills each second through her damage: nothing while
+    /// she is sound, and [`INFLOW`] once she is holed to nothing.
+    pub fn inflow(&self) -> f32 {
+        let lost = (1. - self.structure / self.max).clamp(0., 1.);
+        INFLOW * lost.powi(3)
+    }
     /// Structure left, from 0 to 1.
     pub fn soundness(&self) -> f32 {
         self.structure / self.max
@@ -221,6 +267,7 @@ impl Design {
     }
 }
 
+#[derive(Clone)]
 pub struct Ship {
     design: Arc<Design>,
     pub(crate) holds: Vec<Compartment>,
@@ -268,6 +315,13 @@ impl Ship {
 
     pub fn design(&self) -> &Arc<Design> {
         &self.design
+    }
+
+    /// Fit pumps that clear water at `pumps` times a stock crew's rate.
+    pub fn fit_pumps(&mut self, pumps: f32) {
+        if self.design.pumps() != pumps {
+            Arc::make_mut(&mut self.design).fit_pumps(pumps);
+        }
     }
 
     /// Refit her plating and harden her fittings, at sea or in the dock. Every panel
@@ -320,6 +374,11 @@ impl Ship {
             };
         }
         Ok(())
+    }
+
+    /// Rebuild the turrets on one module, leaving its compartment as it stands.
+    pub fn rearm(&mut self, at: usize, gunhouse: crate::Gunhouse) -> Result<(), Fault> {
+        Arc::make_mut(&mut self.design).rearm(at, gunhouse)
     }
 
     pub fn replace_module(&mut self, at: usize, module: Module) -> Result<(), Fault> {
@@ -392,15 +451,17 @@ impl Ship {
             .map(|berth| (berth, self.state(berth)))
     }
 
-    fn wrecked_share(&self) -> f32 {
-        let wrecked: f32 = (0..self.holds.len())
-            .filter(|&i| self.holds[i].wrecked)
-            .map(|i| self.design.module_length(i))
+    /// Share of her length full of water, counting each module by how full it is.
+    pub fn water_aboard(&self) -> f32 {
+        let water: f32 = (0..self.holds.len())
+            .map(|i| self.holds[i].water() * self.design.module_length(i))
             .sum();
-        wrecked / self.design.length()
+        water / self.design.length()
     }
 
-    /// Share of normal speed available at the telegraph. Flooding drags on the main drive.
+    /// Share of normal speed available at the telegraph. Water aboard drags on the
+    /// main drive, which loses [`FLOOD_DRAG`] of its speed for each share of her
+    /// length full.
     pub fn propulsion(&self) -> f32 {
         if self.foundered {
             return 0.;
@@ -410,7 +471,7 @@ impl Ship {
             return Self::RESERVE_SPEED;
         }
         running / self.design.count(Component::Engine) as f32
-            * (1. - FLOOD_DRAG * self.wrecked_share())
+            * (1. - FLOOD_DRAG * self.water_aboard()).max(0.)
     }
 
     /// Output of the engines still turning, counted in engines.
@@ -617,6 +678,20 @@ impl Ship {
         losses
     }
 
+    /// A torpedo's hole below the waterline, `aft` metres behind the bow tip. The sea
+    /// pours into the module there, [`BREACH`] of it at a rush, before the crew can shore
+    /// the hole, and her pumps clear it afterwards. A ship that does not leak, or a
+    /// module already flooded, takes no more.
+    pub fn breach(&mut self, aft: f32) {
+        if self.foundered || !self.design.leaks {
+            return;
+        }
+        let hold = &mut self.holds[self.design.module_at(aft)];
+        if !hold.wrecked {
+            hold.inrush = (hold.inrush + BREACH).min(1.);
+        }
+    }
+
     /// A hit on one fitted component. The hull behind it is not harmed.
     pub fn strike_fitting(&mut self, berth: Berth, damage: f32) -> Vec<Loss> {
         let mut losses = Vec::new();
@@ -662,6 +737,8 @@ impl Ship {
             self.detonate(module, losses);
         } else if hold.structure <= 0. {
             hold.wrecked = true;
+            hold.water = 1.;
+            hold.inrush = 0.;
             losses.push(Loss::Wrecked(module));
         }
     }
@@ -671,6 +748,8 @@ impl Ship {
         hold.ceiling -= hold.structure * SCAR;
         hold.structure = 0.;
         hold.wrecked = true;
+        hold.water = 1.;
+        hold.inrush = 0.;
         losses.push(Loss::Detonated(module));
         losses.push(Loss::Wrecked(module));
         let blast = hold.max * BLAST;
@@ -686,7 +765,7 @@ impl Ship {
 
     /// The ship goes down once enough of its vital length is wrecked. On an armoured
     /// ship only the citadel counts, so wrecked ends cannot sink it.
-    fn settle(&mut self, losses: &mut Vec<Loss>) {
+    pub(crate) fn settle(&mut self, losses: &mut Vec<Loss>) {
         if self.foundered {
             return;
         }

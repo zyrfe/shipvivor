@@ -221,6 +221,7 @@ fn describe(
         run.elapsed,
         run.remaining()
     );
+    let _ = writeln!(s, "- {}", crate::ui::build_label());
     // `SHIPVIVOR_SEED` with this value charts the same waters again.
     let _ = writeln!(s, "- Run seed: {}", run.seed);
     let set = battle.currents().set().flow;
@@ -273,11 +274,11 @@ fn describe(
     if let Screen::Drydock(_) = screen {
         let _ = writeln!(
             s,
-            "- Drydock: section {}, option {:?} = {:?}, {} work orders left",
+            "- Drydock: section {}, option {:?} = {:?}, {} points left",
             run.dock_module,
             run.dock_option,
             run.dock_job(),
-            run.fittings_remaining()
+            run.points()
         );
     }
     let _ = writeln!(

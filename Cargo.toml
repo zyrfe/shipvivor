@@ -29,9 +29,12 @@ shipvivor-ensign = { path = "crates/ensign" }
 shipvivor-shipyard = { path = "crates/shipyard" }
 shipvivor-acoustics = { path = "crates/acoustics" }
 shipvivor-sea = { path = "crates/sea" }
+shipvivor-sim = { path = "crates/sim" }
 bevy = { version = "=0.20.1", default-features = false, features = [
     "std", "async_executor", "multi_threaded", "bevy_log", "bevy_winit", "x11",
     "bevy_pbr", "bevy_ui_render", "default_font", "keyboard", "mouse", "bevy_audio",
+    # The scope's colour fringes (`ChromaticAberration`).
+    "bevy_post_process",
 ] }
 # Encodes dev captures. Bevy's own `png` feature would rebuild most of Bevy.
 png = "0.18"

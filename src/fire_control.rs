@@ -415,7 +415,14 @@ mod tests {
     fn triangle_clears_the_rendered_deckwork_in_chase_and_scope() {
         let size = Vec2::new(1120., 666.);
         for class in [
-            Patrol, Destroyer, Freighter, Cruiser, Battleship, Parliament,
+            Patrol,
+            TorpedoBoat,
+            Destroyer,
+            Freighter,
+            Coaster,
+            Cruiser,
+            Battleship,
+            Parliament,
         ] {
             let mesh = crate::fleet_models::superstructure(class);
             let mast = mesh.get_aabb().unwrap().max().y;

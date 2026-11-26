@@ -1,5 +1,7 @@
 //! Lookouts and aircraft share sightings across the arcade sector.
-use super::{Battle, Iceberg, Landmark, Port, YardState, bearing, footprint};
+use super::{
+    Battle, Iceberg, Landmark, Port, SCRAMBLE_ALERT, bearing, footprint, ranging::RANGEFINDER,
+};
 use glam::Vec2;
 
 pub const AIR_SIGHT: f32 = 320.;
@@ -23,6 +25,8 @@ pub struct Spotter {
     pub(super) health: u16,
     /// Shot down, and gone from the base's lookout for the rest of the leg.
     downed: bool,
+    /// Moored at its base, which has not yet been roused. It takes off when it is.
+    moored: bool,
     // Once a contact drops, a brief gap in cover cannot repeatedly raise the alarm.
     lost_for: f32,
     center: Vec2,
@@ -39,8 +43,8 @@ impl Spotter {
             center: port.body.pos + axis * (145. + 18. * index as f32),
             axis,
             span: Vec2::new(208. + 14. * index as f32, 115.),
-            phase: [2.76, 0.9, 4.48][index],
-            rate: [0.15, -0.14, 0.13][index],
+            phase: [2.76, 0.9, 4.48][index % 3] + 0.7 * (index / 3) as f32,
+            rate: [0.15, -0.14, 0.13][index % 3],
             position: Vec2::ZERO,
             heading: 0.,
             altitude: 0.,
@@ -50,6 +54,7 @@ impl Spotter {
             way: Vec2::ZERO,
             health: super::flak::SPOTTER_STRENGTH,
             downed: false,
+            moored: !port.roused,
             lost_for: LOST_SECONDS,
         };
         flight.fly_circuit(0.);
@@ -81,9 +86,10 @@ impl Spotter {
     pub fn position_3d(&self) -> glam::Vec3 {
         glam::Vec3::new(self.position.x, self.altitude, self.position.y)
     }
-    /// Still flying. A floatplane shot down stays down for the rest of the leg.
+    /// Still flying. A floatplane shot down stays down for the rest of the leg, and one
+    /// whose base sleeps has not taken off.
     pub fn airborne(&self) -> bool {
-        !self.downed
+        !self.downed && !self.moored
     }
     pub(super) fn shoot_down(&mut self) {
         self.downed = true;
@@ -120,16 +126,46 @@ fn sees(
 }
 
 impl Battle {
-    pub fn spotters(&self) -> &[Spotter; 3] {
+    pub fn spotters(&self) -> &[Spotter] {
         &self.spotters
     }
 
     pub(super) fn update_lookouts(&mut self, dt: f32, player: Vec2) {
+        // Every base keeps a lookout from its tallest standing works, roused or not, and
+        // its guns keep one while they stand. A sleeping yard that sights the ship is
+        // roused, and stirs the stages before it.
+        let shore_reports: Vec<bool> = self
+            .ports
+            .iter()
+            .map(|port| {
+                port.lookout().is_some_and(|(at, top)| {
+                    sees(
+                        at,
+                        top,
+                        player,
+                        BASE_SIGHT,
+                        &self.ports,
+                        &self.landmarks,
+                        &self.floe.icebergs,
+                    )
+                })
+            })
+            .collect();
+        for (port, &seen) in self.ports.iter_mut().zip(&shore_reports) {
+            port.alarm |= seen;
+        }
+        self.rouse();
         for (plane, port) in self.spotters.iter_mut().zip(&self.ports) {
             if plane.downed {
                 continue;
             }
-            if port.yard_state() == YardState::Ruined {
+            if plane.moored {
+                if !port.roused || port.wrecked() {
+                    continue;
+                }
+                plane.moored = false;
+            }
+            if port.wrecked() {
                 // The patrol leaves on its present heading when its home signal goes dark.
                 plane.way = shipvivor_compass::direction(plane.heading) * 35.;
                 plane.position += plane.way * dt;
@@ -156,18 +192,11 @@ impl Battle {
             );
             plane.observe(dt, seen);
         }
-        let shore_reports = self.ports.each_ref().map(|port| {
-            port.yard_state() != YardState::Ruined
-                && sees(
-                    port.yard_position(),
-                    port.yard_top(),
-                    player,
-                    BASE_SIGHT,
-                    &self.ports,
-                    &self.landmarks,
-                    &self.floe.icebergs,
-                )
-        });
+        // A base at alert passes word of her too, whether or not it can see her.
+        let alerted: Vec<Vec2> = (0..self.ports.len())
+            .filter(|&i| self.at_alert(i) && !self.ports[i].wrecked())
+            .map(|i| self.ports[i].body.pos)
+            .collect();
         let transmitters = self
             .spotters
             .iter()
@@ -176,21 +205,23 @@ impl Battle {
             .chain(
                 self.ports
                     .iter()
-                    .zip(shore_reports)
-                    .filter(|(_, seen)| *seen)
-                    .map(|(port, _)| port.yard_position()),
-            );
+                    .zip(&shore_reports)
+                    .filter(|(port, seen)| **seen && port.roused)
+                    .filter_map(|(port, _)| port.lookout().map(|(at, _)| at)),
+            )
+            .chain(alerted.iter().copied());
         let hears_report = |at: Vec2| {
             transmitters
                 .clone()
                 .any(|source| at.distance_squared(source) <= RADIO_RANGE * RADIO_RANGE)
         };
-        let shore_contacts = self
+        let shore_contacts: Vec<bool> = self
             .ports
-            .each_ref()
-            .map(|p| p.yard_state() != YardState::Ruined && hears_report(p.body.pos));
+            .iter()
+            .map(|p| p.roused && p.lookout().is_some() && hears_report(p.body.pos))
+            .collect();
         for ship in &mut self.raiders {
-            ship.has_contact = ship.class != super::EnemyClass::Freighter
+            ship.has_contact = !ship.class.is_merchant()
                 && (hears_report(ship.body.pos)
                     || sees(
                         ship.body.pos,
@@ -205,8 +236,100 @@ impl Battle {
                 ship.last_sighting = Some(player);
             }
         }
-        for (port, contact) in self.ports.iter_mut().zip(shore_contacts) {
-            port.has_contact = contact;
+        // A heavy battery has her through its own rangefinder, which sees as far as its
+        // guns reach, or by its base's word. A floatplane reporting her, or another base's
+        // lookout, spots the fall of its shot for it.
+        let in_radio =
+            |at: Vec2, source: Vec2| at.distance_squared(source) <= RADIO_RANGE * RADIO_RANGE;
+        let batteries: Vec<Vec<(bool, bool)>> = (self.ports.iter().enumerate())
+            .map(|(i, port)| {
+                // A battery fights on whatever becomes of its yard.
+                let standing = port.roused;
+                let guns = port.turrets.iter();
+                guns.map(|gun| {
+                    if !gun.heavy_battery() || !gun.live() || !standing {
+                        return (false, false);
+                    }
+                    let at = gun.position(&port.body);
+                    let (ports, land, ice) = (&self.ports, &self.landmarks, &self.floe.icebergs);
+                    let sighted = sees(at, RANGEFINDER, player, gun.reach(), ports, land, ice);
+                    let aloft = (self.spotters.iter())
+                        .any(|plane| plane.reporting && in_radio(port.body.pos, plane.position));
+                    let ashore = (self.ports.iter().zip(&shore_reports).enumerate()).any(
+                        |(j, (other, &seen))| {
+                            j != i
+                                && seen
+                                && other.roused
+                                && in_radio(port.body.pos, other.body.pos)
+                        },
+                    );
+                    (sighted, aloft || ashore)
+                })
+                .collect()
+            })
+            .collect();
+        let alert: Vec<bool> = (0..self.ports.len()).map(|i| self.at_alert(i)).collect();
+        for (((port, contact), guns), alert) in (self.ports.iter_mut())
+            .zip(shore_contacts)
+            .zip(batteries)
+            .zip(alert)
+        {
+            // A base at alert keeps her in its plot, whether or not it can see her.
+            port.has_contact = contact || (alert && port.roused);
+            for (gun, (sighted, spotted)) in port.turrets.iter_mut().zip(guns) {
+                if let Some(plot) = &mut gun.ranging {
+                    plot.in_sight = sighted || contact;
+                    plot.spotted = spotted;
+                }
+            }
+        }
+    }
+
+    /// Rouse each stage whose turn has come: every base of the stage before it is
+    /// wrecked, or one of its bases, or a base of a later stage, has sighted the ship or
+    /// been shelled. A stage once roused stays so. A stage roused because the one before
+    /// it collapsed is scrambled: it goes to alert for [`SCRAMBLE_ALERT`] seconds, its
+    /// squadron sails at once for where she is, and its harriers take off as soon as they
+    /// may.
+    pub(super) fn rouse(&mut self) {
+        let stages = self
+            .ports
+            .iter()
+            .map(|p| usize::from(p.stage()) + 1)
+            .max()
+            .unwrap_or(0);
+        // The deepest stage that has had word of the ship at first hand.
+        let alarmed = self
+            .ports
+            .iter()
+            .filter(|p| p.alarm)
+            .map(|p| usize::from(p.stage()) + 1)
+            .max()
+            .unwrap_or(0);
+        for port in &mut self.ports {
+            port.alarm = false;
+        }
+        for stage in 0..stages {
+            let cleared = stage == 0
+                || self
+                    .ports
+                    .iter()
+                    .filter(|p| usize::from(p.stage()) + 1 == stage)
+                    .all(|p| p.wrecked());
+            if cleared || stage < alarmed {
+                let now = self.at_sea;
+                for (i, port) in self.ports.iter_mut().enumerate() {
+                    if usize::from(port.stage()) != stage {
+                        continue;
+                    }
+                    // The base before it has just collapsed: sound the alarm here.
+                    if stage > 0 && cleared && !port.roused() && !port.wrecked() {
+                        self.alert_until[i] = now + SCRAMBLE_ALERT;
+                        self.harrier_due[i] = now;
+                    }
+                    port.rouse(now);
+                }
+            }
         }
     }
 }
@@ -225,13 +348,156 @@ mod tests {
             Vec2::new(72., 164.),
         ]);
         chart.islets.clear();
-        chart.harbours = std::array::from_fn(|i| HarbourSite {
-            pos: Vec2::X * (i as f32 * 5000.),
-            heading: 0.,
-        });
+        chart.harbours = (0..3)
+            .map(|i| HarbourSite {
+                pos: Vec2::X * (i as f32 * 5000.),
+                heading: 0.,
+                works: i as u8 + 1,
+                stage: 0,
+            })
+            .collect();
         let mut battle = Battle::for_chart(1000., &chart);
         battle.raiders.clear();
         battle
+    }
+
+    /// Three bases far apart, one to a stage, the first nearest the origin.
+    fn staged_sector() -> Battle {
+        let mut chart = Chart::classic([
+            Vec2::new(0., -152.),
+            Vec2::new(168., -424.),
+            Vec2::new(496., -300.),
+            Vec2::new(416., 76.),
+            Vec2::new(72., 164.),
+        ]);
+        chart.islets.clear();
+        chart.harbours = (0..3)
+            .map(|i| HarbourSite {
+                pos: Vec2::X * (i as f32 * 5000.),
+                heading: 0.,
+                works: 1,
+                stage: i as u8,
+            })
+            .collect();
+        let mut battle = Battle::for_chart(1000., &chart);
+        battle.raiders.clear();
+        battle
+    }
+
+    #[test]
+    fn later_stages_sleep_until_the_stage_before_falls() {
+        use crate::{Aim, Hull, MainShell, Orders};
+        let mut b = staged_sector();
+        let away = Vec2::new(2500., 3000.);
+        let orders = Orders {
+            player: away,
+            heading: 0.,
+            speed: 0.,
+            hull: Hull::CRUISER,
+            aim: Aim::Hold,
+            reload: 3.2,
+            shell: MainShell::STOCK,
+        };
+        for _ in 0..600 {
+            b.step(0.1, &orders);
+        }
+        let roused: Vec<bool> = b.ports.iter().map(Port::roused).collect();
+        assert_eq!(roused, [true, false, false]);
+        // A sleeping yard builds, but holds what it builds on its slip and keeps its
+        // floatplane on the water.
+        assert!(b.ports[0].stock > 2);
+        assert!(b.ports[1..].iter().all(|p| p.stock > 2));
+        assert!(b.spotters[0].airborne());
+        assert!(b.spotters[1..].iter().all(|p| !p.airborne()));
+        // The first stage falls, and the second stirs. The third sleeps on.
+        b.ports[0].wreck();
+        b.step(0.1, &orders);
+        let roused: Vec<bool> = b.ports.iter().map(Port::roused).collect();
+        assert_eq!(roused, [true, true, false]);
+        assert!(b.spotters[1].airborne() && !b.spotters[2].airborne());
+        for _ in 0..600 {
+            b.step(0.1, &orders);
+        }
+        assert!(b.ports[2].stock > 2 && !b.ports[2].roused());
+    }
+
+    #[test]
+    fn squadrons_grow_up_the_channel_and_a_collapse_scrambles_the_next_at_her() {
+        use crate::{Aim, Hull, MainShell, Orders, SQUADRON_TIERS};
+        use EnemyClass::*;
+        let squadron = |b: &Battle, base: usize| -> Vec<EnemyClass> {
+            (b.raiders.iter())
+                .filter(|r| r.moored_at() == Some(base))
+                .map(|r| r.class)
+                .collect()
+        };
+        // Heavier up the channel, and heavier again deeper into the run. Each lies in
+        // its harbour from the start: none is added afterwards.
+        let light = staged_sector().with_squadrons(0);
+        assert_eq!(squadron(&light, 1), [Patrol, Patrol, Destroyer]);
+        assert_eq!(squadron(&light, 2), [Destroyer, Destroyer, Cruiser]);
+        let heavy = staged_sector().with_squadrons(SQUADRON_TIERS + 4);
+        assert_eq!(squadron(&heavy, 0), [Destroyer]);
+        assert_eq!(squadron(&heavy, 1), [Destroyer, Cruiser, Cruiser]);
+        assert_eq!(squadron(&heavy, 2), [Cruiser, Battleship, Battleship]);
+
+        let mut b = staged_sector().with_squadrons(0);
+        let away = Vec2::new(2500., 3000.);
+        let orders = Orders {
+            player: away,
+            heading: 0.,
+            speed: 0.,
+            hull: Hull::CRUISER,
+            aim: Aim::Hold,
+            reload: 3.2,
+            shell: MainShell::STOCK,
+        };
+        for _ in 0..50 {
+            b.step(0.1, &orders);
+        }
+        assert!((0..3).all(|i| !b.at_alert(i)));
+        // The first base collapses: the second goes to alert and its whole squadron
+        // weighs for where she is, though none of it can see her. The third sleeps on.
+        b.ports[0].wreck();
+        b.step(0.1, &orders);
+        assert!(b.at_alert(1) && !b.at_alert(2));
+        assert!(b.ports[1].roused() && b.ports[1].has_contact);
+        assert!(!b.ports[2].roused());
+        let scrambled: Vec<u64> = (b.raiders.iter())
+            .filter(|r| !r.class.is_merchant() && r.attack.is_none())
+            .filter(|r| r.body.pos.distance(b.ports[1].body.pos) < 400.)
+            .map(|r| r.body.id)
+            .collect();
+        assert_eq!(scrambled.len(), 3);
+        let range = |b: &Battle, id: u64| b.ship(id).unwrap().body.pos.distance(away);
+        let start: Vec<f32> = scrambled.iter().map(|&id| range(&b, id)).collect();
+        // Once they have weighed, swung round and worked up to speed, they close her.
+        for _ in 0..400 {
+            b.step(0.1, &orders);
+        }
+        for (&id, start) in scrambled.iter().zip(start) {
+            let ship = b.ship(id).unwrap();
+            assert!(ship.moored_at().is_none() && ship.last_sighting == Some(away));
+            assert!(range(&b, id) < start - 60., "{:?} held back", ship.class);
+        }
+        // The alarm stands down after a minute, and the squadron hunts on from its fix.
+        for _ in 0..(SCRAMBLE_ALERT * 10.) as usize {
+            b.step(0.1, &orders);
+        }
+        assert!(!b.at_alert(1));
+    }
+
+    #[test]
+    fn a_sleeping_yard_that_sights_the_ship_rouses_its_stage_and_those_before() {
+        let mut b = staged_sector();
+        // In plain sight of the last yard, and far from the others.
+        let player = b.ports[2].dock_position(0) + Vec2::NEG_Y * 600.;
+        b.update_lookouts(0.1, player);
+        assert!(b.ports.iter().all(Port::roused));
+        assert!(b.ports[2].has_contact);
+        // Once roused, a yard stays so after it loses the ship.
+        b.update_lookouts(0.1, Vec2::splat(-9000.));
+        assert!(b.ports.iter().all(Port::roused));
     }
 
     #[test]
@@ -248,7 +514,8 @@ mod tests {
         b.update_lookouts(0.1, Vec2::splat(-3000.));
         assert!(!b.ports[0].has_contact && !b.raiders[0].has_contact);
         assert_eq!(b.raiders[0].last_sighting, Some(player));
-        b.ports[0].damage_yard(u16::MAX);
+        b.ports[0].wreck();
+        b.ports[0].silence();
         let before = b.spotters[0].position;
         b.update_lookouts(4., player);
         assert!(b.spotters[0].position.distance(before) > 100.);
@@ -304,17 +571,21 @@ mod tests {
             b.wing_guns.clear();
             let mut rounds = 0;
             let mut damage = 0;
+            // A shore gun's layers scatter at the edge of its reach, so a round that
+            // falls close aboard shows it reaches her as well as a hit does.
+            let mut close = 0;
             for _ in 0..60 * 9 {
                 damage += b.step(1. / 60., &orders).damage;
-                rounds += b
-                    .effects()
-                    .iter()
-                    .filter(|fx| fx.kind == EffectKind::Muzzle(battery) && fx.age == 0.)
-                    .count();
+                let fresh = b.effects().iter().filter(|fx| fx.age == 0.);
+                for fx in fresh {
+                    rounds += usize::from(fx.kind == EffectKind::Muzzle(battery));
+                    let fell = matches!(fx.kind, EffectKind::Splash | EffectKind::Burst);
+                    close += usize::from(fell && fx.body.pos.distance(player) < 40.);
+                }
             }
             assert!(
-                rounds > 0 && damage > 0,
-                "{battery:?} from {range} m: {rounds} rounds, {damage} damage"
+                rounds > 0 && (damage > 0 || (shore && close > 0)),
+                "{battery:?} from {range} m: {rounds} rounds, {damage} damage, {close} close"
             );
         }
     }
@@ -329,7 +600,8 @@ mod tests {
         assert!(!gun.covers(&b.ports[0].body, player));
 
         for port in &mut b.ports {
-            port.damage_yard(u16::MAX);
+            port.wreck();
+            port.silence();
         }
         let observer = Vec2::new(100., -625.);
         b.spawn(EnemyClass::Destroyer, observer, observer + Vec2::X);

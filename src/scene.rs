@@ -29,8 +29,27 @@ pub struct DeckFitting {
     z: f32,
     anchor: Anchor,
 }
+impl DeckFitting {
+    /// Fitted along the hull itself, rather than on the bridge or the machinery.
+    pub(crate) fn on_hull(&self) -> bool {
+        matches!(self.anchor, Anchor::Hull)
+    }
+}
 #[derive(Component)]
 pub struct SectionModel(DockModule, usize);
+impl SectionModel {
+    /// The module of `design` this model stands on, if it is aboard.
+    pub(crate) fn place(&self, design: &shipvivor_shipyard::Design) -> Option<usize> {
+        let kind = self.0.build();
+        design
+            .modules()
+            .iter()
+            .enumerate()
+            .filter(|(_, module)| module.same_kind(&kind))
+            .nth(self.1)
+            .map(|(i, _)| i)
+    }
+}
 /// Gear on a yard section that keeps its own proportions when the beam is widened.
 #[derive(Component)]
 pub struct Unscaled;
@@ -40,15 +59,21 @@ pub fn refit_hull(
     mut meshes: ResMut<Assets<Mesh>>,
     mut ship: Single<&mut Mesh3d, With<Ship>>,
     mut fittings: Query<(&DeckFitting, &mut Transform), Without<SectionModel>>,
-    mut sections: Query<(&SectionModel, &mut Transform, &mut Visibility, Has<Unscaled>)>,
+    mut sections: Query<(
+        &SectionModel,
+        &mut Transform,
+        &mut Visibility,
+        Has<Unscaled>,
+    )>,
     mut previous: Local<(
         Option<std::sync::Arc<shipvivor_shipyard::Design>>,
-        Option<shipvivor_campaign::DockJob>,
+        Option<u32>,
         Option<Hull>,
     )>,
 ) {
     let installed = run.ship.design();
-    let preview = run.dock_job();
+    // Orders in the yard refit her in place, so each counts as a new design.
+    let preview = Some(run.dock_revision);
     if previous.1 == preview
         && previous
             .0
@@ -75,13 +100,7 @@ pub fn refit_hull(
         }
     }
     for (model, mut pose, mut shown, unscaled) in &mut sections {
-        let index = design
-            .modules()
-            .iter()
-            .enumerate()
-            .filter(|(_, module)| **module == model.0.build())
-            .nth(model.1);
-        *shown = if let Some((i, _)) = index {
+        *shown = if let Some(i) = model.place(&design) {
             let (fore, aft) = design.span(i);
             pose.translation.z = (fore + aft) * 0.5 - Hull::CRUISER.bow;
             pose.scale.x = if unscaled { 1. } else { offsets.beam_scale };
@@ -94,6 +113,15 @@ pub fn refit_hull(
 
 #[derive(Component)]
 pub struct Turret(Station);
+impl Turret {
+    /// Its place in the design's list of gun stations.
+    pub(crate) fn index(&self) -> usize {
+        self.0.index()
+    }
+}
+/// The barbette a raised turret stands on.
+#[derive(Component)]
+pub struct Barbette(Station);
 
 #[derive(Component)]
 pub struct DeckRack(Rack);
@@ -120,6 +148,11 @@ pub fn place_racks(
 
 #[derive(Component)]
 pub struct WingPosition(usize);
+impl WingPosition {
+    pub(crate) fn index(&self) -> usize {
+        self.0
+    }
+}
 
 /// A wing gun barrel shown when the fitted mounts carry this many barrels.
 #[derive(Component)]
@@ -134,7 +167,8 @@ pub struct GunTubes {
 pub fn place_turrets(
     battle: Res<Encounter>,
     run: Res<Campaign>,
-    mut mounts: Query<(&Turret, &mut Transform, &mut Visibility)>,
+    mut mounts: Query<(&Turret, &mut Transform, &mut Visibility), Without<Barbette>>,
+    mut barbettes: Query<(&Barbette, &mut Transform, &mut Visibility), Without<Turret>>,
 ) {
     let yard = matches!(run.screen(), crate::state::Screen::Drydock(_));
     let preview = yard.then(|| run.display_design().gun_stations());
@@ -155,11 +189,33 @@ pub fn place_turrets(
         };
         *shown = Visibility::Inherited;
         pose.translation.x = position.abeam;
+        pose.translation.y = TURRET_DECK + position.lift();
         pose.translation.z = -position.fore;
         pose.scale = Vec3::splat(fittings.for_station(&position).round().mount_scale());
         pose.rotation = Quat::from_rotation_y(-bearing);
     }
+    // A raised turret stands on a drum as high as its lift.
+    for (barbette, mut pose, mut shown) in &mut barbettes {
+        let i = barbette.0.index();
+        let station = match &preview {
+            Some(positions) => positions.get(i).copied(),
+            None => battle.main_mounts().get(i).map(|mount| mount.position),
+        };
+        let Some(position) = station.filter(|p| p.lift() > 0.) else {
+            shown.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        shown.set_if_neq(Visibility::Inherited);
+        let width = 2.5 * fittings.for_station(&position).round().mount_scale();
+        let foot = TURRET_DECK - 0.3;
+        let height = position.lift() + 0.3;
+        *pose = Transform::from_xyz(position.abeam, foot + 0.5 * height, -position.fore)
+            .with_scale(Vec3::new(width, height, width));
+    }
 }
+
+/// Height of the deck a main turret's ring stands on.
+const TURRET_DECK: f32 = 1.72;
 
 /// Every wing gun station has a model. Only the guns fitted are shown.
 pub fn place_wing_guns(
@@ -181,7 +237,8 @@ pub fn place_wing_guns(
             };
             pose.translation.z = -fore;
             pose.translation.x = x;
-            pose.rotation = Quat::from_rotation_y(-x.signum() * std::f32::consts::FRAC_PI_2);
+            let home = shipvivor_encounter::WingGun::home(gun.0);
+            pose.rotation = Quat::from_rotation_y(-home);
             continue;
         }
         let Some(fitted) = battle.wing_guns().get(gun.0) else {
@@ -210,6 +267,11 @@ pub fn place_wing_guns(
 /// A light AA mount: the tub it stands in, what trains, and what elevates.
 #[derive(Component)]
 pub struct AaPosition(usize);
+impl AaPosition {
+    pub(crate) fn index(&self) -> usize {
+        self.0
+    }
+}
 #[derive(Component)]
 pub struct AaTrain(usize);
 #[derive(Component)]
@@ -668,7 +730,16 @@ pub fn setup(
     }
     let house = meshes.add(crate::ordnance::cruiser_gunhouse());
     let gunmetal = materials.add(StandardMaterial::default());
+    let ring = meshes.add(Cylinder::new(0.5, 1.).mesh().resolution(20));
     for station in Station::SLOTS {
+        commands.spawn((
+            Barbette(station),
+            Mesh3d(ring.clone()),
+            MeshMaterial3d(steel.clone()),
+            Transform::default(),
+            Visibility::Hidden,
+            ChildOf(ship),
+        ));
         let mount = commands
             .spawn((
                 Turret(station),
@@ -734,10 +805,11 @@ pub fn setup(
 
     for i in 0..shipvivor_encounter::Secondaries::MOST_PER_SIDE * 2 {
         let (x, fore) = shipvivor_encounter::WingGun::station(i);
+        // On the deck, which rises towards the stem under the bow pair.
         let wing = commands
             .spawn((
                 WingPosition(i),
-                Transform::from_xyz(x, 1.64, -fore),
+                Transform::from_xyz(x, hull::deck_height(-fore) + 0.09, -fore),
                 Visibility::Hidden,
                 ChildOf(ship),
             ))
@@ -791,7 +863,7 @@ pub fn setup(
             .id();
         // The bridge wings carry their own pair. The others stand on a column raised
         // from the main deck to the same height.
-        if i / 2 != 1 {
+        if !AaMount::on_bridge_wing(i) {
             let deck = hull::deck_height(-fore);
             commands.spawn((
                 Mesh3d(drum.clone()),

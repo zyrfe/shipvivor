@@ -53,8 +53,10 @@ impl Cast {
             Sound::MainGun => gun(0.009, 0.42, 3.4).cast(rng),
             Sound::SecondaryGun => gun(0.0035, 0.16, 1.6).cast(rng),
             Sound::RaiderGun => gun(0.005, 0.22, 2.).cast(rng),
-            Sound::ShoreGun => gun(0.012, 0.5, 3.8).cast(rng),
-            Sound::Splash => splash(rng),
+            // A shore gun pushes twice as long as her own main battery: any longer and
+            // its blast would ring like a struck drum.
+            Sound::ShoreGun => gun(0.017, 0.65, 4.6).cast(rng),
+            Sound::Splash => splash(rng, 1.),
             Sound::Burst => burst(rng),
             Sound::Trumpet => trumpet(),
             Sound::Wreck => wreck(rng),
@@ -77,6 +79,20 @@ impl Cast {
             Sound::UnrollChart => chart_paper(rng, true),
             Sound::RollChart => chart_paper(rng, false),
             Sound::Klaxon => klaxon(rng),
+            Sound::Chime => chime(),
+            // A heavy gun pushes half as long again as the light shore guns.
+            Sound::HeavyGun => gun(0.034, 0.9, 7.).cast(rng),
+            Sound::Column => splash(rng, 1.8),
+            Sound::TorpedoLaunch => torpedo_launch(rng),
+            Sound::TorpedoAlarm => torpedo_alarm(rng),
+            Sound::Torpedoed => torpedoed(rng),
+            Sound::Detent => detent(rng),
+            Sound::EngineHurt => engine_hurt(rng),
+            Sound::EngineStall => engine_stall(rng),
+            Sound::Hammer => hammer(rng),
+            Sound::Torch => torch(rng),
+            Sound::Ratchet => ratchet(rng),
+            Sound::Tick => tick(rng, take % 2 == 1),
         }
         .map(finish);
         let longest = layers.iter().map(Vec::len).max().unwrap_or(0);
@@ -276,22 +292,27 @@ impl Gun {
 /// each third of an octave from 100 Hz to 5 kHz and half their power below 650 Hz.
 /// The blow and the column going up are loud for half a second and low in pitch. What
 /// went up then comes down, 8 dB quieter and far brighter, for a second and more.
-fn splash(rng: &mut Rng) -> [Vec<f32>; 3] {
-    const SECS: f32 = 2.3;
-    let up = rng.within(0.28, 0.4);
-    let down = rng.within(0.55, 0.75);
+///
+/// `heft` is 1 for a shell of a cruiser's size. A heavier shell throws its column up for
+/// longer and lower in pitch, and the water is longer coming down.
+fn splash(rng: &mut Rng, heft: f32) -> [Vec<f32>; 3] {
+    let secs = 2.3 * heft;
+    let up = rng.within(0.28, 0.4) * heft;
+    let down = rng.within(0.55, 0.75) * heft;
+    let (pour, settle) = (0.3 * heft, 0.45 * heft);
     // How much water is going up, and how much of it is coming back down.
     let column = |t: f32| (t / 0.02).min(1.) * (-t / up).exp();
-    let rain = |t: f32| ((t - down) / 0.3).clamp(0., 1.) * (-(t - down - 0.3).max(0.) / 0.45).exp();
+    let rain =
+        |t: f32| ((t - down) / pour).clamp(0., 1.) * (-(t - down - pour).max(0.) / settle).exp();
     // Spray hisses as the column rises, then droplets patter back as it collapses.
     let mut hiss = Biquad::high_pass(3000., 0.7);
-    let mut spray = render(SECS, |t| {
+    let mut spray = render(secs, |t| {
         hiss.run(rng.noise()) * (0.3 * (t / 0.15).min(1.) * column(t) + 0.2 * rain(t))
     });
     scatter(
         &mut spray,
-        170,
-        (0.1, 2.),
+        (170. * heft) as usize,
+        (0.1, 2. * heft),
         (0.003, 0.009),
         rng,
         |at| 0.5 * column(at) + rain(at),
@@ -299,11 +320,14 @@ fn splash(rng: &mut Rng) -> [Vec<f32>; 3] {
     );
     // The column is a roar with its weight low down. The fall is the same water in
     // smaller pieces.
-    let mut roar = [Biquad::high_pass(150., 0.7), Biquad::low_pass(1500., 0.6)];
+    let mut roar = [
+        Biquad::high_pass(150. / heft, 0.7),
+        Biquad::low_pass(1500. / heft, 0.6),
+    ];
     let mut fall = Biquad::band_pass(1600., 0.5);
-    let mut slap = Biquad::band_pass(1100., 0.7);
-    let (mut low, soften) = (0_f32, pole(1000.));
-    let body = render(SECS, |t| {
+    let mut slap = Biquad::band_pass(1100. / heft, 0.7);
+    let (mut low, soften) = (0_f32, pole(1000. / heft));
+    let body = render(secs, |t| {
         let water = roar[0].run(rng.noise());
         low += soften * (roar[1].run(water) - low);
         0.6 * slap.run(rng.noise()) * (-t / 0.045).exp()
@@ -311,9 +335,10 @@ fn splash(rng: &mut Rng) -> [Vec<f32>; 3] {
             + 0.9 * fall.run(rng.noise()) * rain(t)
     });
     // The shell's own blow on the water, and the hollow it leaves closing.
-    let mut deep = Biquad::low_pass(160., 0.7);
-    let thud = render(1.2, |t| {
-        0.5 * blast(t, 0.012) + (t / 0.003).min(1.) * 6. * deep.run(rng.noise()) * (-t / 0.16).exp()
+    let mut deep = Biquad::low_pass(160. / heft, 0.7);
+    let thud = render(1.2 * heft, |t| {
+        0.5 * blast(t, 0.012 * heft)
+            + (t / 0.003).min(1.) * 6. * deep.run(rng.noise()) * (-t / (0.16 * heft)).exp()
     });
     [spray, body, thud]
 }
@@ -1076,6 +1101,50 @@ fn upgrade() -> [Vec<f32>; 3] {
     layers.map(hall)
 }
 
+/// A small brass handbell struck once by its clapper. A handbell is tuned so that its
+/// strongest overtone is the twelfth, three times its note, which is what makes it
+/// sweet where a ship's bell clangs. Measured handbells put their next modes near five
+/// and eight times the note, out of tune with it, and these and the knock of the clapper
+/// are gone within a few hundredths of a second. The twelfth fades in a quarter of a
+/// second and the note itself rings on. No bell is quite round, so each mode is a pair
+/// a few hertz apart, and the note shimmers as it dies away.
+fn chime() -> [Vec<f32>; 3] {
+    /// The note: E6, a sixth above the upgrade's upper note.
+    const NOTE: f32 = 1318.5;
+    /// Each mode as a multiple of the note, its loudness, the seconds it rings, and how
+    /// far apart its pair stands in hertz.
+    const MODES: [(f32, f32, f32, f32); 5] = [
+        (1., 1., 0.62, 1.7),
+        (3.012, 0.42, 0.24, 2.6),
+        (5.21, 0.14, 0.065, 4.),
+        (8.37, 0.08, 0.032, 0.),
+        (11.9, 0.04, 0.018, 0.),
+    ];
+    /// The clapper meets the lip: its knock's centre, and the seconds it lasts.
+    const KNOCK: (f32, f32) = (5200., 0.0016);
+    /// Seconds rendered, and the last stretch of them in which the ring is let go.
+    const SECS: f32 = 2.2;
+    const RELEASE: f32 = 0.45;
+    let mut rng = Rng::new(0xB311);
+    let mut knock = Biquad::band_pass(KNOCK.0, 1.3);
+    let count = (SECS * RATE) as usize;
+    let mut layers = [(); 3].map(|_| vec![0.; count]);
+    for n in 0..count {
+        let t = n as f32 / RATE;
+        let release = ((SECS - t) / RELEASE).min(1.);
+        let fade = release * release * (3. - 2. * release);
+        let onset = (t / 0.0012).min(1.);
+        for (ratio, loud, ring, split) in MODES {
+            let hz = NOTE * ratio;
+            let pair = (TAU * hz * t).sin() + 0.35 * (TAU * (hz + split) * t + 1.1).sin();
+            let x = loud * onset * (-t / ring).exp() * pair * fade;
+            layers[usize::from(ratio < 4.)][n] += x;
+        }
+        layers[0][n] += 0.9 * knock.run(rng.noise()) * (-t / KNOCK.1).exp();
+    }
+    layers.map(hall)
+}
+
 /// A klaxon: a motor spins a toothed wheel against a stud on a steel diaphragm, and a
 /// horn throws out the rattle. Its note is the teeth going by, so it climbs as the
 /// motor gathers speed and sags as it runs down, which is the ah-OO-gah. Three
@@ -1124,6 +1193,665 @@ fn klaxon(rng: &mut Rng) -> [Vec<f32>; 3] {
         layers[0].push(edge.run(thrown));
         layers[1].push(plate[1].run(body) + 1.2 * thrown);
         layers[2].push(0.);
+    }
+    layers
+}
+
+/// A torpedo leaving a deck tube. A small charge of powder or a blast of air throws it
+/// out: a dull cough with no crack in it, for the tube is open at the muzzle and the
+/// torpedo is a loose plug in it, and a hiss as the gas follows it out. A third of a
+/// second later the torpedo strikes the water nearly flat, a short slap with a little
+/// spray, far less water than a shell throws up.
+fn torpedo_launch(rng: &mut Rng) -> [Vec<f32>; 3] {
+    const SECS: f32 = 1.4;
+    let drop = rng.within(0.28, 0.38);
+    let gas = |t: f32| (t / 0.004).min(1.) * (0.8 * (-t / 0.05).exp() + 0.35 * (-t / 0.22).exp());
+    let entry = |t: f32| {
+        let after = t - drop;
+        if after < 0. {
+            0.
+        } else {
+            (after / 0.008).min(1.) * (-after / 0.16).exp()
+        }
+    };
+    let mut hiss = Biquad::high_pass(2600., 0.7);
+    let mut air = Biquad::band_pass(5200., 0.6);
+    let mut wet = Biquad::high_pass(3200., 0.7);
+    let mut detail = render(SECS, |t| {
+        (0.8 * hiss.run(rng.noise()) + 0.3 * air.run(rng.noise())) * gas(t)
+            + 0.5 * wet.run(rng.noise()) * entry(t)
+    });
+    // What it threw up patters back.
+    scatter(
+        &mut detail,
+        60,
+        (drop + 0.05, drop + 0.8),
+        (0.002, 0.006),
+        rng,
+        |at| (-(at - drop) / 0.25).exp(),
+        |_, colour, t| (TAU * (2000. + 4000. * colour) * t * (1. + 15. * t)).sin(),
+    );
+    let mut cough = [Biquad::band_pass(380., 0.9), Biquad::low_pass(900., 0.7)];
+    let mut slap = Biquad::band_pass(1000., 0.8);
+    let body = render(SECS, |t| {
+        let puff = cough[0].run(rng.noise());
+        let puff = cough[1].run(puff);
+        let puff = puff * (t / 0.003).min(1.) * (-t / 0.07).exp();
+        let after = t - drop;
+        let hit = slap.run(rng.noise())
+            * if after < 0. {
+                0.
+            } else {
+                (-after / 0.035).exp()
+            };
+        2.4 * puff + 0.6 * blast(t, 0.005) + 0.9 * hit
+    });
+    let mut deep = Biquad::low_pass(140., 0.7);
+    let thud = render(0.9, |t| {
+        let after = t - drop;
+        let entry = if after < 0. {
+            0.
+        } else {
+            0.5 * (-after / 0.06).exp()
+        };
+        let push = (t / 0.004).min(1.) * (-t / 0.09).exp();
+        0.7 * blast(t, 0.009) + 4. * deep.run(rng.noise()) * (push + entry)
+    });
+    [detail, body, thud]
+}
+
+/// The bridge's alarm bell. An electric bell's clapper is a hammer on a spring that a
+/// magnet pulls against the gong and lets go, fifteen to twenty times a second, so the
+/// gong never stops ringing between blows and its note trills. Ships' alarm bells of
+/// six or eight inches ring near 1 kHz, with partials out of tune above it near 2.4, 4
+/// and 5.7 times the note, the lowest of them split in a pair, for no gong is quite
+/// round. The bell is held for a second and a half and rings on as it is let go.
+fn torpedo_alarm(rng: &mut Rng) -> [Vec<f32>; 3] {
+    const NOTE: f32 = 1046.5;
+    /// Each mode as a multiple of the note, how hard a blow sets it ringing and the
+    /// seconds it rings.
+    const MODES: [(f32, f32, f32); 5] = [
+        (1., 1., 0.5),
+        (2.41, 0.6, 0.3),
+        (2.46, 0.3, 0.3),
+        (4.05, 0.38, 0.14),
+        (5.72, 0.2, 0.06),
+    ];
+    const BLOWS: f32 = 17.;
+    const HELD: f32 = 1.5;
+    const SECS: f32 = 2.4;
+    let count = (SECS * RATE) as usize;
+    let mut layers = [(); 3].map(|_| vec![0.; count]);
+    let keep = MODES.map(|(_, _, ring)| (-1. / (ring * RATE)).exp());
+    let mut ringing = [0_f32; MODES.len()];
+    let mut knock = Biquad::band_pass(4200., 1.2);
+    let (mut next, mut click) = (0.005, 0_f32);
+    for n in 0..count {
+        let t = n as f32 / RATE;
+        if t >= next && t < HELD {
+            let weight = rng.within(0.75, 1.);
+            for (mode, (_, struck, _)) in ringing.iter_mut().zip(MODES) {
+                *mode += weight * struck;
+            }
+            click += weight;
+            next += 1. / (BLOWS * rng.within(0.96, 1.04));
+        }
+        // The hammer's knock on the gong is over at once.
+        click *= (-1. / (0.0006 * RATE)).exp();
+        layers[0][n] += 0.5 * knock.run(rng.noise()) * click;
+        for (i, (ratio, _, _)) in MODES.into_iter().enumerate() {
+            ringing[i] *= keep[i];
+            let x = ringing[i] * (TAU * NOTE * ratio * t).sin();
+            layers[usize::from(ratio < 2.)][n] += x;
+        }
+    }
+    layers.map(hall)
+}
+
+/// A torpedo bursting against her side under water. The sea carries the blast to her
+/// as one heavy shove with no crack in it, felt through her frames as much as heard,
+/// and her plating answers it with a low clang. The column it threw up comes down over
+/// her a second later, a heavy rain of water on her deck that lasts a second and more.
+/// The scope's magnification ring clicking into a detent. A sprung steel ball rides up
+/// the side of its notch in the brass ring and drops into the next: a faint scuff, then a
+/// short, high tick from the ball and its spring over a softer knock from the ring and
+/// the tube it turns on. All of it is gone within a few hundredths of a second.
+fn detent(rng: &mut Rng) -> [Vec<f32>; 3] {
+    /// The ball and spring, then the ring and tube: each tone, how loud it is, and the
+    /// seconds it rings.
+    const TICK: [(f32, f32, f32); 3] = [
+        (3150., 1., 0.006),
+        (5400., 0.55, 0.0035),
+        (7900., 0.3, 0.002),
+    ];
+    const KNOCK: [(f32, f32, f32); 3] =
+        [(540., 0.5, 0.016), (1180., 1., 0.012), (1950., 0.6, 0.008)];
+    /// Seconds the ball rides up before it drops, and the seconds rendered.
+    const RIDE: f32 = 0.009;
+    const SECS: f32 = 0.11;
+    let count = (SECS * RATE) as usize;
+    let mut layers = [(); 3].map(|_| vec![0.; count]);
+    let mut scuff = Biquad::band_pass(2600., 1.2);
+    let mut snap = Biquad::band_pass(4300., 0.9);
+    let tune = rng.within(0.96, 1.04);
+    let weight = rng.within(0.85, 1.);
+    for n in 0..count {
+        let t = n as f32 / RATE;
+        let grain = rng.noise();
+        if t < RIDE {
+            // The ball scuffing up the ramp, louder as it climbs.
+            layers[0][n] = 0.06 * t / RIDE * scuff.run(grain);
+            continue;
+        }
+        let s = t - RIDE;
+        let mut tick = 0.8 * snap.run(grain) * (-s / 0.0007).exp();
+        for (hz, loud, ring) in TICK {
+            tick += weight * loud * (TAU * hz * tune * s).sin() * (-s / ring).exp();
+        }
+        layers[0][n] = tick;
+        for (hz, loud, ring) in KNOCK {
+            layers[1][n] += weight * loud * (TAU * hz * tune * s).sin() * (-s / ring).exp();
+        }
+    }
+    layers
+}
+
+/// One beat of the bridge clock. A clock's escapement lets its wheel go a tooth at a
+/// time: the pallet's snap, the brass of the movement ringing high for a few
+/// milliseconds, and the case and the bulkhead it is screwed to answering with a short,
+/// dry knock. The tooth lands on the far pallet a few milliseconds later, softer. No two
+/// pallets are quite alike, so the tock is a little lower and duller than the tick.
+fn tick(rng: &mut Rng, tock: bool) -> [Vec<f32>; 3] {
+    /// The movement's brass: each tone, how loud it is, and the seconds it rings.
+    const RING: [(f32, f32, f32); 3] = [
+        (2650., 1., 0.009),
+        (4480., 0.6, 0.005),
+        (6900., 0.35, 0.003),
+    ];
+    /// The case and the bulkhead behind it.
+    const KNOCK: [(f32, f32, f32); 2] = [(820., 1., 0.014), (1640., 0.5, 0.009)];
+    /// Seconds from the snap to the tooth landing, and how loud the landing is.
+    const LANDING: (f32, f32) = (0.0045, 0.45);
+    const SECS: f32 = 0.09;
+    let count = (SECS * RATE) as usize;
+    let mut layers = [(); 3].map(|_| vec![0.; count]);
+    let mut snap = Biquad::band_pass(3800., 0.8);
+    let (tune, bright) = if tock { (0.86, 0.75) } else { (1., 1.) };
+    let tune = tune * rng.within(0.99, 1.01);
+    for n in 0..count {
+        let t = n as f32 / RATE;
+        let (mut burst, mut ring, mut knock) = (0., 0., 0.);
+        for (at, weight) in [(0., 1.), LANDING] {
+            let s = t - at;
+            if s < 0. {
+                continue;
+            }
+            burst += weight * (-s / 0.0006).exp();
+            for (hz, loud, decay) in RING {
+                ring += weight * bright * loud * (TAU * hz * tune * s).sin() * (-s / decay).exp();
+            }
+            for (hz, loud, decay) in KNOCK {
+                knock += weight * loud * (TAU * hz * tune * s).sin() * (-s / decay).exp();
+            }
+        }
+        layers[0][n] = 0.8 * burst * snap.run(rng.noise()) + ring;
+        layers[1][n] = knock;
+    }
+    layers
+}
+
+fn torpedoed(rng: &mut Rng) -> [Vec<f32>; 3] {
+    const SECS: f32 = 3.6;
+    /// The plating's modes: hertz, loudness and the seconds each rings.
+    const CLANG: [(f32, f32, f32); 4] = [
+        (118., 0.6, 0.5),
+        (187., 0.45, 0.35),
+        (263., 0.3, 0.22),
+        (431., 0.2, 0.12),
+    ];
+    let down = rng.within(0.9, 1.15);
+    let rain =
+        |t: f32| ((t - down) / 0.25).clamp(0., 1.) * (-(t - down - 0.25).max(0.) / 0.6).exp();
+    let mut hiss = Biquad::high_pass(2400., 0.7);
+    let mut spray = render(SECS, |t| {
+        let up = 0.25 * (t / 0.02).min(1.) * (-t / 0.3).exp();
+        hiss.run(rng.noise()) * (up + 0.6 * rain(t))
+    });
+    scatter(
+        &mut spray,
+        220,
+        (down, down + 1.6),
+        (0.003, 0.012),
+        rng,
+        rain,
+        |_, colour, t| (TAU * (900. + 3500. * colour) * t * (1. + 10. * t)).sin(),
+    );
+    // The water smothers the blow, and her plating rings low under it.
+    let blow = boom(0.03, 0.55, rng);
+    let mut smother = Biquad::low_pass(520., 0.7);
+    let mut fall = Biquad::band_pass(900., 0.5);
+    let body = render(SECS, |t| {
+        let shove = smother.run(blow.get((t * RATE) as usize).copied().unwrap_or(0.));
+        let ring: f32 = (CLANG.iter())
+            .map(|&(hz, loud, ring)| loud * (TAU * hz * t).sin() * (-t / ring).exp())
+            .sum();
+        1.6 * shove + 0.7 * (t / 0.004).min(1.) * ring + 0.5 * fall.run(rng.noise()) * rain(t)
+    });
+    let mut deep = Biquad::low_pass(70., 0.7);
+    let mut heave = rumble(SECS, 150., rng);
+    for (n, x) in heave.iter_mut().enumerate() {
+        let t = n as f32 / RATE;
+        let shove = (t / 0.006).min(1.) * (-t / 0.35).exp();
+        *x = 0.6 * *x + 0.9 * blast(t, 0.05) + 5. * deep.run(rng.noise()) * shove;
+    }
+    [spray, body, heave]
+}
+
+/// Ring struck metal into `layer` from `at` seconds: each tone's hertz, level and the
+/// seconds it rings, raised by `pitch` and scaled by `weight`. All but `held` of the
+/// blow is gone in the first few milliseconds, taken up by whatever holds the metal.
+fn strike(
+    layer: &mut [f32],
+    at: f32,
+    tones: &[(f32, f32, f32)],
+    (weight, pitch, held): (f32, f32, f32),
+    rng: &mut Rng,
+) {
+    let start = ((at * RATE) as usize).min(layer.len());
+    for &(hz, level, ring) in tones {
+        let turn = TAU * rng.unit();
+        let span = (6. * ring.max(0.004) * RATE) as usize;
+        for (n, x) in layer[start..].iter_mut().take(span).enumerate() {
+            let t = n as f32 / RATE;
+            let fade = (1. - held) * (-t / 0.004).exp() + held * (-t / ring).exp();
+            *x += weight * level * (TAU * pitch * hz * t + turn).sin() * fade;
+        }
+    }
+}
+
+/// The tones of `tones` that sound at or above `hz` once raised by `pitch`, and those below.
+fn parted(tones: &[(f32, f32, f32)], pitch: f32, hz: f32) -> [Vec<(f32, f32, f32)>; 2] {
+    let (high, low) = tones.iter().partition(|tone| tone.0 * pitch >= hz);
+    [high, low]
+}
+
+/// Filtered noise added to `layer` from `at` seconds for `secs`, shaped by `envelope`
+/// of the seconds since it began.
+fn breath(
+    layer: &mut [f32],
+    at: f32,
+    secs: f32,
+    filters: &mut [Biquad],
+    rng: &mut Rng,
+    envelope: impl Fn(f32) -> f32,
+) {
+    let start = ((at * RATE) as usize).min(layer.len());
+    for (n, x) in layer[start..]
+        .iter_mut()
+        .take((secs * RATE) as usize)
+        .enumerate()
+    {
+        let mut air = rng.noise();
+        for filter in filters.iter_mut() {
+            air = filter.run(air);
+        }
+        *x += air * envelope(n as f32 / RATE);
+    }
+}
+
+/// An engine hurt but still running. A recording of a heavy steel part struck in a
+/// machine clanks at 1730 and 2310 Hz over a thump between 60 and 250 Hz, down 10 dB
+/// in 75 ms and 20 dB in 180 ms. A recording of a machine breaking down clatters on for
+/// two seconds and more, a blow every 50 to 600 ms, with its sound spread evenly from
+/// 60 Hz to 3 kHz, and metal rubbing on metal is a rasp strongest from 1 to 5 kHz.
+/// Here the engine room clangs as the hit goes home, whatever came loose is struck by
+/// the running gear once a turn for a second or so, grinding as it goes, and air
+/// hisses from a broken pipe.
+fn engine_hurt(rng: &mut Rng) -> [Vec<f32>; 3] {
+    const SECS: f32 = 2.6;
+    /// What rings when the hit goes home: hertz, level and the seconds it rings.
+    const CLANG: [(f32, f32, f32); 7] = [
+        (96., 0.8, 0.25),
+        (151., 0.6, 0.2),
+        (238., 0.55, 0.15),
+        (412., 0.4, 0.1),
+        (690., 0.35, 0.08),
+        (1730., 1., 0.075),
+        (2310., 0.45, 0.06),
+    ];
+    /// What came loose, as the running gear strikes it.
+    const LOOSE: [(f32, f32, f32); 4] = [
+        (480., 0.8, 0.02),
+        (820., 1., 0.016),
+        (1310., 0.7, 0.012),
+        (2050., 0.4, 0.008),
+    ];
+    /// Turns of the crank a second, the seconds over which the knocking and the
+    /// grinding die down as the loose part is thrown clear or jams, and the stick and
+    /// slip of the rubbing in jerks a second.
+    const TURN: f32 = 5.2;
+    const EASE: f32 = 1.;
+    const JERKS: f32 = 130.;
+    let count = (SECS * RATE) as usize;
+    let mut layers = [(); 3].map(|_| vec![0.; count]);
+    let pitch = rng.within(0.9, 1.1);
+    let [high, low] = parted(&CLANG, pitch, 1000.);
+    strike(&mut layers[0], 0., &high, (0.5, pitch, 0.6), rng);
+    strike(&mut layers[1], 0., &low, (1., pitch, 0.6), rng);
+    let mut deep = Biquad::low_pass(110., 0.7);
+    for (n, x) in layers[2].iter_mut().enumerate() {
+        let t = n as f32 / RATE;
+        *x = blast(t, 0.012) + 3. * deep.run(rng.noise()) * (t / 0.003).min(1.) * (-t / 0.12).exp();
+    }
+    // The running gear comes round on the loose part, a little early or late each turn.
+    let (mut at, turn) = (rng.within(0.1, 0.18), 1. / (TURN * rng.within(0.9, 1.1)));
+    let mut thud = Biquad::low_pass(160., 0.7);
+    while at < 1.8 {
+        let weight = rng.within(0.4, 1.) * (-at / EASE).exp();
+        strike(&mut layers[1], at, &LOOSE, (0.8 * weight, pitch, 0.5), rng);
+        breath(
+            &mut layers[2],
+            at,
+            0.08,
+            std::slice::from_mut(&mut thud),
+            rng,
+            |t| 1.5 * weight * (-t / 0.015).exp(),
+        );
+        at += turn * rng.within(0.85, 1.15);
+    }
+    // It rasps hardest where the turn drags it across, and catches and slips as it goes.
+    let mut rasp = [Biquad::high_pass(900., 0.7), Biquad::low_pass(4500., 0.7)];
+    let mut chatter = Biquad::band_pass(1100. * pitch, 4.);
+    let (mut slip, mut since, sway) = (0_f32, 0_f32, rng.unit());
+    for n in 0..count {
+        let t = n as f32 / RATE;
+        let swell = (t / 0.05).min(1.) * (-t / EASE).exp();
+        let drag = 0.3 + 0.7 * (TAU * (sway + t / turn)).sin().max(0.).powi(3);
+        let mut grit = rng.noise();
+        for filter in &mut rasp {
+            grit = filter.run(grit);
+        }
+        since += JERKS * rng.within(0.6, 1.4) / RATE;
+        if since >= 1. {
+            since -= 1.;
+            slip = rng.within(0.3, 1.);
+        }
+        let jerk = slip * (-since * 14.).exp();
+        layers[0][n] += 2.6 * grit * swell * drag;
+        layers[1][n] += 1.6 * chatter.run(jerk) * swell * drag;
+    }
+    // Air or steam lets go from a fractured pipe, and is shut off.
+    let mut pipe = [Biquad::high_pass(2500., 0.7)];
+    let hiss = rng.within(0.15, 0.3);
+    breath(&mut layers[0], 0.01, 1.2, &mut pipe, rng, |t| {
+        0.5 * (t / 0.01).min(1.) * (-t / hiss).exp()
+    });
+    layers
+}
+
+/// An engine giving out. Something in it lets go with a clank and a rattle, and with
+/// no fuel burning its gearing coasts down under its own whine until the crank rocks
+/// against the last compression and stops with a clunk. A recording of a diesel failing
+/// takes two and a half seconds to die once it begins to go. Then the air in her
+/// charges bleeds out of it: a recording of air let go from a receiver is a hiss
+/// strongest above 2 kHz that sinks 8 to 10 dB a second.
+fn engine_stall(rng: &mut Rng) -> [Vec<f32>; 3] {
+    const SECS: f32 = 4.6;
+    /// The part letting go: hertz, level and the seconds each tone rings.
+    const LETS_GO: [(f32, f32, f32); 5] = [
+        (140., 0.6, 0.12),
+        (330., 0.7, 0.08),
+        (760., 0.8, 0.05),
+        (1520., 1., 0.04),
+        (2380., 0.5, 0.03),
+    ];
+    /// The crank coming to rest against the frames.
+    const SEIZE: [(f32, f32, f32); 4] = [
+        (58., 1., 0.18),
+        (97., 0.7, 0.14),
+        (186., 0.5, 0.1),
+        (305., 0.35, 0.07),
+    ];
+    /// The gears' mesh at the revolutions she was making, and how they coast: the
+    /// seconds the speed falls by while the air holds them back, and the share of the
+    /// starting speed that friction takes off as well. That stops them in 2.6 s.
+    const WHINE: f32 = 720.;
+    const COAST: (f32, f32) = (1.5, 0.22);
+    let count = (SECS * RATE) as usize;
+    let mut layers = [(); 3].map(|_| vec![0.; count]);
+    let pitch = rng.within(0.9, 1.12);
+    let lag = rng.within(1.3, 1.7);
+    let speed = |t: f32| ((1. + COAST.1) * (-t / lag).exp() - COAST.1).max(0.);
+    let stop = lag * ((1. + COAST.1) / COAST.1).ln();
+    // It lets go, and what broke rattles about for a moment.
+    let [high, low] = parted(&LETS_GO, pitch, 1000.);
+    strike(&mut layers[0], 0., &high, (0.7, pitch, 0.5), rng);
+    strike(&mut layers[1], 0., &low, (0.7, pitch, 0.5), rng);
+    let mut at = 0.;
+    for _ in 0..3 + (rng.unit() * 3.) as usize {
+        at += rng.within(0.03, 0.08);
+        let weight = rng.within(0.2, 0.5);
+        strike(
+            &mut layers[1],
+            at,
+            &low,
+            (weight, pitch * rng.within(1., 1.3), 0.3),
+            rng,
+        );
+    }
+    // The last of the fuel coughs in the cylinders, ever further apart.
+    let mut puff = [Biquad::high_pass(90., 0.7), Biquad::low_pass(450., 0.7)];
+    let mut at = rng.within(0.3, 0.5);
+    for cough in 0..2 + (rng.unit() * 2.) as usize {
+        let weight = rng.within(0.5, 0.9) / (1. + cough as f32);
+        breath(&mut layers[1], at, 0.2, &mut puff, rng, |t| {
+            1.6 * weight * (t / 0.004).min(1.) * (-t / 0.035).exp()
+        });
+        breath(&mut layers[2], at, 0.2, &mut puff, rng, |t| {
+            weight * (t / 0.004).min(1.) * (-t / 0.05).exp()
+        });
+        at += rng.within(0.35, 0.6) * (1. + 0.6 * cough as f32);
+    }
+    // The gearing whines down, rough in its teeth and rattling in its lash at the end.
+    let (mut turn, mut rough, churn) = (rng.unit(), 0_f32, pole(30.));
+    for n in 0..count {
+        let t = n as f32 / RATE;
+        let going = speed(t);
+        turn = (turn + WHINE * pitch * going / RATE).fract();
+        rough += churn * (rng.noise() - rough);
+        let teeth = (TAU * turn).sin() + 0.45 * (2. * TAU * turn).sin();
+        let loud = going * (t / 0.2).min(1.) * (1. + 12. * rough);
+        layers[1][n] += 0.9 * teeth * loud;
+        layers[0][n] += 0.35 * (3. * TAU * turn).sin() * loud;
+    }
+    let lash = (stop - 0.6, stop - 0.05);
+    scatter(
+        &mut layers[0],
+        14,
+        lash,
+        (0.002, 0.005),
+        rng,
+        |at| 0.3 * ((at - lash.0) / (lash.1 - lash.0)).clamp(0., 1.),
+        |_, colour, t| (TAU * (1800. + 1600. * colour) * t).sin(),
+    );
+    // The crank rocks back against compression and comes to rest.
+    strike(&mut layers[1], stop, &SEIZE, (1., pitch, 0.7), rng);
+    let back = stop + rng.within(0.11, 0.16);
+    strike(&mut layers[1], back, &SEIZE, (0.35, pitch, 0.7), rng);
+    let mut deep = Biquad::low_pass(120., 0.7);
+    let thump = (stop * RATE) as usize;
+    for (n, x) in layers[2].iter_mut().skip(thump).enumerate() {
+        let t = n as f32 / RATE;
+        *x += 0.8 * blast(t, 0.018)
+            + 2. * deep.run(rng.noise()) * (t / 0.004).min(1.) * (-t / 0.1).exp();
+    }
+    // Air sighs out of it, brightest at first.
+    let mut air = [Biquad::high_pass(1800., 0.7), Biquad::high_pass(1800., 0.7)];
+    let sigh = stop - 0.1;
+    breath(&mut layers[0], sigh, SECS - sigh, &mut air, rng, |t| {
+        0.45 * (t / 0.08).min(1.) * (-t / 0.9).exp()
+    });
+    layers
+}
+
+/// The repair party knocking a fitting true with a hand hammer. Recordings of a hammer
+/// tapping steel plate have a blow every quarter of a second or so, in runs. Each falls
+/// 15 dB in its first hundredth of a second as the hammer's face and the hand holding
+/// the work take it up, then rings on 0.07 s at the plate's own tones: 585, 1170, 1650,
+/// 2020, 2935, 3130, 3915 and 4160 Hz, loudest near 2 and 3 kHz. A heavier fitting
+/// answers lower and dies sooner, between 220 and 700 Hz and at 1350 Hz, nearly gone in
+/// 25 ms. Now and then the hammer bounces and strikes again, lighter.
+fn hammer(rng: &mut Rng) -> [Vec<f32>; 3] {
+    const PLATE: [(f32, f32, f32); 8] = [
+        (585., 0.41, 0.09),
+        (1170., 0.56, 0.08),
+        (1650., 0.56, 0.07),
+        (2020., 1., 0.07),
+        (2935., 0.84, 0.06),
+        (3130., 0.7, 0.05),
+        (3915., 0.47, 0.04),
+        (4160., 0.38, 0.035),
+    ];
+    const FITTING: [(f32, f32, f32); 7] = [
+        (217., 0.75, 0.03),
+        (300., 0.8, 0.03),
+        (390., 0.85, 0.025),
+        (525., 1., 0.025),
+        (595., 0.75, 0.02),
+        (705., 0.6, 0.02),
+        (1355., 0.7, 0.015),
+    ];
+    let tones: &[(f32, f32, f32)] = if rng.unit() < 0.6 { &PLATE } else { &FITTING };
+    let pitch = rng.within(0.85, 1.18);
+    let every = rng.within(0.2, 0.3);
+    let mut blows = Vec::new();
+    let mut at = 0.01;
+    for _ in 0..2 + (rng.unit() * 5.) as usize {
+        let weight = rng.within(0.65, 1.);
+        blows.push((at, weight));
+        if rng.unit() < 0.2 {
+            blows.push((at + rng.within(0.055, 0.08), 0.35 * weight));
+        }
+        at += every * rng.within(0.85, 1.15);
+    }
+    let secs = at + 0.4;
+    let mut layers = [(); 3].map(|_| vec![0.; (secs * RATE) as usize]);
+    let [high, low] = parted(tones, pitch, 1400.);
+    let mut face = [Biquad::high_pass(2000., 0.7)];
+    let mut head = [Biquad::band_pass(350., 1.)];
+    for (at, weight) in blows {
+        let pitch = pitch * rng.within(0.99, 1.01);
+        strike(&mut layers[0], at, &high, (weight, pitch, 0.18), rng);
+        strike(&mut layers[1], at, &low, (weight, pitch, 0.18), rng);
+        breath(&mut layers[0], at, 0.01, &mut face, rng, |t| {
+            0.7 * weight * (-t / 0.0006).exp()
+        });
+        breath(&mut layers[1], at, 0.04, &mut head, rng, |t| {
+            2. * weight * (-t / 0.005).exp()
+        });
+    }
+    layers
+}
+
+/// The repair party's cutting torch. Recordings of a lit torch are a roar within a few
+/// dB from 250 Hz to 4 kHz that falls away below 200 Hz and above 5 kHz, as steady as a
+/// flame is, within 2 or 3 dB. Molten steel spits from the cut in small crackles, and a
+/// torch lit again goes off with a pop 10 to 20 dB over its flame.
+fn torch(rng: &mut Rng) -> [Vec<f32>; 3] {
+    let secs = rng.within(1.5, 3.);
+    let (open, close) = (rng.within(0.08, 0.18), rng.within(0.2, 0.35));
+    let swell = move |t: f32| (t / open).min(1.) * ((secs - t) / close).clamp(0., 1.);
+    let count = (secs * RATE) as usize;
+    let mut layers = [(); 3].map(|_| vec![0.; count]);
+    let mut flame = [Biquad::high_pass(220., 0.7), Biquad::low_pass(2000., 0.7)];
+    let mut jet = [Biquad::high_pass(2000., 0.7), Biquad::low_pass(6000., 0.7)];
+    let (mut flicker, shiver) = (0_f32, pole(8.));
+    for n in 0..count {
+        let t = n as f32 / RATE;
+        flicker += shiver * (rng.noise() - flicker);
+        let level = swell(t) * (1. + 10. * flicker);
+        let gas = rng.noise();
+        let (mut low, mut high) = (gas, gas);
+        for filter in &mut flame {
+            low = filter.run(low);
+        }
+        for filter in &mut jet {
+            high = filter.run(high);
+        }
+        layers[1][n] = low * level;
+        layers[0][n] = high * level;
+    }
+    let spits = (secs * rng.within(3., 8.)) as usize;
+    scatter(
+        &mut layers[0],
+        spits,
+        (0.1, secs - 0.1),
+        (0.0004, 0.0015),
+        rng,
+        |at| 1.2 * swell(at),
+        |rng, _, _| rng.noise(),
+    );
+    if rng.unit() < 0.4 {
+        let mut pop = [Biquad::high_pass(100., 0.7), Biquad::low_pass(900., 0.7)];
+        breath(&mut layers[1], 0., 0.2, &mut pop, rng, |t| {
+            1.6 * blast(t, 0.004) + 2.5 * (-t / 0.025).exp()
+        });
+    }
+    layers
+}
+
+/// The repair party's spanner. Recordings of a ratchet being worked have strokes of 0.1
+/// to 0.25 s, 0.15 to 0.5 s apart, and in each stroke the pawl snaps over the teeth 15 to
+/// 90 times a second, quickest in the middle of the swing. Each snap is over in a
+/// millisecond or two and rings near 6.2 and 10 kHz, with less near 3 and 4.4 kHz from
+/// the handle and the socket. Across a deck the air takes the highest of it, and what
+/// is left to hear is mostly the handle. Now and then the spanner is put down on the
+/// steel with a clank, which a recording of a light metal clank has at 1730 and 2310 Hz.
+fn ratchet(rng: &mut Rng) -> [Vec<f32>; 3] {
+    const PAWL: [(f32, f32, f32); 4] = [
+        (6200., 1., 0.0012),
+        (9950., 0.75, 0.0008),
+        (3100., 0.6, 0.002),
+        (4400., 0.45, 0.0015),
+    ];
+    const CLANK: [(f32, f32, f32); 4] = [
+        (870., 0.25, 0.05),
+        (1730., 1., 0.07),
+        (2310., 0.45, 0.05),
+        (3400., 0.3, 0.03),
+    ];
+    let top = rng.within(45., 95.);
+    let pitch = rng.within(0.92, 1.08);
+    let mut snaps = Vec::new();
+    let mut at = 0.02;
+    for _ in 0..1 + (rng.unit() * 4.) as usize {
+        let stroke = rng.within(0.1, 0.25);
+        let (mut along, mut tooth) = (0_f32, 0_f32);
+        while along < stroke {
+            along += 1. / RATE * 16.;
+            tooth += top * (0.3 + 0.7 * (PI * along / stroke).sin()) / RATE * 16.;
+            if tooth >= 1. {
+                tooth -= 1.;
+                snaps.push((at + along, rng.within(0.6, 1.)));
+            }
+        }
+        at += stroke + rng.within(0.15, 0.45);
+    }
+    let clank = rng.unit() < 0.4;
+    let secs = at + if clank { 0.5 } else { 0.1 };
+    let mut layers = [(); 3].map(|_| vec![0.; (secs * RATE) as usize]);
+    let [high, low] = parted(&PAWL, pitch, 5000.);
+    let mut tick = [Biquad::high_pass(4000., 0.7)];
+    for (at, weight) in snaps {
+        strike(&mut layers[0], at, &high, (weight, pitch, 1.), rng);
+        strike(&mut layers[1], at, &low, (weight, pitch, 1.), rng);
+        breath(&mut layers[0], at, 0.004, &mut tick, rng, |t| {
+            0.8 * weight * (-t / 0.0003).exp()
+        });
+    }
+    if clank {
+        let pitch = pitch * rng.within(0.9, 1.1);
+        strike(&mut layers[1], at - 0.05, &CLANK, (1.4, pitch, 0.5), rng);
     }
     layers
 }

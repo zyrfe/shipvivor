@@ -1,15 +1,19 @@
 mod alert;
 mod battle_view;
 mod berth;
+mod blueprint;
 mod camera;
 mod captain;
 mod cards;
 mod damage_control;
+mod damage_fx;
 mod dockyard;
 mod ensign;
+mod eyepiece;
 mod fire_control;
 mod flagship_hud;
 mod flares;
+mod gunsmoke;
 mod fleet_models;
 mod gun_sight;
 mod gunnery;
@@ -22,6 +26,7 @@ mod ordnance;
 mod passage;
 mod scene;
 mod seascape;
+mod slip_badges;
 mod snapshot;
 mod sound;
 mod state;
@@ -38,10 +43,11 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use camera::ShipView;
 use passage::Passage;
-use shipvivor_campaign::Objectives;
 #[cfg(test)]
-use shipvivor_encounter::Hull;
-use shipvivor_encounter::{Aim, Ammo, MainShell, Orders, Volley};
+use shipvivor_campaign::Objectives;
+use shipvivor_encounter::{Aim, Ammo, Volley};
+#[cfg(test)]
+use shipvivor_encounter::{Hull, MainShell, Orders};
 use state::{
     Campaign, ChartSeeds, Embarked, Encounter, Guns, Mode, PlayerHelm, Screen, TrialCourse,
 };
@@ -54,11 +60,13 @@ fn main() {
         }))
         .add_plugins(berth::BerthPlugin)
         .add_plugins(seascape::SeascapePlugin)
+        .add_plugins(blueprint::BlueprintPlugin)
         .add_plugins(GamePlugin)
         .add_plugins(sound::SoundPlugin)
         .add_plugins(snapshot::SnapshotPlugin)
         .add_plugins(telemetry::TelemetryPlugin)
         .add_plugins(icefield::IcefieldPlugin)
+        .add_plugins(gunsmoke::GunsmokePlugin)
         .add_plugins(battle_view::MainlandPlugin)
         .run();
 }
@@ -68,6 +76,7 @@ impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Time::<Fixed>::from_hz(60.))
             .init_resource::<Assets<seascape::Seascape>>()
+            .init_resource::<Assets<blueprint::Drafted>>()
             .init_resource::<Assets<Font>>()
             .init_resource::<PlayerHelm>()
             .init_resource::<TrialCourse>()
@@ -99,11 +108,21 @@ impl Plugin for GamePlugin {
             .add_systems(Update, flares::draw)
             .add_systems(Startup, trajectory::setup)
             .add_systems(Update, trajectory::draw.after(camera::follow))
+            .add_systems(Startup, eyepiece::spawn)
+            .add_systems(
+                PostUpdate,
+                (
+                    eyepiece::field_stop.before(bevy::ui::UiSystems::Layout),
+                    eyepiece::clip
+                        .after(bevy::ui::UiSystems::Layout)
+                        .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate),
+                ),
+            )
             .add_systems(
                 Update,
                 (
                     strike_craft::stow,
-                    strike_craft::fly,
+                    strike_craft::fly.after(camera::follow),
                     strike_craft::trail,
                     strike_craft::fall,
                 ),
@@ -119,6 +138,7 @@ impl Plugin for GamePlugin {
                     (|mut helm: ResMut<PlayerHelm>| *helm = PlayerHelm::cruising())
                         .run_if(|run: Res<Campaign>| run.mode == Mode::Title),
                     battle_view::setup,
+                    damage_fx::setup,
                     fire_control::setup,
                     insignia::setup,
                     minimap::setup,
@@ -170,7 +190,12 @@ impl Plugin for GamePlugin {
                     seascape::light,
                     scene::place_turrets
                         .run_if(|run: Res<Campaign>| run.screen() != Screen::Secured),
-                    (scene::place_wing_guns, scene::place_aa_guns),
+                    (
+                        scene::place_wing_guns,
+                        scene::place_aa_guns,
+                        blueprint::draft.after(scene::refit_hull),
+                        dockyard::fans,
+                    ),
                     captain::wind,
                     scene::place_racks,
                     scene::animate_gun_tubes,
@@ -183,14 +208,22 @@ impl Plugin for GamePlugin {
                         ui::customise::turn_wheel,
                         ensign::hoist,
                         battle_view::dye_ensigns,
-                        battle_view::sync,
+                        battle_view::sync.after(camera::follow),
                         battle_view::animate_harbour_signals.after(camera::follow),
+                        battle_view::stream_funnel_smoke.after(battle_view::sync),
                         battle_view::fly_pennant,
                     )
                         .chain(),
                     fire_control::place_sectors,
                     minimap::update,
-                    (threat_ring::update, threat_ring::tag_ships).after(camera::follow),
+                    (
+                        threat_ring::update,
+                        threat_ring::tag_ships,
+                        slip_badges::update,
+                        damage_fx::mark_repairs.after(scene::place_ship),
+                        damage_fx::smoulder.after(scene::place_ship),
+                    )
+                        .after(camera::follow),
                     sound::keep_time,
                     (
                         dockyard::open,
@@ -204,7 +237,7 @@ impl Plugin for GamePlugin {
                         mission_hud::update,
                         mission_hud::spotter_alerts,
                         flagship_hud::update,
-                        ui::gauges,
+                        (ui::gauges, ui::dock_meter),
                         gun_sight::update,
                         gunnery::update,
                         damage_control::update,
@@ -264,30 +297,24 @@ impl Voyage<'_, '_> {
             Mode::Patrol => passage.chart(run.seed),
             Mode::Title | Mode::Paused => passage.classic(),
         };
-        *self.encounter = Encounter(passage.battle(&chart).with_rewards(self.options.rewards));
-        if run.mode == Mode::Patrol
-            && run
-                .passage
-                .is_some_and(shipvivor_campaign::Stage::enters_air_cover)
-        {
-            use shipvivor_encounter::AirRaid;
-            self.encounter
-                .open_air_station(if run.stage == shipvivor_campaign::Stage::CrownDeep {
-                    AirRaid::Bomb
-                } else {
-                    AirRaid::Strafe
-                });
-        }
-        self.encounter.fit_player(run);
-        if run.mode == Mode::Title {
-            *self.helm = PlayerHelm::cruising();
+        // The simulator opens its legs with these same calls.
+        let patrol = run.mode == Mode::Patrol;
+        *self.encounter = Encounter(shipvivor_sim::open_battle(
+            passage.sector(),
+            &chart,
+            run,
+            self.options.rewards,
+            patrol,
+        ));
+        *self.helm = if run.mode == Mode::Title {
+            PlayerHelm::cruising()
         } else {
-            *self.helm = PlayerHelm::default();
-            self.helm.heading = shipvivor_compass::heading(chart.gates[0]);
-            if run.mode == Mode::Patrol {
-                self.helm.ring(2);
-            }
-        }
+            PlayerHelm(shipvivor_sim::helm_at_start(
+                &chart,
+                &self.encounter,
+                patrol,
+            ))
+        };
         self.guns.torpedo_mode = false;
         self.guns.launch_pending = false;
         self.guns.volley = None;
@@ -359,10 +386,6 @@ fn apply_action(In(action): In<Option<ui::Action>>, mut run: ResMut<Campaign>, m
             voyage.commands.trigger(sound::Notice(cue));
         }
         (Screen::Paused, Action::Resume) => run.mode = Mode::Patrol,
-        (Screen::Paused, Action::Extract) if run.can_extract() => {
-            run.mode = Mode::Patrol;
-            run.extract();
-        }
         (Screen::Refit, Action::Card(card)) => {
             let before = run.fittings;
             run.install(card);
@@ -374,47 +397,53 @@ fn apply_action(In(action): In<Option<ui::Action>>, mut run: ResMut<Campaign>, m
             }
         }
         (Screen::Drydock(_), Action::Module(index)) => run.select_section(index),
-        (Screen::Drydock(_), Action::Preview(index)) => run.preview_option(index),
-        (Screen::Drydock(_), Action::Draft(job)) => run.preview_draft(job),
-        (Screen::Drydock(_), Action::Confirm) => {
-            let Some(job) = run.dock_job() else { return };
-            if run.refit_in_dock(job) {
-                use shipvivor_campaign::DockJob;
-                // An order spent is something gained. Shifting a bay about is not.
-                if job.cost() > 0 {
-                    voyage
-                        .commands
-                        .trigger(sound::Notice(shipvivor_acoustics::Sound::Upgrade));
-                }
-                if let DockJob::Move { from, to } = job {
-                    // The selection travels with the bay, ready to move it again.
-                    run.select_section(to);
-                    let again = DockJob::Move {
-                        from: to,
-                        to: if to < from {
-                            to.wrapping_sub(1)
-                        } else {
-                            to + 1
-                        },
-                    };
-                    run.dock_option = run.dock_jobs().iter().position(|&j| j == again);
-                } else if let DockJob::Insert { at, .. } = job {
-                    // The new section is selected, so its own refits are offered next.
-                    run.select_section(at);
-                } else {
-                    run.dock_option = None;
-                    run.dock_draft = None;
-                }
+        (Screen::Drydock(_), Action::Preview(index)) => run.focus_option(index),
+        (Screen::Drydock(_), Action::Pick(job)) => run.pick_hull(job),
+        (Screen::Drydock(_), Action::Order(index)) => {
+            if run.order_option(index) {
                 voyage.encounter.fit_player(&run);
             }
         }
-        (Screen::Drydock(_), Action::Sail) => {
-            run.leave_dock();
+        (Screen::Drydock(_), Action::Draft(job)) => {
+            if run.order(job) {
+                voyage.encounter.fit_player(&run);
+            }
         }
+        (Screen::Drydock(_), Action::Undo(index)) => {
+            run.undo_order(index);
+            voyage.encounter.fit_player(&run);
+        }
+        (Screen::Drydock(_), Action::Confirm) => {
+            if let Some(job) = run.dock_job() {
+                if run.order(job) {
+                    voyage.encounter.fit_player(&run);
+                }
+            } else {
+                finalize_refit(&mut run, &mut voyage);
+            }
+        }
+        // Orders still to build are built before she sails.
+        (Screen::Drydock(_), Action::Sail) if run.plan().is_some() => {
+            finalize_refit(&mut run, &mut voyage);
+        }
+        (Screen::Drydock(_), Action::Sail) => run.sail_from_dock(),
         (Screen::Intercept(_), Action::Engage) if run.engage_regent() => voyage.outfit(&mut run),
         (Screen::Chart, Action::Depart(next)) if run.depart(next) => voyage.outfit(&mut run),
         _ => {}
     }
+}
+/// Build the yard's orders: the blueprints are revealed as the ship herself.
+fn finalize_refit(run: &mut Campaign, voyage: &mut Voyage) {
+    let Some(plan) = run.finalize() else { return };
+    if plan.cost() > 0 {
+        voyage
+            .commands
+            .trigger(sound::Notice(shipvivor_acoustics::Sound::Upgrade));
+    }
+    voyage
+        .commands
+        .insert_resource(blueprint::Reveal::of(&plan, run));
+    voyage.encounter.fit_player(run);
 }
 fn engine_orders(
     keys: Res<ButtonInput<KeyCode>>,
@@ -439,7 +468,9 @@ fn aim_guns(
     mouse: Res<ButtonInput<MouseButton>>,
     window: Single<(&Window, &bevy::window::CursorOptions)>,
     time: Res<Time>,
+    battle: Res<Encounter>,
     mut guns: ResMut<Guns>,
+    mut was_live: Local<bool>,
 ) {
     let (window, cursor) = *window;
     let left = mouse.pressed(MouseButton::Left);
@@ -460,6 +491,41 @@ fn aim_guns(
             Ammo::He => Ammo::Ap,
             Ammo::Ap => Ammo::He,
         };
+    }
+    // A digit picks out the turret with that number from the bow, and again lets it go.
+    // Z steps the picked turret, or with none picked out every turret, through manual,
+    // scope and automatic.
+    let turrets = battle.main_mounts().len().min(state::TURRETS);
+    if guns.selected.is_some_and(|i| i >= turrets) {
+        guns.selected = None;
+    }
+    // The digit that chose a route or a fitting card is not also a turret.
+    let steady = live && *was_live;
+    *was_live = live;
+    if steady {
+        let digits = [
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
+            KeyCode::Digit6,
+            KeyCode::Digit7,
+            KeyCode::Digit8,
+            KeyCode::Digit9,
+        ];
+        if let Some(i) = digits[..turrets].iter().position(|&k| keys.just_pressed(k)) {
+            guns.selected = (guns.selected != Some(i)).then_some(i);
+        }
+        if keys.just_pressed(KeyCode::KeyZ) && turrets > 0 {
+            match guns.selected {
+                Some(i) => guns.controls[i] = guns.controls[i].next(),
+                None => {
+                    let next = guns.controls[0].next();
+                    guns.controls[..turrets].fill(next);
+                }
+            }
+        }
     }
     if !live || !guns.torpedo_mode {
         guns.launch_pending = false;
@@ -492,28 +558,15 @@ fn advance_ship(
     mut run: ResMut<Campaign>,
     mut encounter: ResMut<Encounter>,
     sight: (ResMut<Guns>, ResMut<ShipView>),
+    mut commands: Commands,
 ) {
     let (mut guns, mut view) = sight;
     let dt = clock.delta_secs();
     let steering = i32::from(keys.pressed(KeyCode::KeyD)) - i32::from(keys.pressed(KeyCode::KeyA));
     let previous = helm.position;
-    // Stopped engines and flooded modules take way off her.
-    let pace = run.fittings.speed_factor() * run.ship.propulsion();
-    let design = run.ship.design();
-    let speed = design.top_speed() / shipvivor_navigation::Helm::FULL_AHEAD;
-    helm.tick_with_handling(steering as f32, dt, speed * pace, design.turn_rate());
-    let hull = run.hull_shape();
     let patrol = run.screen() == Screen::Sailing;
-    if patrol {
-        // The current sets her along with the water, whatever her engines are doing.
-        let set = encounter.current(helm.position) * dt;
-        helm.position += set;
-        let afloat = encounter.navigable_hull(helm.position, helm.forward(), hull);
-        if afloat != helm.position {
-            helm.position = afloat;
-            helm.speed *= 0.9;
-        }
-    }
+    // The simulator sails through these same three steps: steer, engage, settle.
+    shipvivor_sim::steer(&run, &encounter, &mut helm, steering as f32, dt, patrol);
     if run.mode == Mode::Trial
         && course
             .bypass_change_detection()
@@ -527,68 +580,38 @@ fn advance_ship(
         } else {
             view.main_aim(helm.position, &encounter, guns.firing, guns.nearest)
         };
-        if let Some(volley) = guns.volley.take() {
-            encounter.order_volley(volley);
-        }
-        encounter.update_mount_service(&run.ship);
-        let ev = encounter.step(
-            dt,
-            &Orders {
-                player: helm.position,
-                heading: helm.heading,
-                speed: helm.speed,
-                hull,
-                aim,
-                shell: MainShell {
-                    ammo: if run.fittings.armor_piercing() {
-                        guns.ammo
-                    } else {
-                        Ammo::He
-                    },
-                    ..run.fittings.round()
-                },
-                reload: run.fittings.reload(),
-            },
-        );
-        // Hulls that met this tick push apart, and the blow takes way off the ship.
-        helm.position += ev.shove;
-        helm.speed += ev.jolt;
+        let volley = guns.volley.take();
+        encounter.direct(&guns.controls, view.scoped());
+        // The trigger offers first the smallest gun that can hurt the ship she aims at.
+        let marked = view.target(&encounter).or_else(|| {
+            (guns.nearest && view.quarry(&encounter).is_none())
+                .then(|| encounter.nearest_ship(helm.position))
+                .flatten()
+        });
+        let marked = marked.map(|r| r.body.id);
+        encounter.mark(marked);
+        let ev = shipvivor_sim::engage(&run, &mut encounter, &mut helm, dt, aim, volley, guns.ammo);
         // The scoped sight rides with her contact through the tick.
         view.ride_zero(helm.position, &encounter);
         view.update_contact(helm.position, &encounter);
-        if guns.torpedo_mode && std::mem::take(&mut guns.launch_pending) {
-            encounter.launch_spread(helm.position, helm.heading, view.bearing);
-        }
+        let torpedo =
+            (guns.torpedo_mode && std::mem::take(&mut guns.launch_pending)).then_some(view.bearing);
         run.hits += u32::from(ev.hits);
         run.sunk += u32::from(ev.sunk);
         run.watch.observe(dt, &ev);
-        // Each hit lands on the plating it struck and the module behind it, and on the
-        // engines and magazines in its bays only if it got that far in.
-        for blow in &ev.blows {
-            run.strike_side(blow.aft, blow.abeam, blow.damage, blow.calibre, blow.reach);
+        let banked = run.cargo_points();
+        shipvivor_sim::settle(&mut run, &mut encounter, &helm, dt, &ev, torpedo);
+        // Each whole yard point that cargo sunk makes rings the bell. Crown Deep has
+        // no yard after it.
+        if run.cargo_points() > banked && run.stage != shipvivor_campaign::Stage::CrownDeep {
+            commands.trigger(sound::Notice(shipvivor_acoustics::Sound::Chime));
         }
-        let ruined_yards = encounter.ruined_yards();
-        run.tick_engagement(
-            dt,
-            Objectives {
-                kills: ev.sunk,
-                crates: ev.recovered,
-                destroyed_drydock: ruined_yards > 0,
-            },
-            0,
-            if ev.regent_sunk {
-                Some(shipvivor_campaign::LegEnd::RegentSunk)
-            } else if ruined_yards == encounter.ports().len() {
-                Some(shipvivor_campaign::LegEnd::BasesDestroyed)
-            } else {
-                None
-            },
-        );
+        // The phase, not the screen: a clearance with levels owed deals them first.
         if matches!(
-            run.screen(),
-            Screen::Drydock(shipvivor_campaign::LegEnd::BasesDestroyed)
-                | Screen::Intercept(shipvivor_campaign::LegEnd::BasesDestroyed)
-                | Screen::Won(shipvivor_campaign::LegEnd::RegentSunk)
+            run.phase(),
+            shipvivor_campaign::Phase::Drydock(shipvivor_campaign::LegEnd::BasesDestroyed)
+                | shipvivor_campaign::Phase::Intercept(shipvivor_campaign::LegEnd::BasesDestroyed)
+                | shipvivor_campaign::Phase::Won(shipvivor_campaign::LegEnd::RegentSunk)
         ) {
             run.clearance_left = if ev.regent_sunk { 5. } else { 2.2 };
         }

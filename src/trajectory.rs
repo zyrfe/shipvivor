@@ -138,7 +138,7 @@ fn flight_end(path: &Trajectory, battle: &Battle) -> Option<f32> {
     Some(water)
 }
 
-/// The mounts that draw a flight: laid on the mark and able to reach it.
+/// The mounts that draw a flight: the trigger's, laid on the mark and able to reach it.
 pub(crate) fn laid<'a>(
     battle: &'a Battle,
     helm: &PlayerHelm,
@@ -151,6 +151,7 @@ pub(crate) fn laid<'a>(
         .zip(battle.main_mounts())
         .filter(|(_, mount)| {
             matches!(mount.status(), MountStatus::Ready | MountStatus::Loading)
+                && !mount.crewed()
                 && !out_of_reach(mount, helm, aim, round)
         })
         .collect()

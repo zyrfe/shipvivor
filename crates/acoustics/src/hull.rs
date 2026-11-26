@@ -22,6 +22,16 @@ const STACK: f32 = 0.45;
 const BANGS: (f32, f32) = (0.5, 1.6);
 /// Seconds for an engine to go from sound to damaged in what is heard of it.
 const FAILING: f32 = 0.3;
+/// An engine knocked out under way does not simply stop. A recording of a diesel
+/// failing holds within 10 dB of its running level for a second and more, lurching as
+/// cylinders catch and miss, then dies away 35 dB in the next second and a half. What
+/// fuel is left in it burns worse and worse, so its fuel and its revolutions each fall
+/// away over these seconds, one after the other, and it misfires this many times as
+/// often as a damaged engine. Between them the engines dying cough this many times a
+/// second in their exhaust. One shut down from the bridge runs down cleanly.
+const STALL: f32 = 0.6;
+const SPUTTER: f32 = 3.;
+const COUGHS: f32 = 2.;
 /// Level past which the hull gives no further. Now and then every cylinder of every
 /// engine pulls the same way at once, and this keeps that from being a thump.
 const BRACE: f32 = 0.5;
@@ -72,6 +82,9 @@ pub(crate) struct Hull {
     /// What the machinery and the water have come round to.
     way: f32,
     revs: f32,
+    /// Each engine's fuel, which a knocked-out engine runs short of before it stops,
+    /// how far it is running, and how badly.
+    fuel: [f32; 4],
     steam: [f32; 4],
     fault: [f32; 4],
     engines: [Diesel; 4],
@@ -101,6 +114,7 @@ impl Hull {
             stopped: 0,
             way: 0.,
             revs: 0.,
+            fuel: [0.; 4],
             steam: [0.; 4],
             fault: [0.; 4],
             engines: [0xD1E5, 0x5E1, 0xB0A7, 0xC0DE].map(Diesel::new),
@@ -160,14 +174,33 @@ impl Hull {
         self.revs += (self.throttle - self.revs) * toward(SPOOL);
         self.way += ((self.speed / FLANK).min(1.3) - self.way) * toward(0.4);
         // The last engines are the first knocked out, and the first the first damaged.
-        for (n, (steam, fault)) in self.steam.iter_mut().zip(&mut self.fault).enumerate() {
-            let lit = if n + self.stopped < 4 { self.lit } else { 0. };
-            *steam += (lit - *steam) * toward(0.9);
-            *fault += (f32::from(n < self.rough) - *fault) * toward(FAILING);
+        let engines = self
+            .steam
+            .iter_mut()
+            .zip(&mut self.fuel)
+            .zip(&mut self.fault);
+        for (n, ((steam, fuel), fault)) in engines.enumerate() {
+            let knocked = n + self.stopped >= 4;
+            let lit = if knocked { 0. } else { self.lit };
+            if knocked && self.lit > 0. {
+                // It sputters out on what fuel is left in it.
+                *fuel += (lit - *fuel) * toward(STALL);
+                *steam += (*fuel - *steam) * toward(STALL);
+            } else {
+                *fuel = lit;
+                *steam += (lit - *steam) * toward(0.9);
+            }
+            let failing = if knocked {
+                SPUTTER
+            } else {
+                f32::from(n < self.rough)
+            };
+            *fault += (failing - *fault) * toward(FAILING);
         }
         let (revs, way) = (self.revs, self.way);
         let load = IDLING + (1. - IDLING) * revs * revs + LABOUR * climbing;
         let bangs = (BANGS.0 + (BANGS.1 - BANGS.0) * revs) / self.rough.max(1) as f32;
+        let (coughs, stopped) = (COUGHS / self.stopped.max(1) as f32, self.stopped);
         let (steam, fault) = (self.steam, self.fault);
         // More speed brightens the wash.
         for wash in &mut self.wash {
@@ -196,6 +229,7 @@ impl Hull {
             for (n, (engine, off)) in self.engines.iter_mut().zip(OUT_OF_STEP).enumerate() {
                 // Shut down, it runs down as well as dying away.
                 let turning = (revs + off) * steam[n] - (1. - steam[n]);
+                let bangs = if n + stopped >= 4 { coughs } else { bangs };
                 let (through, aloft) = engine.run(turning, load, fault[n], bangs);
                 each[n] = steam[n] * through;
                 funnel += steam[n] * aloft;

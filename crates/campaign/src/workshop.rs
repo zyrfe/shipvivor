@@ -1,12 +1,13 @@
 //! Requisition and fitting rules at the between-leg yard.
-use super::{CALIBRES, Card, DockModule, Fittings, Phase, Run, ShipBeam};
+use super::{CALIBRES, Card, DockModule, Fittings, Phase, Run, ShipBeam, battery::cradle};
 use shipvivor_artillery::TurretLayout;
-use shipvivor_shipyard::{Component, Design, Frame, Module, Sheet};
+use shipvivor_shipyard::{Component, Design, Frame, Gunhouse, MOST_TIER, Module, Sheet};
 
 pub const MAX_SECTIONS_PER_KIND: usize = 2;
 pub const MAX_GUN_STATIONS: usize = 4;
-/// The basin takes a hull this long and no longer.
-pub const MAX_LENGTH: f32 = 60.;
+/// The basin takes a hull this long and no longer: the most modules the broadest beam
+/// may run to.
+pub const MAX_LENGTH: f32 = 5. * ShipBeam::Capital.most_modules() as f32;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DeckModule {
@@ -22,7 +23,7 @@ impl DeckModule {
             Self::Reserve => "Reserve bay",
         }
     }
-    fn build(self) -> Module {
+    pub(crate) fn build(self) -> Module {
         match self {
             Self::CentreBattery => DockModule::Turret.build(),
             Self::WingBattery => Module::new(
@@ -34,12 +35,37 @@ impl DeckModule {
     }
 }
 
+/// Yard points to put a turret on a bay, split or merge one, or take one off.
+const EXCHANGE: u16 = 2;
+/// Yard points for each barbette step a turret is raised.
+const BARBETTE: u16 = 2;
+
+/// Yard points to rebore a turret's guns up to `inches` from the calibre below it.
+/// Each step up costs more than the last.
+fn bore_price(inches: u16) -> u16 {
+    CALIBRES
+        .iter()
+        .position(|&c| c == inches)
+        .map_or(0, |rank| 1 + rank as u16)
+}
+
+/// Yard points to give a turret one more barrel, to reach `barrels`.
+fn barrel_price(barrels: TurretLayout) -> u16 {
+    match barrels {
+        TurretLayout::Single => 0,
+        TurretLayout::Twin => 2,
+        TurretLayout::Triple => 3,
+        TurretLayout::Quad => 4,
+    }
+}
+
 impl DockModule {
-    /// Work orders to build and splice in one.
+    /// Yard points to build and splice in one.
     pub fn cost(self) -> u16 {
         match self {
-            Self::Reserve | Self::Floatplane | Self::Missiles => 1,
-            Self::EngineRoom | Self::Turret => 2,
+            Self::Reserve | Self::Floatplane => 3,
+            Self::Missiles | Self::EngineRoom => 4,
+            Self::Turret => 5,
         }
     }
     /// The most sections of this kind one hull carries. Turrets are counted by
@@ -60,7 +86,7 @@ impl DockModule {
     }
 }
 
-/// Why the yard turns a job down, whatever work orders are left.
+/// Why the yard turns a job down, whatever points are left.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Refusal {
     /// The hull already carries the most of these it can.
@@ -69,6 +95,7 @@ pub enum Refusal {
     Beam(ShipBeam),
     /// The hull must first be lengthened to this many metres.
     Length(u16),
+
     /// The basin takes no longer hull.
     Longest,
     /// The beam is as wide as the yard builds.
@@ -84,8 +111,27 @@ pub enum DockJob {
     },
     Fitting(Card),
     WidenBeam,
-    Calibre(u16),
-    TwinTurrets,
+    /// Rebore the main turrets on module `at` from `from` inches to `to`. A wing pair is
+    /// rebored alike.
+    Calibre {
+        at: usize,
+        from: u16,
+        to: u16,
+    },
+    /// Refit the main turrets on module `at` with `to` barrels in place of `from`. A wing
+    /// pair is refitted alike.
+    Barrels {
+        at: usize,
+        from: TurretLayout,
+        to: TurretLayout,
+    },
+    /// Stand the main turret on module `at` on a barbette `to` steps high in place of
+    /// `from`, so it fires over a lower turret beside it.
+    Barbette {
+        at: usize,
+        from: u8,
+        to: u8,
+    },
     Move {
         from: usize,
         to: usize,
@@ -129,23 +175,37 @@ impl Run {
                 DeckModule::WingBattery,
                 DeckModule::Reserve,
             ] {
-                if *module != with.build() {
+                if !module.same_kind(&with.build()) {
                     jobs.push(DockJob::Replace { at, with });
                 }
             }
         }
         let carries = |part| module.fit.contains(&part);
         if carries(Component::MainGun) {
-            jobs.extend(CALIBRES.into_iter().map(DockJob::Calibre));
-            jobs.push(DockJob::Fitting(
-                if self.fittings.turrets == TurretLayout::Twin {
-                    TripleTurrets
-                } else {
-                    QuadTurrets
-                },
-            ));
-            if self.fittings.turrets != TurretLayout::Twin {
-                jobs.push(DockJob::TwinTurrets);
+            // This bay's own turrets: their bore, their barrels and how high they stand.
+            let bore = module.gunhouse.bore;
+            jobs.extend(CALIBRES.map(|to| DockJob::Calibre { at, from: bore, to }));
+            let from = module.gunhouse.barrels;
+            jobs.extend(
+                [from.more(), from.fewer()]
+                    .into_iter()
+                    .flatten()
+                    .map(|to| DockJob::Barrels { at, from, to }),
+            );
+            let tier = module.gunhouse.tier;
+            if self.overlooked(at) {
+                jobs.push(DockJob::Barbette {
+                    at,
+                    from: tier,
+                    to: tier + 1,
+                });
+            }
+            if tier > 0 {
+                jobs.push(DockJob::Barbette {
+                    at,
+                    from: tier,
+                    to: tier - 1,
+                });
             }
             jobs.push(DockJob::Fitting(if !self.fittings.armor_piercing() {
                 ArmorPiercing
@@ -168,15 +228,12 @@ impl Run {
                 .map(DockJob::Fitting),
             );
             // The AA guns stand on the bridge wings and abaft the funnel.
-            if self.fittings.anti_air == 0 {
-                jobs.push(DockJob::Fitting(AntiAir));
-            } else {
-                jobs.extend([MoreAntiAir, HeavyAntiAir, QuickAntiAir].map(DockJob::Fitting));
-            }
+            jobs.extend([MoreAntiAir, HeavyAntiAir, QuickAntiAir].map(DockJob::Fitting));
         }
         if carries(Component::Engine) {
             jobs.push(DockJob::Fitting(Turbines));
             jobs.push(DockJob::Fitting(Hardening));
+            jobs.push(DockJob::Fitting(Pumps));
         }
         // Moves are free, so they come last.
         if at > 1 {
@@ -208,8 +265,15 @@ impl Run {
             Some(Refusal::Full(module.most()))
         } else if self.beam_class() < module.beam() {
             Some(Refusal::Beam(module.beam()))
-        } else if design.length() + Frame::Straight.spec().length * design.scale > MAX_LENGTH {
-            Some(Refusal::Longest)
+        } else if design.modules().len() >= self.beam_class().most_modules()
+            || design.length() + Frame::Straight.spec().length * design.scale > MAX_LENGTH
+        {
+            // A longer hull waits for a broader beam, up to the longest the basin takes.
+            Some(
+                self.beam_class()
+                    .next()
+                    .map_or(Refusal::Longest, Refusal::Beam),
+            )
         } else {
             None
         }
@@ -229,7 +293,7 @@ impl Run {
         (self.fittings.armor >= self.beam_class().most_armor()).then_some(Refusal::Beam(next))
     }
 
-    /// Why the yard turns this job down, whatever work orders are left. `None` for jobs
+    /// Why the yard turns this job down, whatever points are left. `None` for jobs
     /// that are simply not legal in this place.
     pub fn refusal(&self, job: DockJob) -> Option<Refusal> {
         match job {
@@ -240,14 +304,75 @@ impl Run {
             _ => None,
         }
     }
+
+    /// The centreline turret on module `at` has a centreline turret beside it standing
+    /// as high as itself, so a step of barbette would let it fire over that one.
+    pub fn overlooked(&self, at: usize) -> bool {
+        let modules = self.ship.design().modules();
+        let centreline =
+            |m: &Module| m.frame != Frame::BatteryGallery && m.fit.contains(&Component::MainGun);
+        let Some(own) = modules.get(at).filter(|m| centreline(m)) else {
+            return false;
+        };
+        own.gunhouse.tier < MOST_TIER
+            && [at.wrapping_sub(1), at + 1]
+                .into_iter()
+                .filter_map(|i| modules.get(i))
+                .any(|m| centreline(m) && m.gunhouse.tier >= own.gunhouse.tier)
+    }
+
+    /// The biggest bore the turrets on module `at` could carry with these barrels, on
+    /// her beam now.
+    pub fn cradle_at(&self, at: usize, barrels: TurretLayout) -> u16 {
+        cradle(self.beam_class(), self.gallery(at), barrels)
+    }
+
+    /// The narrowest beam on which the turrets on module `at` could carry `bore` with
+    /// these barrels, if any beam could.
+    pub fn beam_for(&self, at: usize, barrels: TurretLayout, bore: u16) -> Option<ShipBeam> {
+        let paired = self.gallery(at);
+        ShipBeam::ALL
+            .into_iter()
+            .find(|&beam| cradle(beam, paired, barrels) >= bore)
+    }
+
+    /// Module `at` is a wing gallery, whose turrets stand in pairs.
+    fn gallery(&self, at: usize) -> bool {
+        self.ship
+            .design()
+            .modules()
+            .get(at)
+            .is_some_and(|m| m.frame == Frame::BatteryGallery)
+    }
 }
 
 impl DockJob {
+    /// The price in yard points. The bigger the change to her, the more it costs.
     pub fn cost(self) -> u16 {
         match self {
             Self::Insert { module, .. } => module.cost(),
-            Self::Move { .. } | Self::TwinTurrets => 0,
-            _ => 1,
+            Self::Move { .. } => 0,
+            Self::WidenBeam => 4,
+            Self::Fitting(Card::TripleTurrets) => 3,
+            Self::Fitting(Card::QuadTurrets) => 4,
+            // Another light gun bolted to the deck is the smallest job the yard does, so a
+            // lone point left over always has somewhere to go while there is deck to take one.
+            Self::Fitting(Card::MoreSecondaries | Card::MoreAntiAir) => 1,
+            // Each barrel added is paid for. Taking barrels off is free.
+            Self::Barrels { from, to, .. } => TurretLayout::ALL
+                .into_iter()
+                .filter(|&b| b > from && b <= to)
+                .map(barrel_price)
+                .sum(),
+            Self::Barbette { from, to, .. } => BARBETTE * u16::from(to.saturating_sub(from)),
+            // Each step of bore is paid for. A smaller bore is free.
+            Self::Calibre { from, to, .. } => CALIBRES
+                .into_iter()
+                .filter(|&c| c > from && c <= to)
+                .map(bore_price)
+                .sum(),
+            Self::Replace { .. } => EXCHANGE,
+            Self::Fitting(_) => 2,
         }
     }
     pub fn fits(self, run: &Run) -> bool {
@@ -308,18 +433,38 @@ impl Run {
             })
     }
 
-    /// Paying for this job spends the last work order.
-    pub fn spends_last_order(&self, job: DockJob) -> bool {
-        job.cost() > 0 && job.cost() == self.pending_cards
+    /// The yard points this job leaves, if they cover it.
+    pub fn points_after(&self, job: DockJob) -> Option<u16> {
+        self.points.checked_sub(job.cost())
     }
 
-    /// Sail from the yard for the chart. The yard keeps her until every order is spent;
-    /// she stays in dock after the last one, for free work, until she is sailed.
+    /// This job buys an empty bay with so few points to spare that no turret can follow it
+    /// onto the bay.
+    pub fn leaves_bay_empty(&self, job: DockJob) -> bool {
+        matches!(
+            job,
+            DockJob::Insert {
+                module: DockModule::Reserve,
+                ..
+            }
+        ) && self.points_after(job).is_some_and(|left| left < EXCHANGE)
+    }
+
+    /// Sail from the yard once every level-up hand owed is taken: for the chart after
+    /// every patrol but the last, and to intercept the Regent after that. Points left over
+    /// carry to the next yard. She stays in dock until she is sailed.
     pub fn leave_dock(&mut self) -> bool {
-        if !matches!(self.phase, Phase::Drydock(_)) || self.pending_cards > 0 {
+        let Phase::Drydock(reason) = self.phase else {
+            return false;
+        };
+        if self.pending_cards > 0 {
             return false;
         }
-        self.phase = Phase::Chart;
+        self.phase = if self.stage.is_last_patrol() {
+            Phase::Intercept(reason)
+        } else {
+            Phase::Chart
+        };
         true
     }
 
@@ -334,7 +479,7 @@ impl Run {
         })
     }
 
-    /// A legal trial plan, independent of the player's remaining work orders.
+    /// A legal trial plan, independent of the points left to pay for it.
     pub fn projected_design(&self, job: DockJob) -> Option<Design> {
         let mut design = self.ship.design().as_ref().clone();
         match job {
@@ -350,16 +495,55 @@ impl Run {
                 }
             }
             DockJob::WidenBeam => design.widen(self.next_beam()?.metres()),
-            DockJob::Calibre(inches) => {
-                if !CALIBRES.contains(&inches)
-                    || inches == self.fittings.calibre()
-                    || inches > self.fittings.capacity()
+            DockJob::Calibre { at, from, to } => {
+                let module = design.modules().get(at)?;
+                let house = module.gunhouse;
+                if !module.fit.contains(&Component::MainGun)
+                    || house.bore != from
+                    || to == from
+                    || !CALIBRES.contains(&to)
+                    || to > self.cradle_at(at, house.barrels)
                 {
                     return None;
                 }
+                design.rearm(at, Gunhouse { bore: to, ..house }).ok()?;
             }
-            DockJob::TwinTurrets if self.fittings.turrets == TurretLayout::Twin => return None,
-            DockJob::TwinTurrets => {}
+            DockJob::Barrels { at, from, to } => {
+                let module = design.modules().get(at)?;
+                let house = module.gunhouse;
+                // A heavier cradle must still carry the bore the turret has.
+                if !module.fit.contains(&Component::MainGun)
+                    || house.barrels != from
+                    || to == from
+                    || (to > from && self.cradle_at(at, to) < house.bore)
+                {
+                    return None;
+                }
+                design
+                    .rearm(
+                        at,
+                        Gunhouse {
+                            barrels: to,
+                            ..house
+                        },
+                    )
+                    .ok()?;
+            }
+            DockJob::Barbette { at, from, to } => {
+                let module = design.modules().get(at)?;
+                let centreline = module.frame != Frame::BatteryGallery
+                    && module.fit.contains(&Component::MainGun);
+                let house = module.gunhouse;
+                if !centreline
+                    || house.tier != from
+                    || to == from
+                    || to > MOST_TIER
+                    || (to > from && !self.overlooked(at))
+                {
+                    return None;
+                }
+                design.rearm(at, Gunhouse { tier: to, ..house }).ok()?;
+            }
             DockJob::Fitting(card) => {
                 if !self.fittings.can_fit(card) {
                     return None;
@@ -386,7 +570,7 @@ impl Run {
                     return None;
                 }
                 let replacement = with.build();
-                if design.modules()[at] == replacement {
+                if design.modules()[at].same_kind(&replacement) {
                     return None;
                 }
                 design.replace_module(at, replacement).ok()?;
@@ -403,20 +587,15 @@ impl Run {
             return self.fittings;
         };
         let mut fit = self.fittings;
-        match job {
-            DockJob::Fitting(card) => fit = fit.with(card),
-            DockJob::Calibre(inches) => {
-                fit.shells = CALIBRES.iter().position(|&inch| inch == inches).unwrap() as u16
-            }
-            DockJob::TwinTurrets => fit.turrets = TurretLayout::Twin,
-            _ => {}
+        if let DockJob::Fitting(card) = job {
+            fit = fit.with(card);
         }
         let beam = if job == DockJob::WidenBeam {
             self.next_beam().unwrap()
         } else {
             self.beam_class()
         };
-        fit.on_deck(beam, design.gun_stations().iter().all(|s| s.paired()))
+        fit.on_deck(beam, &design.gun_stations())
     }
 
     /// Design figures with a section spliced in where the yard puts earned sections,
@@ -430,9 +609,12 @@ impl Run {
     }
 
     /// Commit a complete legal yard order, preserving damage to every retained compartment.
+    /// The yard opens once the level-up hands owed are taken, and its work is paid for in
+    /// points.
     pub fn refit_in_dock(&mut self, job: DockJob) -> bool {
         if !matches!(self.phase, Phase::Drydock(_))
-            || self.pending_cards < job.cost()
+            || self.pending_cards > 0
+            || self.points < job.cost()
             || !job.fits(self)
         {
             return false;
@@ -442,6 +624,12 @@ impl Run {
             DockJob::Insert { at, module } => self.ship.insert_module(at, module.build()),
             DockJob::Move { from, to } => self.ship.move_module(from, to),
             DockJob::Replace { at, with } => self.ship.replace_module(at, with.build()),
+            DockJob::Barrels { at, .. }
+            | DockJob::Barbette { at, .. }
+            | DockJob::Calibre { at, .. } => {
+                let planned = self.projected_design(job).expect("a legal job");
+                self.ship.rearm(at, planned.modules()[at].gunhouse)
+            }
             DockJob::WidenBeam => {
                 self.ship.widen(fit.beam.metres());
                 Ok(())
@@ -453,7 +641,7 @@ impl Run {
         }
         self.fittings = fit;
         self.refit_protection();
-        self.pending_cards -= job.cost();
+        self.points -= job.cost();
         true
     }
 }
@@ -472,40 +660,56 @@ mod tests {
         };
         assert!(!run.refit_in_dock(insert(&run, DockModule::Reserve)));
         run.tick_sector(
-            0.,
+            PAST_THE_CLOCK,
             Objectives {
                 kills: 4,
                 destroyed_drydock: true,
                 crates: 0,
+                yards: 4,
+                ..Default::default()
             },
             0,
             true,
         );
+        // Two stars and four wrecked yards pay eight points, and the clock nothing.
+        assert_eq!(run.points(), 8);
         let installed = run.ship.design().length();
         let sheet = run.projected_sheet(DockModule::Reserve);
         assert_eq!(sheet.length, installed + 5.);
         assert_eq!(run.ship.design().length(), installed);
-        assert_eq!(run.fittings_remaining(), 2);
+        assert_eq!(run.points(), 8);
         assert!(run.refit_in_dock(insert(&run, DockModule::Reserve)));
         assert_eq!(run.ship.design().sheet(), sheet);
+        assert!(run.refit_in_dock(insert(&run, DockModule::Reserve)));
+        assert_eq!(run.points(), 2);
+        // Two bays are all she carries, and two points will not build an engine room.
         assert!(!run.refit_in_dock(insert(&run, DockModule::Reserve)));
         assert!(!run.refit_in_dock(insert(&run, DockModule::EngineRoom)));
-        assert_eq!(run.fittings_remaining(), 1);
-        assert!(run.refit_in_dock(DockJob::Fitting(Card::TripleTurrets)));
+        assert!(!run.refit_in_dock(DockJob::Fitting(Card::TripleTurrets)));
+        assert!(run.refit_in_dock(DockJob::Fitting(Card::Loader)));
+        assert_eq!(run.points(), 0);
         assert!(run.leave_dock());
         assert!(run.depart(Stage::OuterRoad));
-        assert_eq!(run.ship.design().length(), 45.);
-        assert_eq!(run.fittings.turrets.count(), 3);
+        assert_eq!(run.ship.design().length(), 40.);
+        assert_eq!(run.fittings.loader, 1);
     }
 
+    /// Seconds into a leg that leave any patrol's clock behind, bases and all, so the
+    /// yard's budget is its stars' and yards' alone.
+    const PAST_THE_CLOCK: f32 = 900.;
+
+    /// A cleared sector: the raider star, the drydock star and four wrecked yards, with the
+    /// stores star too for two crates or more. It is cleared past the clock.
     fn clear_sector(crates: u16) -> Run {
         let mut run = Run::default();
         run.tick_sector(
-            0.,
+            PAST_THE_CLOCK,
             Objectives {
                 kills: 4,
                 destroyed_drydock: true,
                 crates,
+                yards: 4,
+                ..Default::default()
             },
             0,
             true,
@@ -513,21 +717,144 @@ mod tests {
         run
     }
 
+    /// A run in the yard at her built length with `points` to spend.
+    fn docked(points: u16) -> Run {
+        let mut run = Run::default();
+        run.clear();
+        run.points = points;
+        run
+    }
+
+    /// Splice a reserve bay in ahead of the after turret.
+    fn lengthen(run: &mut Run) {
+        let bay = DockJob::Insert {
+            at: run.default_gap(),
+            module: DockModule::Reserve,
+        };
+        assert!(run.refit_in_dock(bay));
+    }
+
+    /// The first reserve bay aboard.
+    fn reserve_bay(run: &Run) -> usize {
+        run.dock_modules()
+            .find(|(_, k)| *k == DockModule::Reserve)
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn the_yard_prices_its_work_by_how_much_it_changes_her() {
+        use DockModule::*;
+        assert_eq!(
+            [Reserve, Floatplane, Missiles, EngineRoom, Turret].map(DockModule::cost),
+            [3, 3, 4, 4, 5]
+        );
+        for (job, price) in [
+            (DockJob::WidenBeam, 4),
+            (
+                DockJob::Calibre {
+                    at: 1,
+                    from: 4,
+                    to: 6,
+                },
+                2,
+            ),
+            // Each step of bore costs more than the last: three more to eight inches.
+            (
+                DockJob::Calibre {
+                    at: 1,
+                    from: 4,
+                    to: 8,
+                },
+                5,
+            ),
+            (
+                DockJob::Calibre {
+                    at: 1,
+                    from: 18,
+                    to: 4,
+                },
+                0,
+            ),
+            (
+                DockJob::Barrels {
+                    at: 1,
+                    from: TurretLayout::Single,
+                    to: TurretLayout::Twin,
+                },
+                2,
+            ),
+            (
+                DockJob::Barrels {
+                    at: 1,
+                    from: TurretLayout::Twin,
+                    to: TurretLayout::Quad,
+                },
+                7,
+            ),
+            (
+                DockJob::Barrels {
+                    at: 1,
+                    from: TurretLayout::Quad,
+                    to: TurretLayout::Single,
+                },
+                0,
+            ),
+            (
+                DockJob::Barbette {
+                    at: 1,
+                    from: 0,
+                    to: 1,
+                },
+                2,
+            ),
+            (
+                DockJob::Barbette {
+                    at: 1,
+                    from: 1,
+                    to: 0,
+                },
+                0,
+            ),
+            (DockJob::Move { from: 1, to: 2 }, 0),
+            (
+                DockJob::Replace {
+                    at: 1,
+                    with: DeckModule::WingBattery,
+                },
+                2,
+            ),
+            (DockJob::Fitting(Card::Loader), 2),
+            (DockJob::Fitting(Card::Armor), 2),
+        ] {
+            assert_eq!(job.cost(), price, "{job:?}");
+        }
+        // The price comes off her points, and work they do not cover is turned down.
+        let mut run = docked(3);
+        assert!(!run.refit_in_dock(DockJob::Insert {
+            at: 1,
+            module: EngineRoom
+        }));
+        assert!(rebore(&mut run, 1, 6));
+        assert_eq!(run.points(), 1);
+        assert!(run.refit_in_dock(DockJob::Move { from: 1, to: 2 }));
+        assert_eq!(run.points(), 1);
+        assert!(!run.refit_in_dock(DockJob::Fitting(Card::Loader)));
+        assert_eq!(run.points_after(DockJob::Fitting(Card::Loader)), None);
+    }
+
     #[test]
     fn the_beam_widens_one_step_at_a_time_and_only_on_a_hull_long_enough_for_it() {
-        // A short leg leaves her at her built length with one order.
-        let mut run = Run::default();
-        run.tick(600., Objectives::default(), 0);
+        // At her built length she cannot be widened, whatever she can pay.
+        let mut run = docked(20);
         assert_eq!(run.ship.design().length(), 30.);
         assert_eq!(run.widen_refusal(), Some(Refusal::Length(35)));
         assert!(!DockJob::WidenBeam.fits(&run) && !run.refit_in_dock(DockJob::WidenBeam));
 
-        // A clean sweep earns two sections, so she reaches the yard at 40 m.
-        let mut run = clear_sector(0);
-        assert_eq!(
-            (run.ship.design().length(), run.fittings_remaining()),
-            (40., 2)
-        );
+        // Two bays bring her to 40 m, long enough to widen twice.
+        lengthen(&mut run);
+        lengthen(&mut run);
+        assert_eq!((run.ship.design().length(), run.points()), (40., 14));
         assert_eq!(
             run.projected_design(DockJob::WidenBeam).unwrap().beam(),
             ShipBeam::Cruiser.metres()
@@ -536,13 +863,22 @@ mod tests {
         assert_eq!(run.beam_class(), ShipBeam::Cruiser);
         assert!(run.refit_in_dock(DockJob::WidenBeam));
         assert_eq!(run.beam_class(), ShipBeam::Capital);
+        assert_eq!(run.points(), 6);
         assert_eq!(run.refusal(DockJob::WidenBeam), Some(Refusal::Widest));
         // Every step keeps her more than four beams long.
         let design = run.ship.design();
         assert!(design.length() / design.beam() >= 4.2);
         assert_eq!(run.fittings.capacity(), 18);
-        assert!(DockJob::Calibre(18).fits(&run));
-        // Her orders are spent, but she stays in dock until she is sailed.
+        let gun = run.ship.design().gun_stations()[0].berth.module;
+        assert!(
+            DockJob::Calibre {
+                at: gun,
+                from: 4,
+                to: 18
+            }
+            .fits(&run)
+        );
+        // She stays in dock until she is sailed, points to spare or not.
         assert!(matches!(run.phase(), Phase::Drydock(_)));
         assert!(run.leave_dock());
         assert_eq!(run.phase(), Phase::Chart);
@@ -551,8 +887,7 @@ mod tests {
     #[test]
     fn thicker_armor_waits_for_a_broader_beam_which_waits_for_a_longer_hull() {
         // At her built length and beam she carries two ranks of armor and no more.
-        let mut run = Run::default();
-        run.tick(600., Objectives::default(), 0);
+        let mut run = docked(20);
         run.fittings.armor = ShipBeam::Escort.most_armor();
         let armor = DockJob::Fitting(Card::Armor);
         assert_eq!(run.refusal(armor), Some(Refusal::Beam(ShipBeam::Cruiser)));
@@ -560,8 +895,7 @@ mod tests {
         assert_eq!(run.refusal(DockJob::WidenBeam), Some(Refusal::Length(35)));
 
         // Lengthened she can be widened, and widened she takes the next rank.
-        let mut run = clear_sector(0);
-        run.fittings.armor = ShipBeam::Escort.most_armor();
+        lengthen(&mut run);
         assert!(run.refit_in_dock(DockJob::WidenBeam));
         assert_eq!(run.refusal(armor), None);
         assert!(run.refit_in_dock(armor));
@@ -569,51 +903,223 @@ mod tests {
     }
 
     #[test]
-    fn a_section_bought_in_the_yard_lengthens_her_enough_to_widen() {
-        let mut run = Run::default();
-        run.tick_sector(0., Objectives::default(), 0, true);
-        assert_eq!(run.ship.design().length(), 35.);
+    fn each_beam_allows_so_many_modules_and_a_longer_hull_waits_for_a_broader_one() {
+        let mut run = docked(60);
+        // An escort's beam runs to eight modules: two bays past her built six.
+        lengthen(&mut run);
+        lengthen(&mut run);
+        assert_eq!(run.ship.design().modules().len(), 8);
+        let bay = DockJob::Insert {
+            at: run.default_gap(),
+            module: DockModule::EngineRoom,
+        };
+        assert_eq!(
+            run.stock_refusal(DockModule::EngineRoom),
+            Some(Refusal::Beam(ShipBeam::Cruiser))
+        );
+        assert!(!run.refit_in_dock(bay));
+        // Widened, she may run to eleven, then fourteen on a capital beam.
         assert!(run.refit_in_dock(DockJob::WidenBeam));
-        assert_eq!(run.widen_refusal(), Some(Refusal::Length(40)));
+        for module in [
+            DockModule::EngineRoom,
+            DockModule::Floatplane,
+            DockModule::Turret,
+        ] {
+            assert_eq!(run.stock_refusal(module), None, "{module:?}");
+        }
+        for module in [
+            DockModule::EngineRoom,
+            DockModule::Floatplane,
+            DockModule::Missiles,
+        ] {
+            assert!(run.refit_in_dock(DockJob::Insert {
+                at: run.default_gap(),
+                module
+            }));
+        }
+        assert_eq!(run.ship.design().modules().len(), 11);
+        assert_eq!(
+            run.stock_refusal(DockModule::Missiles),
+            Some(Refusal::Beam(ShipBeam::Capital))
+        );
+        assert!(run.refit_in_dock(DockJob::WidenBeam));
+        assert_eq!(run.stock_refusal(DockModule::Missiles), None);
+        assert_eq!(MAX_LENGTH, 70.);
+    }
+
+    #[test]
+    fn a_section_bought_in_the_yard_lengthens_her_enough_to_widen() {
+        // Three stars and four yards pay ten points.
+        let mut run = clear_sector(2);
+        assert_eq!((run.ship.design().length(), run.points()), (30., 10));
+        assert_eq!(run.widen_refusal(), Some(Refusal::Length(35)));
         let bay = DockJob::Insert {
             at: 1,
             module: DockModule::Reserve,
         };
         assert!(run.refit_in_dock(bay));
+        assert!(run.refit_in_dock(DockJob::WidenBeam));
+        assert_eq!(run.widen_refusal(), Some(Refusal::Length(40)));
+        assert!(run.refit_in_dock(bay));
         assert_eq!(run.ship.design().length(), 40.);
         assert_eq!(run.widen_refusal(), None);
+        // The second step of beam waits for another yard.
+        assert_eq!(run.points(), 0);
+        assert!(!run.refit_in_dock(DockJob::WidenBeam));
+    }
+
+    /// Rebore the turrets on module `at` to `to` inches.
+    fn rebore(run: &mut Run, at: usize, to: u16) -> bool {
+        let from = run.ship.design().modules()[at].gunhouse.bore;
+        run.refit_in_dock(DockJob::Calibre { at, from, to })
+    }
+
+    /// Refit the turrets on module `at` with `to` barrels.
+    fn rearm(run: &mut Run, at: usize, to: TurretLayout) -> bool {
+        let from = run.ship.design().modules()[at].gunhouse.barrels;
+        run.refit_in_dock(DockJob::Barrels { at, from, to })
     }
 
     #[test]
-    fn downsizing_a_quad_cradle_frees_room_for_capital_guns_without_spending_an_order() {
-        let mut run = clear_sector(8);
-        run.fittings = run
-            .fittings
-            .with(Card::TripleTurrets)
-            .with(Card::QuadTurrets);
-        assert!(run.refit_in_dock(DockJob::WidenBeam));
-        assert!(run.refit_in_dock(DockJob::WidenBeam));
-        assert_eq!(run.fittings.capacity(), 12);
-        assert!(!run.refit_in_dock(DockJob::Calibre(18)));
-        let left = run.fittings_remaining();
-        assert!(run.refit_in_dock(DockJob::TwinTurrets));
-        assert_eq!(run.fittings_remaining(), left);
-        assert!(run.refit_in_dock(DockJob::Calibre(18)));
+    fn each_turret_takes_its_barrels_one_at_a_time_and_carries_what_its_cradle_allows() {
+        let mut run = docked(30);
+        let guns = run.ship.design().gun_stations();
+        let (fore, aft) = (guns[0].berth.module, guns[1].berth.module);
+        // She is built with single guns, and each turret is refitted on its own.
+        assert!(
+            guns.iter()
+                .all(|g| g.gunhouse.barrels == TurretLayout::Single)
+        );
+        let jobs = run.section_jobs(fore);
+        assert!(jobs.contains(&DockJob::Barrels {
+            at: fore,
+            from: TurretLayout::Single,
+            to: TurretLayout::Twin
+        }));
+        assert!(!jobs.iter().any(|j| matches!(
+            j,
+            DockJob::Barrels {
+                to: TurretLayout::Triple | TurretLayout::Quad,
+                ..
+            }
+        )));
+        // Straight to a quad is refused: one barrel at a time.
+        let leap = DockJob::Barrels {
+            at: fore,
+            from: TurretLayout::Single,
+            to: TurretLayout::Quad,
+        };
+        assert!(!leap.fits(&run) || leap.cost() == 9);
+        for to in [TurretLayout::Twin, TurretLayout::Triple, TurretLayout::Quad] {
+            assert!(rearm(&mut run, fore, to));
+        }
+        assert_eq!(run.points(), 30 - 9);
+        let guns = run.ship.design().gun_stations();
+        assert_eq!(
+            (guns[0].gunhouse.barrels, guns[1].gunhouse.barrels),
+            (TurretLayout::Quad, TurretLayout::Single)
+        );
+        // On an escort's beam the quad carries four inches, and the single turret
+        // still sets the bore she can be given.
+        assert_eq!(run.fittings.capacity(), 6);
+        assert!(
+            !rebore(&mut run, fore, 6),
+            "a quad cradle carries four inches"
+        );
+        assert!(rebore(&mut run, aft, 6));
+        let guns = run.ship.design().gun_stations();
+        assert_eq!(run.fittings.for_station(&guns[0]).calibre(), 4);
+        assert_eq!(run.fittings.for_station(&guns[1]).calibre(), 6);
+        // A six-inch turret takes no more barrels than its cradle carries at that bore.
+        assert!(rearm(&mut run, aft, TurretLayout::Twin));
+        assert!(!rearm(&mut run, aft, TurretLayout::Triple));
+        assert!(rebore(&mut run, aft, 4));
+        // Taking barrels off is free.
+        let left = run.points();
+        assert!(rearm(&mut run, fore, TurretLayout::Twin));
+        assert_eq!(run.points(), left);
+        // The refit sails with her, turret by turret.
+        assert!(run.leave_dock());
+        let guns = run.ship.design().gun_stations();
+        assert!(
+            guns.iter()
+                .all(|g| g.gunhouse.barrels == TurretLayout::Twin)
+        );
+    }
+
+    #[test]
+    fn a_turret_behind_another_is_raised_to_fire_over_it() {
+        let mut run = docked(30);
+        // Two centre turrets side by side.
+        lengthen(&mut run);
+        let reserve = reserve_bay(&run);
+        assert!(run.refit_in_dock(DockJob::Replace {
+            at: reserve,
+            with: DeckModule::CentreBattery
+        }));
+        let guns = run.ship.design().gun_stations();
+        let pair = guns
+            .windows(2)
+            .find(|w| w[1].berth.module == w[0].berth.module + 1)
+            .map(|w| (w[0], w[1]));
+        let Some((low, high)) = pair else {
+            panic!("two turrets side by side");
+        };
+        // Each masks the other across the forty degrees beside its end.
+        let blind = |g: &shipvivor_shipyard::GunStation| {
+            (0..360)
+                .filter(|d| !g.bears((*d as f32).to_radians()))
+                .count()
+        };
+        let before = blind(&high);
+        let at = high.berth.module;
+        assert!(run.overlooked(at) && run.overlooked(low.berth.module));
+        let raise = DockJob::Barbette { at, from: 0, to: 1 };
+        assert!(run.section_jobs(at).contains(&raise));
+        assert!(run.refit_in_dock(raise));
+        let raised = run
+            .ship
+            .design()
+            .gun_stations()
+            .into_iter()
+            .find(|g| g.berth.module == at)
+            .unwrap();
+        assert_eq!(
+            (raised.gunhouse.tier, raised.lift()),
+            (1, shipvivor_shipyard::BARBETTE)
+        );
+        assert!(blind(&raised) < before, "it fires over the lower turret");
+        // Two steps would stand it over nothing more.
+        assert!(!run.overlooked(at));
+        assert!(!run.refit_in_dock(DockJob::Barbette { at, from: 1, to: 2 }));
+        // Lowering it again is free.
+        let left = run.points();
+        assert!(run.refit_in_dock(DockJob::Barbette { at, from: 1, to: 0 }));
+        assert_eq!(run.points(), left);
     }
 
     #[test]
     fn a_wing_gallery_carries_smaller_guns_beside_an_eighteen_inch_centre_battery() {
-        let mut run = clear_sector(8);
+        let mut run = docked(60);
         let replace = |at, with| DockJob::Replace { at, with };
-        assert_eq!(run.fittings_remaining(), 4);
+        lengthen(&mut run);
+        lengthen(&mut run);
         assert!(run.refit_in_dock(DockJob::WidenBeam));
         assert!(run.refit_in_dock(DockJob::WidenBeam));
-        assert!(run.refit_in_dock(DockJob::Calibre(18)));
+        let aft = run.ship.design().gun_stations()[1].berth.module;
+        assert!(rebore(&mut run, aft, 18));
         assert!(run.refit_in_dock(replace(1, DeckModule::WingBattery)));
+        // A wing gallery's cradles stop at eight inches.
+        assert!(!rebore(&mut run, 1, 12));
+        assert!(rebore(&mut run, 1, 8));
+        // Six for the bays, eight for the beam, twenty for the eighteen-inch bore, two for
+        // the wings and five for their eight-inch bore.
+        assert_eq!(run.points(), 60 - 41);
         let ship = run.ship.design();
         let guns = ship.gun_stations();
         assert_eq!(guns.len(), 3);
         assert_eq!(run.fittings.capacity(), 18);
+        assert_eq!(run.fittings.calibre(), 18);
         let port = run.fittings.for_station(&guns[0]);
         let main = run.fittings.for_station(&guns[2]);
         assert_eq!((port.calibre(), main.calibre()), (8, 18));
@@ -631,45 +1137,62 @@ mod tests {
     }
 
     #[test]
-    fn a_single_order_dock_can_still_add_a_turret_by_splitting_one_into_wings() {
+    fn a_lean_dock_can_still_add_a_turret_by_splitting_one_into_wings() {
         let mut run = Run::default();
-        run.tick(600., Objectives::default(), 0);
-        assert_eq!((run.fittings_remaining(), run.main_turrets()), (1, 2));
+        // Late, with only the drydock goal met: the clock pays nothing.
+        run.tick_sector(PAST_THE_CLOCK, Objectives::default(), 0, true);
+        // One star pays two points: enough to split a turret, not to buy a bay.
+        assert_eq!((run.points(), run.main_turrets()), (2, 2));
         assert_eq!(run.turret_bay(), Some(1));
         let split = DockJob::Replace {
             at: 1,
             with: DeckModule::WingBattery,
         };
-        assert!(split.adds_turret(&run) && run.spends_last_order(split));
-        // An empty bay bought with the only order would sail without a gun on it.
-        assert!(run.spends_last_order(DockJob::Insert {
+        assert!(split.adds_turret(&run) && run.points_after(split) == Some(0));
+        let bay = DockJob::Insert {
             at: 1,
-            module: DockModule::Reserve
-        }));
-        assert!(!run.leave_dock(), "an order is still to spend");
+            module: DockModule::Reserve,
+        };
+        assert_eq!(run.points_after(bay), None);
+        assert!(!run.refit_in_dock(bay));
         assert!(run.refit_in_dock(split));
-        assert_eq!(run.main_turrets(), 3);
+        assert_eq!((run.main_turrets(), run.points()), (3, 0));
         assert!(run.leave_dock());
         assert_eq!(run.phase(), Phase::Chart);
     }
 
     #[test]
-    fn two_orders_buy_a_reserve_bay_and_a_centre_turret_to_stand_on_it() {
+    fn five_points_buy_a_reserve_bay_and_a_centre_turret_to_stand_on_it() {
         let mut run = Run::default();
-        run.tick_sector(0., Objectives::default(), 0, true);
-        assert_eq!((run.fittings_remaining(), run.main_turrets()), (2, 2));
+        // The raider star, the drydock star and the one yard that earned it, past the
+        // clock.
+        run.tick(
+            PAST_THE_CLOCK,
+            Objectives {
+                kills: 4,
+                yards: 1,
+                ..Default::default()
+            },
+            0,
+        );
+        run.clear();
+        assert_eq!((run.points(), run.main_turrets()), (5, 2));
         let bay = DockJob::Insert {
             at: run.default_gap(),
             module: DockModule::Reserve,
         };
-        assert!(!run.spends_last_order(bay) && run.refit_in_dock(bay));
+        // A point fewer and the bay would sail empty.
+        run.points = 4;
+        assert!(run.leaves_bay_empty(bay));
+        run.points = 5;
+        assert!(!run.leaves_bay_empty(bay) && run.refit_in_dock(bay));
         let at = run.turret_bay().unwrap();
         assert_eq!(run.module_name(at), DeckModule::Reserve.name());
         let add = DockJob::Replace {
             at,
             with: DeckModule::CentreBattery,
         };
-        assert!(add.adds_turret(&run) && run.spends_last_order(add));
+        assert!(add.adds_turret(&run) && run.points_after(add) == Some(0));
         assert!(run.refit_in_dock(add));
         assert!(run.leave_dock());
         assert!(run.depart(Stage::OuterRoad));
@@ -680,7 +1203,8 @@ mod tests {
     #[test]
     fn each_section_offers_its_own_work_and_never_what_it_already_carries() {
         use DeckModule::*;
-        let run = clear_sector(0);
+        let mut run = clear_sector(0);
+        lengthen(&mut run);
         let last = run.ship.design().modules().len() - 1;
         // Bow and stern are fixed. The hull's own work is offered for the whole ship.
         for end in [0, last] {
@@ -690,11 +1214,7 @@ mod tests {
             run.hull_jobs(),
             [DockJob::WidenBeam, DockJob::Fitting(Card::Armor)]
         );
-        let reserve = run
-            .dock_modules()
-            .find(|(_, k)| *k == DockModule::Reserve)
-            .unwrap()
-            .0;
+        let reserve = reserve_bay(&run);
         let bay = run.section_jobs(reserve);
         assert_eq!(
             bay[0],
@@ -707,10 +1227,14 @@ mod tests {
             at: reserve,
             with: Reserve
         }));
-        assert!(!bay.iter().any(|j| matches!(j, DockJob::Calibre(_))));
+        assert!(!bay.iter().any(|j| matches!(j, DockJob::Calibre { .. })));
 
         let gun = run.section_jobs(1);
-        assert!(gun.contains(&DockJob::Calibre(18)));
+        assert!(gun.contains(&DockJob::Calibre {
+            at: 1,
+            from: 4,
+            to: 18
+        }));
         assert!(gun.contains(&DockJob::Fitting(Card::Loader)));
         assert!(gun.contains(&DockJob::Replace {
             at: 1,
@@ -734,46 +1258,43 @@ mod tests {
     }
 
     #[test]
-    fn an_earned_reserve_bay_is_offered_for_a_turret_before_any_split() {
-        let run = clear_sector(0);
-        let reserve = run
-            .dock_modules()
-            .find(|(_, k)| *k == DockModule::Reserve)
-            .unwrap()
-            .0;
+    fn a_bought_reserve_bay_is_offered_for_a_turret_before_any_split() {
+        let mut run = clear_sector(0);
+        lengthen(&mut run);
+        let reserve = reserve_bay(&run);
         assert_eq!(run.turret_bay(), Some(reserve));
-        assert!(!run.spends_last_order(DockJob::Move {
+        // Moving it costs nothing.
+        let shift = DockJob::Move {
             from: reserve,
-            to: reserve - 1
-        }));
+            to: reserve - 1,
+        };
+        assert_eq!(run.points_after(shift), Some(run.points()));
     }
 
     #[test]
-    fn invalid_layout_edits_leave_the_real_ship_and_all_work_orders_untouched() {
+    fn invalid_layout_edits_leave_the_real_ship_and_all_its_points_untouched() {
         let mut run = clear_sector(0);
+        lengthen(&mut run);
         let guns = run.ship.design().gun_stations();
         let replace = |at, with| DockJob::Replace { at, with };
-        let reserve = run
-            .dock_modules()
-            .find(|(_, k)| *k == DockModule::Reserve)
-            .unwrap()
-            .0;
+        let reserve = reserve_bay(&run);
         for at in [0, 2, 3, run.ship.design().modules().len() - 1, usize::MAX] {
             assert!(!run.refit_in_dock(replace(at, DeckModule::WingBattery)));
         }
         for (from, to) in [(2, 0), (1, 1), (usize::MAX, 1)] {
             assert!(!run.refit_in_dock(DockJob::Move { from, to }));
         }
-        assert_eq!(run.fittings_remaining(), 2);
+        assert_eq!(run.points(), 5);
         assert_eq!(run.ship.design().gun_stations(), guns);
         assert!(run.refit_in_dock(replace(reserve, DeckModule::WingBattery)));
         assert!(!run.refit_in_dock(replace(1, DeckModule::WingBattery)));
         assert_eq!(run.ship.design().gun_stations().len(), 4);
 
         let mut run = clear_sector(0);
+        lengthen(&mut run);
         let rear = run.ship.design().gun_stations()[1].berth.module;
         assert!(run.refit_in_dock(replace(1, DeckModule::Reserve)));
         assert!(!run.refit_in_dock(replace(rear, DeckModule::Reserve)));
-        assert_eq!(run.fittings_remaining(), 1);
+        assert_eq!(run.points(), 3);
     }
 }

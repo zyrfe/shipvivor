@@ -1,6 +1,7 @@
 //! A chart plate supplies the coastline. Ink the passages, fixes and soundings for this run.
 use super::*;
 use crate::state::{ChartRoll, Mode};
+use shipvivor_campaign::SEAS;
 
 const WIDTH: f32 = 538.;
 const HEIGHT: f32 = WIDTH * 2. / 3.;
@@ -65,51 +66,86 @@ fn course(cmd: &mut Commands, sheet: Entity, a: Vec2, b: Vec2, open: bool, color
 #[derive(Component)]
 pub(crate) struct ChartName;
 
-fn fix(
-    cmd: &mut Commands,
-    sheet: Entity,
-    p: Vec2,
-    stage: Stage,
-    current: bool,
-    face: &Handle<Font>,
-) -> Entity {
-    let radius = if current { 7. } else { 5. };
+/// How a fix is drawn, and where its name sits so that neighbours stay clear.
+#[derive(Clone, Copy, PartialEq)]
+enum Mark {
+    /// Where she is now, named small in pencil off to the left, on the side her course
+    /// did not come in by, clear of the passages fanning out to the right.
+    Present { above: bool },
+    /// A passage the yard offers. Its tab carries the name, so the fix is bare.
+    Offered { open: bool },
+    /// The anchorage she sailed from, named small and plain on the side her course did
+    /// not leave it by.
+    Origin { above: bool },
+    /// A passage sailed since, a bare pencilled fix on her course.
+    Sailed,
+    /// Crown Deep ahead, where every route meets.
+    Rendezvous,
+    /// Not reached, or passed by: a bare fix.
+    Bare,
+}
+
+/// Her course astern in thin, faint pencil, so the passages on offer stand out.
+const WAKE: Color = Color::srgba_u8(147, 55, 41, 130);
+
+fn fix(cmd: &mut Commands, sheet: Entity, p: Vec2, stage: Stage, mark: Mark, face: &Handle<Font>) {
+    let radius = match mark {
+        Mark::Present { .. } => 6.,
+        Mark::Bare => 3.5,
+        Mark::Origin { .. } | Mark::Sailed => 4.,
+        _ => 5.,
+    };
+    let (border, fill) = match mark {
+        Mark::Present { .. } => (PENCIL, PENCIL),
+        Mark::Origin { .. } | Mark::Sailed => (WAKE, PAPER),
+        Mark::Bare | Mark::Offered { open: false } => (FADED, PAPER),
+        _ => (SEA_INK, PAPER),
+    };
     cmd.spawn((
         Node {
             border_radius: BorderRadius::MAX,
             border: UiRect::all(px(2.)),
             ..absolute(p.x - radius, p.y - radius, 2. * radius, 2. * radius)
         },
-        BorderColor::all(if current { PENCIL } else { SEA_INK }),
-        BackgroundColor(if current { PENCIL } else { PAPER }),
+        BorderColor::all(border),
+        BackgroundColor(fill),
         ChildOf(sheet),
     ));
-    let name_y = if stage == Stage::OuterRoad { -43. } else { 9. };
-    let label = text(cmd, sheet, stage.mission().name, 16., SEA_INK);
+    // The anchorage she sailed from is named plainly. The present fix has a light paper
+    // backing, so that the bare fixes and courses behind it never show through its name.
+    let (size, at, shift, color, backing) = match mark {
+        Mark::Bare | Mark::Offered { .. } | Mark::Sailed => return,
+        Mark::Present { above } => (
+            11.,
+            Vec2::new(-9., if above { -17. } else { 3. }),
+            -100.,
+            PENCIL,
+            0.8,
+        ),
+        Mark::Origin { above } => (
+            10.,
+            Vec2::new(0., if above { -18. } else { 5. }),
+            -50.,
+            FADED,
+            0.,
+        ),
+        Mark::Rendezvous => (14., Vec2::new(0., -27.), -50., SEA_INK, 0.92),
+    };
+    let label = text(cmd, sheet, stage.mission().name, size, color);
     cmd.entity(label).insert((
         ChartName,
-        TextFont::from_font_size(16.).with_font(face.clone()),
+        TextFont::from_font_size(size).with_font(face.clone()),
         TextLayout::no_wrap(),
         Node {
             position_type: PositionType::Absolute,
-            left: px(p.x),
-            top: px(p.y + name_y),
+            left: px(p.x + at.x),
+            top: px(p.y + at.y),
             padding: UiRect::horizontal(px(4.)),
             ..default()
         },
-        UiTransform::from_translation(Val2::percent(-50., 0.)),
-        BackgroundColor(PAPER.with_alpha(0.92)),
+        UiTransform::from_translation(Val2::percent(shift, 0.)),
+        BackgroundColor(PAPER.with_alpha(backing)),
     ));
-    if current {
-        let tag_y = if stage == Stage::OuterRoad { 9. } else { -26. };
-        let tag = text(cmd, sheet, "PRESENT FIX", 10., PENCIL);
-        cmd.entity(tag).insert((
-            TextFont::from_font_size(10.).with_font(face.clone()),
-            TextLayout::justify(Justify::Center),
-            absolute(p.x - 40., p.y + tag_y, 80., 14.),
-        ));
-    }
-    label
 }
 
 /// The number and name share one hit area, with the course drawn beneath the paper.
@@ -165,7 +201,50 @@ fn anchorage_pin(
     ));
 }
 
-/// The same anchorages and exits drive the plotted courses and departure orders.
+/// Where the fixes of a run stand on the plate: the anchorages down the left, a column
+/// for each later round with its open water at the top and its hard passage at the
+/// foot, and Crown Deep at the right, where every route meets.
+struct Plate {
+    jitter: Box<dyn Fn(u32, u32) -> f32>,
+}
+
+impl Plate {
+    fn of(run: &Campaign) -> Self {
+        let seed = (run.seed ^ (run.seed >> 32)) as u32;
+        Self {
+            jitter: Box::new(move |i, j| crate::surfaces::sample(i, j, seed) - 0.5),
+        }
+    }
+    fn column(round: usize) -> f32 {
+        match round {
+            1 => 64.,
+            round if round < ROUNDS => 190. + 52. * (round - 2) as f32,
+            _ => 492.,
+        }
+    }
+    fn lane(lane: usize) -> f32 {
+        80. + 90. * lane as f32
+    }
+    fn at(&self, stage: Stage) -> Vec2 {
+        if stage == Stage::CrownDeep {
+            return Vec2::new(Self::column(ROUNDS), 151. + 18. * (self.jitter)(9, 0));
+        }
+        let (round, lane) = (stage.round() as u32, stage.lane() as u32);
+        Vec2::new(
+            Self::column(stage.round()) + 6. * (self.jitter)(round, lane),
+            Self::lane(stage.lane()) + 12. * (self.jitter)(lane + 7, round),
+        )
+    }
+    /// An anchorage pin on the departure chart, which needs more room than a fix.
+    fn pin(&self, lane: usize) -> Vec2 {
+        Vec2::new(94., self.at(SEAS[0][lane]).y)
+    }
+}
+
+const ROMAN: [&str; ROUNDS] = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII"];
+
+/// The run's course in pencil, the passages the yard offers next, and the rounds beyond
+/// in faint dashed lanes. The same seas drive the plotted courses and departure orders.
 fn plot(cmd: &mut Commands, parent: Entity, run: &Campaign, art: &crate::insignia::Insignia) {
     let sheet = cmd
         .spawn((
@@ -179,31 +258,18 @@ fn plot(cmd: &mut Commands, parent: Entity, run: &Campaign, art: &crate::insigni
             ChildOf(parent),
         ))
         .id();
-    let seed = (run.seed ^ (run.seed >> 32)) as u32;
-    let jitter = |i, j| crate::surfaces::sample(i, j, seed) - 0.5;
+    let plate = Plate::of(run);
+    let jitter = &plate.jitter;
     let departing = run.screen() == Screen::Departure;
-    let origins = std::array::from_fn::<_, { ANCHORAGES.len() }, _>(|i| {
-        Vec2::new(
-            94. + 8. * jitter(8, i as u32),
-            83. + 84. * i as f32 + 12. * jitter(7, i as u32),
-        )
-    });
-    let junction = Vec2::new(205., 167. + 14. * jitter(8, 0));
-    let crown = Vec2::new(461., 151. + 18. * jitter(9, 0));
-    let ports = std::array::from_fn::<_, { EXITS.len() }, _>(|i| {
-        Vec2::new(
-            262. + 27. * jitter(i as u32, 0),
-            68. + i as f32 * 89. + 14. * jitter(i as u32, 1),
-        )
-    });
-    // Occasional depth soundings sit off the passage lines.
+    let face = &art.display_face;
+    // Occasional depth soundings sit in the margins, clear of the names.
     for (i, (x, y)) in [
-        (171., 36.),
-        (355., 39.),
-        (471., 75.),
-        (73., 210.),
-        (169., 294.),
-        (346., 275.),
+        (150., 40.),
+        (120., 318.),
+        (224., 330.),
+        (318., 318.),
+        (412., 332.),
+        (128., 214.),
     ]
     .into_iter()
     .enumerate()
@@ -219,126 +285,269 @@ fn plot(cmd: &mut Commands, parent: Entity, run: &Campaign, art: &crate::insigni
             .insert(absolute(x + jitter(i as u32, 2) * 14., y, 24., 14.));
     }
     let north = text(cmd, sheet, "N", 11., SEA_INK);
-    cmd.entity(north).insert(absolute(32., 280., 15., 14.));
-    for (port, p) in ANCHORAGES.iter().zip(origins) {
-        if departing || port.stage == run.origin {
-            course(
-                cmd,
-                sheet,
-                p,
-                junction,
-                true,
-                if run.passage.is_some() {
-                    PENCIL
-                } else {
-                    SEA_INK
-                },
-            );
-        }
-    }
-    for (exit, p) in EXITS.iter().zip(ports) {
-        let chosen = run.passage == Some(exit.stage);
-        let open = !departing && (chosen || (run.passage.is_none() && run.stars() >= exit.stars));
-        let color = if chosen {
+    cmd.entity(north).insert(absolute(20., 300., 15., 14.));
+    // The rounds are numbered along the head of the plate.
+    let present = (!departing).then(|| run.stage.round());
+    for (i, numeral) in ROMAN.iter().enumerate() {
+        let colour = if present == Some(i + 1) {
             PENCIL
-        } else if open {
-            SEA_INK
         } else {
             FADED
         };
-        course(cmd, sheet, junction, p, open, color);
-        course(cmd, sheet, p, crown, open, color);
-    }
-    for (exit, p) in EXITS.iter().zip(ports) {
-        let label = fix(
-            cmd,
-            sheet,
-            p,
-            exit.stage,
-            run.stage == exit.stage,
-            &art.display_face,
-        );
-        if run.screen() == Screen::Chart && run.stars() >= exit.stars {
-            cmd.entity(label).insert((
-                Action::Depart(exit.stage),
-                RelativeCursorPosition::default(),
-            ));
-        }
-        let detail = if exit.stage.enters_air_cover() {
-            format!("{} stars  /  Air station", exit.stars)
-        } else if exit.stars == 0 {
-            "0 stars".into()
-        } else {
-            format!("{} stars", exit.stars)
-        };
-        let note = text(
-            cmd,
-            sheet,
-            detail,
-            11.,
-            if exit.stage.enters_air_cover() {
-                PENCIL
-            } else {
-                SEA_INK
-            },
-        );
-        cmd.entity(note).insert((
-            TextFont::from_font_size(12.).with_font(art.display_face.clone()),
-            absolute(
-                p.x - 66.,
-                p.y + if exit.stage == Stage::OuterRoad {
-                    -23.
-                } else {
-                    29.
-                },
-                132.,
-                16.,
-            ),
+        let mark = text(cmd, sheet, *numeral, 11., colour);
+        let x = Plate::column(i + 1) + if i == 0 && departing { 30. } else { 0. };
+        cmd.entity(mark).insert((
+            TextFont::from_font_size(11.).with_font(face.clone()),
             TextLayout::justify(Justify::Center),
+            absolute(x - 20., 14., 40., 14.),
         ));
-        if exit.stage.enters_air_cover() {
-            cmd.spawn((
-                ImageNode {
-                    image: art.floatplane.clone(),
-                    color: PENCIL,
-                    ..default()
-                },
-                absolute(p.x - 8., p.y + 46., 16., 16.),
-                ChildOf(sheet),
-            ));
+    }
+
+    // Her course so far, from the anchorage through each passage taken.
+    let mut sailed: Vec<Stage> = Vec::new();
+    if !departing {
+        sailed.push(run.origin);
+        sailed.extend(run.course.iter().copied());
+        if run.stage == Stage::CrownDeep {
+            sailed.push(Stage::CrownDeep);
         }
     }
-    for (i, (port, p)) in ANCHORAGES.iter().zip(origins).enumerate() {
-        if departing {
-            anchorage_pin(cmd, sheet, p, port.stage, i + 1, &art.display_face);
-        } else if port.stage == run.origin {
-            fix(
+    for pair in sailed.windows(2) {
+        course(cmd, sheet, plate.at(pair[0]), plate.at(pair[1]), true, WAKE);
+    }
+    // The present fix is named on the side her course did not come in by.
+    let present = |p: Vec2| Mark::Present {
+        above: sailed
+            .iter()
+            .rev()
+            .nth(1)
+            .is_none_or(|&astern| plate.at(astern).y > p.y - 20.),
+    };
+    // The passages on offer from the present fix, open or locked by stars.
+    let offered = if departing { None } else { run.exits() };
+    if let Some(exits) = offered {
+        for exit in exits {
+            let open = run.stars() >= exit.stars;
+            let colour = if open { SEA_INK } else { FADED };
+            course(
                 cmd,
                 sheet,
-                p,
-                port.stage,
-                run.stage == port.stage,
-                &art.display_face,
+                plate.at(run.stage),
+                plate.at(exit.stage),
+                open,
+                colour,
             );
         }
+    } else if !departing && run.stage.is_last_patrol() {
+        let (here, crown) = (plate.at(run.stage), plate.at(Stage::CrownDeep));
+        course(cmd, sheet, here, crown, true, SEA_INK);
     }
-    fix(
-        cmd,
-        sheet,
-        crown,
-        Stage::CrownDeep,
-        run.stage == Stage::CrownDeep,
-        &art.display_face,
-    );
+    // Every anchorage fans out to the second round's three passages.
+    if departing {
+        for lane in 0..3 {
+            for next in SEAS[1] {
+                course(cmd, sheet, plate.pin(lane), plate.at(next), true, SEA_INK);
+            }
+        }
+    }
+    // The rounds beyond run on as three dashed lanes to Crown Deep.
+    let ahead = if departing { 2 } else { run.stage.round() + 1 };
+    for round in ahead..PATROLS {
+        for lane in 0..3 {
+            let (from, to) = (SEAS[round - 1][lane], SEAS[round][lane]);
+            course(cmd, sheet, plate.at(from), plate.at(to), false, FADED);
+        }
+    }
+    if ahead <= PATROLS {
+        for sea in SEAS[PATROLS - 1] {
+            let (from, to) = (plate.at(sea), plate.at(Stage::CrownDeep));
+            course(cmd, sheet, from, to, false, FADED);
+        }
+    }
+
+    // The fixes go over the lines.
+    for (round, seas) in SEAS.iter().enumerate() {
+        for (lane, &sea) in seas.iter().enumerate() {
+            let p = plate.at(sea);
+            if departing && round == 0 {
+                anchorage_pin(cmd, sheet, plate.pin(lane), sea, lane + 1, face);
+                continue;
+            }
+            let mark = if sea == run.stage && !departing {
+                present(p)
+            } else if sailed.first() == Some(&sea) {
+                Mark::Origin {
+                    above: sailed
+                        .get(1)
+                        .is_none_or(|&next| plate.at(next).y > p.y - 20.),
+                }
+            } else if sailed.contains(&sea) {
+                Mark::Sailed
+            } else if offered.is_some_and(|exits| exits.iter().any(|e| e.stage == sea)) {
+                Mark::Offered {
+                    open: run.stars() >= sea.exit().stars,
+                }
+            } else {
+                Mark::Bare
+            };
+            fix(cmd, sheet, p, sea, mark, face);
+        }
+    }
+    let crown = plate.at(Stage::CrownDeep);
+    let crown_mark = if run.stage == Stage::CrownDeep {
+        present(crown)
+    } else {
+        Mark::Rendezvous
+    };
+    fix(cmd, sheet, crown, Stage::CrownDeep, crown_mark, face);
+    // The tabs go over everything, numbered as the cards beside the chart and the keys.
+    for (lane, exit) in offered.into_iter().flatten().enumerate() {
+        offer_tab(cmd, sheet, run, (lane, exit), plate.at(exit.stage), art);
+    }
+}
+
+/// A passage on offer, on a paper tab hung off its fix: the key that sails it, its
+/// name, the stars it still needs if it is locked, the most it can pay the yard in
+/// spanners, and a plane if it runs under air cover. The top lane's tab hangs above
+/// its fix and the others' below, clear of the courses fanning out from the present
+/// fix, and a tab that would run off the plate stops at its edge instead.
+fn offer_tab(
+    cmd: &mut Commands,
+    sheet: Entity,
+    run: &Campaign,
+    (lane, exit): (usize, shipvivor_campaign::Exit),
+    p: Vec2,
+    art: &crate::insignia::Insignia,
+) {
+    let sea = exit.stage;
+    let open = run.stars() >= exit.stars;
+    // A locked passage is greyed like its card beside the chart, air station and all.
+    let ink = if open { SEA_INK } else { FADED };
+    // A strip from the fix to the plate's edge holds the tab. Its auto margin keeps the
+    // tab at the fix while there is room, and gives way when there is none, so that
+    // the tab ends at the edge.
+    let strip = cmd
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(p.x - 12.),
+                right: px(6.),
+                top: if lane == 0 { auto() } else { px(p.y + 13.) },
+                bottom: if lane == 0 {
+                    px(HEIGHT - p.y + 13.)
+                } else {
+                    auto()
+                },
+                justify_content: JustifyContent::FlexEnd,
+                ..default()
+            },
+            ChildOf(sheet),
+        ))
+        .id();
+    let tab = cmd
+        .spawn((
+            Node {
+                margin: UiRect::right(auto()),
+                flex_shrink: 0.,
+                align_items: AlignItems::Center,
+                column_gap: px(5.),
+                padding: UiRect::new(px(3.), px(7.), px(2.), px(2.)),
+                border: UiRect::all(px(1.)),
+                border_radius: BorderRadius::all(px(12.)),
+                ..default()
+            },
+            BackgroundColor(PAPER.with_alpha(0.92)),
+            BorderColor::all(ink),
+            ChildOf(strip),
+        ))
+        .id();
+    if run.screen() == Screen::Chart && open {
+        cmd.entity(tab).insert((
+            ChartName,
+            Action::Depart(sea),
+            RelativeCursorPosition::default(),
+        ));
+    }
+    let badge = cmd
+        .spawn((
+            Node {
+                width: px(19.),
+                height: px(19.),
+                border_radius: BorderRadius::MAX,
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(ink),
+            ChildOf(tab),
+        ))
+        .id();
+    text(cmd, badge, (lane + 1).to_string(), 13., PAPER);
+    let name = text(cmd, tab, sea.mission().name, 13., ink);
+    cmd.entity(name).insert((
+        TextFont::from_font_size(13.).with_font(art.display_face.clone()),
+        TextLayout::no_wrap(),
+    ));
+    let face = &art.display_face;
+    if !open {
+        stamp(cmd, tab, &art.lock, ink);
+        figure(cmd, tab, exit.stars.into(), &art.star, ink, face);
+    }
+    // Every star at the lane's rate and every yard, before any cargo.
+    let most = shipvivor_sim::Sector::of(sea).most_points();
+    figure(cmd, tab, most, &art.order, ink, face);
+    if sea.enters_air_cover() {
+        stamp(cmd, tab, &art.floatplane, if open { PENCIL } else { FADED });
+    }
+}
+
+/// One of the 12-pixel stamps, inked onto a tab.
+fn stamp(cmd: &mut Commands, parent: Entity, image: &Handle<Image>, ink: Color) {
+    cmd.spawn((
+        ImageNode {
+            image: image.clone(),
+            color: ink,
+            ..default()
+        },
+        Node {
+            width: px(12.),
+            height: px(12.),
+            ..default()
+        },
+        ChildOf(parent),
+    ));
+}
+
+/// A count and the stamp it counts, set close together.
+fn figure(
+    cmd: &mut Commands,
+    parent: Entity,
+    count: u16,
+    image: &Handle<Image>,
+    ink: Color,
+    face: &Handle<Font>,
+) {
+    let row = cmd
+        .spawn((
+            Node {
+                align_items: AlignItems::Center,
+                column_gap: px(2.),
+                ..default()
+            },
+            ChildOf(parent),
+        ))
+        .id();
+    let number = text(cmd, row, count.to_string(), 12., ink);
+    cmd.entity(number)
+        .insert(TextFont::from_font_size(12.).with_font(face.clone()));
+    stamp(cmd, row, image, ink);
 }
 
 fn legend(run: &Campaign) -> &'static str {
     if run.screen() == Screen::Departure {
-        "Click an anchorage to sail.   Dashed lines show later passages."
-    } else if run.passage.is_some() {
-        "Red course   Selected passage       Dashed   Other passages"
+        "Click an anchorage to sail.   Each yard offers the next round's three passages."
     } else {
-        "Solid   Open passage       Dashed   Star-locked passage"
+        "Red  Your course      Solid  Open      Dashed  Locked or ahead"
     }
 }
 

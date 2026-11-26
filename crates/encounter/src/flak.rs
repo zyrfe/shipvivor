@@ -2,7 +2,7 @@
 //! the crew leads an enemy aircraft to be, and an aircraft inside the burst takes its
 //! damage. Bursts scatter about the aim, so a steady pass is hit often but not always.
 use super::{
-    AntiAir, Battery, Battle, DeckOffsets, Effect, EffectKind, Orders, body,
+    AntiAir, Battery, Battle, DeckOffsets, Effect, EffectKind, Events, Orders, body,
     projectile::{AA_SPEED, FlightPath},
 };
 use glam::{Vec2, Vec3, Vec3Swizzles};
@@ -16,6 +16,9 @@ const SCATTER: f32 = 10.;
 pub(super) const SPOTTER_STRENGTH: u16 = 5;
 /// Hits a strafer or bomber takes before it goes down.
 pub(super) const ATTACK_STRENGTH: u16 = 8;
+/// Hits a harrier takes before it goes down: enough that it takes a moment, and most
+/// get a strafing pass in before they fall.
+pub(super) const HARRIER_STRENGTH: u16 = 3;
 /// Seconds an air station takes to ready a fresh aircraft for one that was shot down.
 pub(super) const REPLACEMENT: f32 = 45.;
 /// Radians per second an AA mount trains and elevates.
@@ -23,9 +26,10 @@ const TRAINING: f32 = 100_f32.to_radians();
 /// Metres above the waterline of an AA mount's trunnions.
 const MOUNT_HEIGHT: f32 = 3.5;
 /// Where each pair of mounts stands in the order they are fitted: metres out from the
-/// centreline, and forward of amidships. Abaft the after funnel, then the bridge wings,
-/// then between the funnels, each in a tub at the height of the bridge wing deck.
-const STATIONS: [(f32, f32); AntiAir::MOST_MOUNTS / 2] = [(1.0, -4.85), (1.3, 1.3), (1.45, -1.6)];
+/// centreline, and forward of amidships. The bridge wings, where she is built with a
+/// pair, then abaft the after funnel, then between the funnels, each in a tub at the
+/// height of the bridge wing deck.
+const STATIONS: [(f32, f32); AntiAir::MOST_MOUNTS / 2] = [(1.3, 1.3), (1.0, -4.85), (1.45, -1.6)];
 
 /// What kind of aircraft went down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +38,8 @@ pub enum Airframe {
     Spotter,
     /// An air station's strafer or bomber.
     Attack,
+    /// A light harrier from a base's mooring.
+    Harrier,
 }
 
 /// One light anti-aircraft mount, worked by its crew.
@@ -48,7 +54,7 @@ pub struct AaMount {
     rounds: u32,
 }
 impl AaMount {
-    fn new(index: usize) -> Self {
+    pub(super) fn new(index: usize) -> Self {
         let (abeam, fore) = Self::station(index);
         Self {
             reload: 0.,
@@ -65,6 +71,11 @@ impl AaMount {
         let (x, fore) = STATIONS[(index / 2).min(STATIONS.len() - 1)];
         let side = if index.is_multiple_of(2) { -1. } else { 1. };
         (side * x, fore)
+    }
+    /// Whether the mount at `index` stands on a bridge wing, which goes with the bridge
+    /// and needs no column of its own.
+    pub fn on_bridge_wing(index: usize) -> bool {
+        index / 2 == 0
     }
     pub fn deck_x(&self) -> f32 {
         self.abeam
@@ -92,7 +103,7 @@ impl DeckOffsets {
     /// machinery: the bridge wings go with the bridge, the others with the machinery.
     pub fn aa_position(self, index: usize) -> (f32, f32) {
         let (x, fore) = AaMount::station(index);
-        let shift = if index / 2 == 1 {
+        let shift = if AaMount::on_bridge_wing(index) {
             self.bridge_z
         } else {
             self.machinery_z
@@ -140,7 +151,11 @@ impl Battle {
                 at: plane.position_3d(),
                 way: plane.way,
             });
-        raid.into_iter().chain(spotters).collect()
+        let harriers = self.harriers.iter().map(|plane| Quarry {
+            at: plane.position_3d(),
+            way: plane.way,
+        });
+        raid.into_iter().chain(spotters).chain(harriers).collect()
     }
 
     /// Each mount trains on the nearest enemy aircraft in reach and fires a round fused
@@ -202,7 +217,7 @@ impl Battle {
 
     /// A fused round bursts. Every enemy aircraft inside it takes the damage, and one
     /// with nothing left goes down.
-    pub(super) fn burst_flak(&mut self, at: Vec3, damage: u16) {
+    pub(super) fn burst_flak(&mut self, at: Vec3, damage: u16, events: &mut Events) {
         self.effects.push(Effect {
             body: body(&mut self.serial, at.xz(), 0.),
             height: at.y,
@@ -219,6 +234,7 @@ impl Battle {
                 let (pos, heading, height) = (plane.body.pos, plane.body.heading, plane.altitude);
                 station.aircraft = None;
                 station.rearm = REPLACEMENT;
+                events.planes_downed += 1;
                 self.effects.push(Effect {
                     body: body(&mut self.serial, pos, heading),
                     height,
@@ -234,6 +250,7 @@ impl Battle {
             plane.health = plane.health.saturating_sub(damage);
             if plane.health == 0 {
                 plane.shoot_down();
+                events.planes_downed += 1;
                 self.effects.push(Effect {
                     body: body(&mut self.serial, plane.position, plane.heading),
                     height: plane.altitude,
@@ -241,6 +258,26 @@ impl Battle {
                     age: 0.,
                 });
             }
+        }
+        let mut downed = Vec::new();
+        self.harriers.retain_mut(|plane| {
+            if caught(plane.position_3d()) {
+                plane.health = plane.health.saturating_sub(damage);
+            }
+            if plane.health > 0 {
+                return true;
+            }
+            downed.push((plane.body.pos, plane.body.heading, plane.altitude));
+            false
+        });
+        for (pos, heading, height) in downed {
+            events.planes_downed += 1;
+            self.effects.push(Effect {
+                body: body(&mut self.serial, pos, heading),
+                height,
+                kind: EffectKind::Downed(Airframe::Harrier),
+                age: 0.,
+            });
         }
     }
 }

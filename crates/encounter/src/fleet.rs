@@ -5,9 +5,10 @@ use super::{
     mounts::train_full,
     pilot::{Helm, clear_course},
     projectile::FlightPath,
+    torpedo_boat::HARRYING_SCATTER,
 };
 use glam::{Vec2, Vec3, Vec3Swizzles};
-use shipvivor_artillery::{ArmorGrade, ArmorPanel};
+use shipvivor_artillery::ArmorPanel;
 use shipvivor_shipyard::{Berth, Component, Design, State};
 use std::f32::consts::PI;
 use std::sync::{Arc, OnceLock};
@@ -24,16 +25,49 @@ pub const CONN_LOST: f32 = 40.;
 pub const CONN_PACE: f32 = 0.35;
 /// Metres a second a ship adrift keeps once her engines stop.
 const DRIFT: f32 = 0.65;
+/// How much farther than her true range a warship's main guns reach, as a share of it.
+/// With [`LONG_LAY`], the simulator's bold captain takes a tenth to a third more damage
+/// a minute than with no long fire. Half again her range, with an error that grew with
+/// the square, doubled it.
+const LONG_RANGE: f32 = 1.3;
+/// How far a salvo fired at her greatest reach is laid off along the line of fire and
+/// across it, at most. Nearer, the error shrinks in step with how far past her true
+/// range the mark lies, to nothing at it. The whole salvo shares the error.
+const LONG_LAY: (f32, f32) = (45., 18.);
+
+/// The share of [`LONG_LAY`] a salvo is laid off by at `distance`, from guns laid true
+/// out to `range` that reach to `reach`: none at her true range, all of it at her
+/// reach, and in step between.
+pub(super) fn long_lay(distance: f32, range: f32, reach: f32) -> f32 {
+    ((distance - range) / (reach - range).max(1.)).clamp(0., 1.)
+}
+/// Dock points' worth of cargo in a coaster's hold, and in a freighter's.
+pub const COASTER_CARGO: f32 = 0.25;
+pub const FREIGHTER_CARGO: f32 = 1.;
+/// Cargo is reckoned in these shares of a dock point. Every share is a whole number of
+/// them and a power of two divides it, so the shares of a sector add up exactly.
+const CARGO_GRAIN: f32 = 1024.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EnemyClass {
     Freighter,
+    /// A small coastal trader, a quarter of a freighter's length. She is unarmed, keeps
+    /// no lookout and plies between the yards with a deck cargo.
+    Coaster,
     Patrol,
+    /// A fast, fragile boat with one torpedo and no guns. She dashes out from her base's
+    /// mooring, puts her torpedo in the water across Breakwater's course and runs home to
+    /// reload (see `torpedo_boat`).
+    TorpedoBoat,
     Destroyer,
     Cruiser,
     Battleship,
     Parliament,
     Regent,
+    /// The boss of the second and third rounds: a battleship with a fourth turret and
+    /// gold bands on her turrets, about a fifth more gunfire than a battleship and a
+    /// third more hull. She has no turret screen and sinks as any battleship does.
+    Commodore,
 }
 use EnemyClass::*;
 
@@ -47,25 +81,98 @@ pub struct Profile {
     /// speed it sets the fastest she can swing; with less way on she swings slower.
     turning: f32,
     stand_off: f32,
+    /// Metres out to which her main guns are laid true. Past it, out to her class's
+    /// [`EnemyClass::reach`], they still fire, laid off by an error that grows to the end.
     range: f32,
     traverse: f32,
     reload: f32,
     damage: u16,
     pub stores: u8,
 }
+impl Profile {
+    /// Metres a second she makes at full speed.
+    pub fn speed(&self) -> f32 {
+        self.speed
+    }
+    /// Metres out to which her main guns are laid true.
+    pub fn range(&self) -> f32 {
+        self.range
+    }
+}
 
 impl EnemyClass {
+    /// Every class, for whatever is built for each of them up front, such as the battle
+    /// view's meshes. `listed` below keeps it whole.
+    pub const ALL: [EnemyClass; 10] = [
+        Freighter,
+        Coaster,
+        Patrol,
+        TorpedoBoat,
+        Destroyer,
+        Cruiser,
+        Battleship,
+        Parliament,
+        Regent,
+        Commodore,
+    ];
+
+    /// Never called. The match is exhaustive, so a new class stops the build here until
+    /// she is added to it, and to `ALL` beside it.
+    #[allow(dead_code)]
+    fn listed(self) {
+        match self {
+            Freighter | Coaster | Patrol | TorpedoBoat | Destroyer | Cruiser | Battleship
+            | Parliament | Regent | Commodore => {}
+        }
+    }
+
+    /// A flagship proper: her turrets screen her hull, and she is stripped rather than
+    /// sunk.
     pub fn is_flagship(self) -> bool {
         matches!(self, Parliament | Regent)
+    }
+    /// The ship a leg builds up to: she is announced, charted and must be sunk before
+    /// the leg is won. The Commodore in the early rounds, the flagships after.
+    pub fn is_boss(self) -> bool {
+        matches!(self, Commodore | Parliament | Regent)
+    }
+
+    /// An unarmed cargo ship: she keeps no lookout, never gets word of the player and
+    /// is no part of a raid.
+    pub fn is_merchant(self) -> bool {
+        matches!(self, Freighter | Coaster)
+    }
+
+    /// Dock points' worth of cargo she carries when full.
+    pub fn cargo(self) -> f32 {
+        match self {
+            Freighter => FREIGHTER_CARGO,
+            Coaster => COASTER_CARGO,
+            _ => 0.,
+        }
+    }
+    fn cargo_grains(self) -> u32 {
+        (self.cargo() * CARGO_GRAIN).round() as u32
+    }
+
+    /// The farthest her main guns fire, laid off more the farther past her true range.
+    /// A torpedo boat's little gun harries her only from close aboard.
+    pub fn reach(self) -> f32 {
+        let range = self.profile().range;
+        if self == TorpedoBoat {
+            range
+        } else {
+            range * LONG_RANGE
+        }
     }
 
     pub fn lookout_range(self) -> f32 {
         match self {
-            Freighter => 0.,
-            Patrol => 520.,
+            Freighter | Coaster => 0.,
+            Patrol | TorpedoBoat => 520.,
             Destroyer => 650.,
             Cruiser => 770.,
-            Battleship | Parliament | Regent => 900.,
+            Battleship | Commodore | Parliament | Regent => 900.,
         }
     }
 
@@ -85,6 +192,29 @@ impl EnemyClass {
                 damage: 0,
                 stores: 4,
             },
+            // A quarter of the freighter: 8 m, beamy for her length and light. She pays
+            // in cargo and experience, and carries no stores.
+            Coaster => &Profile {
+                hull: Hull {
+                    radius: 1.25,
+                    bow: 4.2,
+                    stern: 3.8,
+                    mass: 0.15,
+                    shock_per_point: 1.2,
+                },
+                deck: 0.95,
+                gun_scale: 0.5,
+                barrels: 0,
+                // As tight a turn as any class may swing at full speed: a destroyer's.
+                speed: 7.,
+                turning: 19.,
+                stand_off: 0.,
+                range: 0.,
+                traverse: 0.,
+                reload: 0.,
+                damage: 0,
+                stores: 0,
+            },
             Patrol => &Profile {
                 hull: Hull::RAIDER,
                 deck: 1.65,
@@ -98,6 +228,30 @@ impl EnemyClass {
                 reload: 4.5,
                 damage: 7,
                 stores: 1,
+            },
+            // Twelve metres, slim and low, and half again a destroyer's speed. She turns
+            // as tightly as any class may at full speed. Her torpedoes are her weapon;
+            // the little gun on her forecastle harries the ship between runs and after
+            // them, a pinprick that keeps her in mind. She carries no stores.
+            TorpedoBoat => &Profile {
+                hull: Hull {
+                    radius: 1.35,
+                    bow: 6.4,
+                    stern: 5.6,
+                    mass: 0.2,
+                    shock_per_point: 1.2,
+                },
+                deck: 1.2,
+                gun_scale: 0.6,
+                barrels: 1,
+                speed: 11.,
+                turning: 29.,
+                stand_off: 0.,
+                range: super::torpedo_boat::HARRYING_RANGE + 40.,
+                traverse: 70.,
+                reload: 4.5,
+                damage: 1,
+                stores: 0,
             },
             Destroyer => &Profile {
                 hull: Hull {
@@ -153,6 +307,28 @@ impl EnemyClass {
                 damage: 7,
                 stores: 7,
             },
+            // A battleship stretched by a turret, a little quicker on her helm and her
+            // loading, and better found.
+            Commodore => &Profile {
+                hull: Hull {
+                    radius: 6.2,
+                    bow: 31.,
+                    stern: 27.,
+                    mass: 34.,
+                    shock_per_point: 3.,
+                },
+                deck: 3.3,
+                gun_scale: 2.15,
+                barrels: 3,
+                speed: 3.6,
+                turning: 42.,
+                stand_off: 195.,
+                range: 450.,
+                traverse: 21.,
+                reload: 10.,
+                damage: 6,
+                stores: 9,
+            },
             Regent => &Profile {
                 hull: Hull {
                     radius: 18.5,
@@ -199,16 +375,19 @@ impl EnemyClass {
     /// The module layout that hits on this class land on.
     pub fn design(self) -> Arc<Design> {
         // In the order of the classes.
-        static YARD: OnceLock<[Arc<Design>; 7]> = OnceLock::new();
+        static YARD: OnceLock<[Arc<Design>; 10]> = OnceLock::new();
         YARD.get_or_init(|| {
             [
                 Design::freighter(),
+                Design::coaster(),
                 Design::patrol_boat(),
+                Design::torpedo_boat(),
                 Design::destroyer(),
                 Design::cruiser(),
                 Design::battleship(),
                 Design::flagship(),
                 Design::iron_regent(),
+                Design::commodore(),
             ]
             .map(Arc::new)
         })[self as usize]
@@ -222,11 +401,20 @@ impl EnemyClass {
     // (starboard, forward, height of raised base above the deck)
     fn stations(self) -> &'static [(f32, f32, f32)] {
         match self {
-            Freighter => &[],
+            Freighter | Coaster => &[],
             Patrol => &[(0., 4.2, 0.)],
+            // On the turtleback, forward of her bridge.
+            TorpedoBoat => &[(0., 4., 0.24)],
             Destroyer => &[(0., 5., 0.), (0., -4.5, 0.)],
             Cruiser => &[(0., 8.7, 0.), (0., -8.5, 0.)],
             Battleship => &[(0., 17.5, 0.), (0., 9., 2.8), (0., -16., 0.)],
+            // A and B forward, X and Y aft, the inner pair superfiring.
+            Commodore => &[
+                (0., 20.5, 0.),
+                (0., 12.5, 2.8),
+                (0., -9., 2.8),
+                (0., -16.5, 0.),
+            ],
             Regent => &[
                 (0., 64., 1.2),
                 (12., -35., 1.),
@@ -333,8 +521,14 @@ impl SecondaryMount {
 pub struct Raider {
     pub secondaries: Vec<SecondaryMount>,
     pub(super) cargo_run: Option<(usize, Vec2)>,
+    /// The base a coaster lies at anchor off, until it is roused and she weighs.
+    pub(super) moored: Option<usize>,
+    /// Cargo still in her holds, in grains.
+    pub(super) cargo: u32,
     pub body: Body,
     pub class: EnemyClass,
+    /// How heavily she is gunned: the barrels in each of her turrets.
+    weight: super::Weight,
     pub has_contact: bool,
     pub(super) last_sighting: Option<Vec2>,
     pub(super) guns: Vec<EnemyGun>,
@@ -350,6 +544,8 @@ pub struct Raider {
     pub(super) knock: Vec2,
     pub(super) way: Vec2,
     pub(super) ram_rest: f32,
+    /// A torpedo boat's runs from her base's mooring. Other classes have none.
+    pub(super) attack: Option<super::torpedo_boat::Attack>,
 }
 impl Raider {
     pub(super) fn new(body: Body, class: EnemyClass) -> Self {
@@ -375,22 +571,15 @@ impl Raider {
                 reload: 1.4 + p.reload * i as f32 / stations.len() as f32,
                 charging: false,
                 committed: None,
-                plate: ArmorPanel::new(
-                    if class == Battleship {
-                        ArmorGrade::Reinforced
-                    } else {
-                        ArmorGrade::Light
-                    },
-                    16,
-                    4,
-                ),
+                plate: ArmorPanel::new(class.turret_plate(), 16, 4),
             })
             .collect();
         let pairs = match class {
-            Freighter | Patrol => 0,
+            Freighter | Coaster | Patrol | TorpedoBoat => 0,
             Destroyer => 1,
             Cruiser => 2,
             Battleship => 6,
+            Commodore => 8,
             Parliament => 10,
             Regent => 12,
         };
@@ -421,10 +610,13 @@ impl Raider {
         Self {
             secondaries,
             cargo_run: None,
+            moored: None,
+            cargo: class.cargo_grains(),
             has_contact: false,
             last_sighting: None,
             body,
             class,
+            weight: super::Weight::stock(class),
             guns,
             ship: shipvivor_shipyard::Ship::new(design),
             director,
@@ -441,6 +633,7 @@ impl Raider {
             knock: Vec2::ZERO,
             way: Vec2::ZERO,
             ram_rest: 0.,
+            attack: None,
         }
     }
     pub(super) fn disable_director(&mut self) {
@@ -484,8 +677,68 @@ impl Raider {
     pub fn destination_port(&self) -> Option<usize> {
         self.cargo_run.map(|(index, _)| index)
     }
+    /// The base she lies at anchor off, if she has not yet weighed.
+    pub fn moored_at(&self) -> Option<usize> {
+        self.moored
+    }
+    /// Lie at anchor off base `base`, with no way on.
+    pub(super) fn moor(&mut self, base: usize) {
+        self.moored = Some(base);
+        self.helm = Helm::under_way(0.);
+    }
+    /// Let go her anchor off base `base` as she comes in under way. She carries her way
+    /// off as she rides up to it, rather than stopping dead.
+    pub(super) fn anchor(&mut self, base: usize) {
+        self.moored = Some(base);
+    }
+    /// Weigh anchor to sail as a warship does.
+    pub(super) fn cast_off(&mut self) {
+        self.moored = None;
+    }
+    /// Weigh anchor for the yard `bound`, and come back to `origin` should it fall.
+    pub(super) fn weigh(&mut self, bound: usize, origin: Vec2) {
+        self.moored = None;
+        self.cargo_run = Some((bound, origin));
+    }
+    /// Dock points' worth of cargo still aboard.
+    pub fn cargo(&self) -> f32 {
+        self.cargo as f32 / CARGO_GRAIN
+    }
+    /// Cargo lost with the hull she has lost since the last count, in dock points. Her
+    /// holds empty in proportion to her hull, and a crew that mends her hull cannot mend
+    /// what has gone over the side.
+    pub(super) fn spill_cargo(&mut self) -> f32 {
+        let left =
+            (self.class.cargo_grains() as f32 * self.ship.integrity().clamp(0., 1.)).round() as u32;
+        let spilt = self.cargo.saturating_sub(left);
+        self.cargo -= spilt;
+        spilt as f32 / CARGO_GRAIN
+    }
+    /// Everything still in her holds, which goes down with her.
+    pub(super) fn founder_cargo(&mut self) -> f32 {
+        std::mem::take(&mut self.cargo) as f32 / CARGO_GRAIN
+    }
     pub fn live_guns(&self) -> usize {
         self.guns.iter().filter(|g| g.live()).count()
+    }
+    /// How heavily she is gunned. Classes that come in no weights are standard.
+    pub fn weight(&self) -> super::Weight {
+        self.weight
+    }
+    /// Gun her as a ship of `weight`. Classes that come in no weights stay as they are.
+    pub(super) fn reweigh(&mut self, weight: super::Weight) {
+        if super::Weight::row(self.class).is_some() {
+            self.weight = weight;
+        }
+    }
+    /// Barrels in each of her main turrets: her weight's, or her class's own for a class
+    /// that comes in no weights.
+    pub fn barrels(&self) -> u8 {
+        if super::Weight::row(self.class).is_some() {
+            self.weight.barrels()
+        } else {
+            self.class.profile().barrels
+        }
     }
     pub fn protected(&self) -> bool {
         self.class.is_flagship() && self.guns.iter().any(EnemyGun::live)
@@ -578,11 +831,14 @@ impl Raider {
     }
 
     /// Steer for `player`, clear of land and of ice big enough to hurt, while `stream`,
-    /// the current where she lies, sets her along with it.
+    /// the current where she lies, sets her along with it. `mark` says `player` is only
+    /// a fairway mark leading her round a headland towards her quarry: she makes
+    /// straight for it rather than holding her stand-off from it.
     pub(super) fn sail(
         &mut self,
         dt: f32,
         player: Vec2,
+        mark: bool,
         ports: &[Port],
         coast: &[super::Landmark],
         ice: &[super::Iceberg],
@@ -602,14 +858,21 @@ impl Raider {
         self.knock *= (-KNOCK_DRAG * dt).exp();
         // A heavier hull takes longer to gather way, or to lose it.
         let gather = p.speed / (4. + 2. * p.hull.mass.cbrt());
-        if self.is_disabled() {
+        let anchored = self.moored.is_some();
+        let stream = if anchored { Vec2::ZERO } else { stream };
+        if anchored {
+            // At anchor she rides to her cable: no way on, and the stream holds her.
+            self.helm.make_way(0., gather, dt);
+            self.helm.amidships(dt);
+        } else if self.is_disabled() {
             // Adrift, she carries her way off and her rudder trails amidships.
             self.helm.make_way(DRIFT, gather, dt);
             self.helm.amidships(dt);
         } else {
             let offset = player - self.body.pos;
             let dir = offset.normalize_or_zero();
-            let along = if self.class == Freighter {
+            // A torpedo boat makes straight for her firing position or her mooring.
+            let along = if mark || self.class.is_merchant() || self.class == TorpedoBoat {
                 dir
             } else if self.class == Patrol {
                 let lane = if self.body.id.is_multiple_of(2) {
@@ -655,7 +918,7 @@ impl Raider {
             let hazards = ports
                 .iter()
                 .map(|p| (p.body.pos, ISLAND_RADIUS))
-                .chain(ports.iter().map(Port::pier))
+                .chain(ports.iter().flat_map(Port::piers))
                 .chain(coast.iter().map(|p| (p.body.pos, p.radius)))
                 .chain(
                     ice.iter()
@@ -688,7 +951,9 @@ impl Raider {
             } else {
                 self.ship.propulsion()
             };
-            self.helm.make_way(p.speed * pace, gather, dt);
+            // A torpedo boat eases her way as she comes up to her mooring.
+            let throttle = self.attack.as_ref().map_or(1., |run| run.throttle);
+            self.helm.make_way(p.speed * pace * throttle, gather, dt);
         }
         // The rudder turns her only as fast as her way through the water allows.
         self.body.heading = self.helm.turn(self.body.heading, p.turning, dt);
@@ -768,7 +1033,9 @@ impl Raider {
                     if self.class == Regent { 5.4 } else { 2.8 } + (index % 3) as f32 * 0.3;
             }
         }
-        for gun in &mut self.guns {
+        let reach = self.class.reach();
+        let barrels = self.barrels();
+        for (number, gun) in self.guns.iter_mut().enumerate() {
             gun.charging = false;
             if !gun.live() {
                 continue;
@@ -793,7 +1060,7 @@ impl Raider {
                 home(side, fore)
             };
             let trained = train_full(&mut gun.train, wanted, p.traverse.to_radians() * dt);
-            if !clear_arc || offset.length_squared() > p.range * p.range {
+            if !clear_arc || offset.length_squared() > reach * reach {
                 if gun.committed.take().is_some() {
                     gun.reload = REGENT_WARNING;
                 }
@@ -819,13 +1086,31 @@ impl Raider {
             }
             // Outer rounds bracket the player, leaving room to steer through the fan.
             let side = offset.normalize_or_zero().perp();
-            for tube in 0..p.barrels {
-                let index = f32::from(tube) - 0.5 * f32::from(p.barrels - 1);
+            // Past her true range the whole salvo is laid off, worse the farther out. The
+            // Regent's guns fall on the patch of water they committed to.
+            let past = long_lay(offset.length(), p.range, reach);
+            // A torpedo boat's little gun is laid by eye from a lively deck: harassing
+            // fire that walks about her more often than it finds her.
+            let ahead = if self.class == TorpedoBoat {
+                let long = ((*serial * 7) % 9) as f32 - 4.;
+                let across = ((*serial * 3) % 5) as f32 - 2.;
+                ahead + direction * long * HARRYING_SCATTER.0 + side * across * HARRYING_SCATTER.1
+            } else if past > 0. && gun.committed.is_none() {
+                let seed = self.body.id.wrapping_mul(31).wrapping_add(number as u64);
+                let spread = |draw| super::ranging::spread(seed, *serial as u32, draw);
+                ahead
+                    + direction * LONG_LAY.0 * past * spread(0)
+                    + side * LONG_LAY.1 * past * spread(1)
+            } else {
+                ahead
+            };
+            for tube in 0..barrels {
+                let index = f32::from(tube) - 0.5 * f32::from(barrels - 1);
                 let from = pivot + (side * index * 0.55 * p.gun_scale).extend(0.).xzy();
                 // Twin mounts straddle the current position more tightly.
                 let spread = match self.class {
                     Parliament | Regent => 9.,
-                    Battleship => 5.5,
+                    Battleship | Commodore => 5.5,
                     _ => 2.5,
                 };
                 let target = (ahead + side * index * spread).extend(1.8).xzy();

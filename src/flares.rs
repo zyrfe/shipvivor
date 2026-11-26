@@ -68,7 +68,7 @@ impl Flare {
 #[derive(Resource, Default)]
 pub struct Flares {
     live: Vec<Flare>,
-    batteries: [Battery; 3],
+    batteries: Vec<Battery>,
     seen: f32,
     made: u64,
 }
@@ -102,6 +102,9 @@ pub fn fly(
     }
     flares.seen = now;
     let flares = &mut *flares;
+    flares
+        .batteries
+        .resize(battle.ports().len(), Battery::default());
     for (base, (port, battery)) in battle.ports().iter().zip(&mut flares.batteries).enumerate() {
         let alerted = alerts.raised(base, &battle);
         if alerted && (!battery.alerted || now >= battery.again) {
@@ -111,8 +114,11 @@ pub fn fly(
             battery.left = 0;
         }
         battery.alerted = alerted;
-        while battery.left > 0 && now >= battery.next {
-            let (yard, top) = (port.yard_position(), port.yard_top());
+        // They go up from the tallest works still standing.
+        while battery.left > 0
+            && now >= battery.next
+            && let Some((yard, top)) = port.lookout()
+        {
             let away = helm.position - yard;
             let reach = (THROW.0 * away.length()).clamp(THROW.1, THROW.2);
             // Each goes a little wide of the last, and none quite where it was meant.

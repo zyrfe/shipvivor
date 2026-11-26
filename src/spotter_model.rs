@@ -177,9 +177,12 @@ fn airframe(attack: bool) -> Mesh {
 }
 pub const HUB: Vec3 = Vec3::new(0., 0., -5.50);
 /// The model is 17 m across the wings, which beside a 30 m ship is a giant. A base's
-/// spotter is drawn at this share of that: under 6 m across and 4 m long, which would
-/// sit on the 7 m quarterdeck of a battleship with room either side.
-pub const ALOFT: f32 = 0.34;
+/// spotter is drawn at this share of that: 3 m across and 2 m long.
+pub const ALOFT: f32 = 0.17;
+/// Model metres from the origin to the farthest wingtip, of either airframe.
+pub const REACH: f32 = 9.1;
+/// Model metres from the origin down to the keel of the fuselage.
+pub const KEEL: f32 = 0.96;
 pub fn propeller() -> Mesh {
     let mut m = Facets::default();
     for i in 0..3 {

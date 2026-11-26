@@ -44,6 +44,20 @@ impl Harbour {
         }
     }
 
+    /// Each drydock's slip, in metres to starboard of the island's centre, as the
+    /// battle lays them out.
+    pub fn slips(self) -> Vec<f32> {
+        let works = match self {
+            Self::Cannery => 1,
+            Self::TwinMills => 2,
+            Self::Foundry => 3,
+        };
+        let docks = shipvivor_encounter::dock_count(works);
+        (shipvivor_encounter::DOCK_STATIONS[..docks].iter())
+            .map(|&(side, _)| side)
+            .collect()
+    }
+
     pub fn chimney(self) -> Vec3 {
         let (x, z) = match self {
             Self::Cannery => (2.6, 1.9),
@@ -278,12 +292,12 @@ impl Works {
 
 /// The heavy yard's open water cut sits exactly between these two retaining walls. The
 /// quay stones finish below low water so the berth still has walls in a trough.
-fn wet_berth(m: &mut Works) {
+fn wet_berth(m: &mut Works, slip: f32) {
     let v = Vec3::new;
     let concrete = Color::srgb(0.57, 0.58, 0.53);
     let wet = Color::srgb(0.33, 0.39, 0.39);
     for side in [-1., 1.] {
-        let inside = 6. + side * 3.30;
+        let inside = slip + side * 3.30;
         for (z0, z1, top, width) in [
             (-12., 1.47, 3.81, 2.83),
             (-23., -12., 2.38, 2.53),
@@ -360,16 +374,27 @@ fn wet_berth(m: &mut Works) {
         m.stack(pile, 4.56, 0.38, 0.32, TIMBER);
         m.stack(pile + Vec3::Y * 4.18, 0.27, 0.37, 0.35, STRIPE);
     }
-    m.slab(v(6., 1.02, 1.72), v(6.60, 4.86, 0.55), concrete);
-    m.slab(v(6., 3.59, 1.75), v(6.86, 0.44, 0.83), ROOF);
+    m.slab(v(slip, 1.02, 1.72), v(6.60, 4.86, 0.55), concrete);
+    m.slab(v(slip, 3.59, 1.75), v(6.86, 0.44, 0.83), ROOF);
 }
 
-/// Launch rails cross the shelf and slope into the sea. The posts stay after the yard is lost.
+/// Launch rails cross the shelf and slope into the sea, one set below each dock house.
+/// The posts stay after the yard is lost.
 pub(super) fn slipway(harbour: Harbour) -> Mesh {
     let mut m = Works::default();
+    for slip in harbour.slips() {
+        ways(&mut m, harbour, slip);
+    }
+    supply_tracks(&mut m, harbour);
+    m.finish()
+}
+
+/// The ways, or the heavy yard's wet berth, and the work aprons beside them, for the dock
+/// whose slip runs out along `slip`, metres to starboard of the island's centre.
+fn ways(m: &mut Works, harbour: Harbour, slip: f32) {
     let v = Vec3::new;
     if harbour == Harbour::Foundry {
-        wet_berth(&mut m);
+        wet_berth(m, slip);
     } else {
         let timbers = [
             Color::srgb(0.51, 0.43, 0.32),
@@ -382,8 +407,8 @@ pub(super) fn slipway(harbour: Harbour) -> Mesh {
             (-18., 3.55, -30., 2.06, 16),
             (-30., 2.06, -45., 0.80, 19),
         ] {
-            let a = v(6., ah, az);
-            let b = v(6., bh, bz);
+            let a = v(slip, ah, az);
+            let b = v(slip, bh, bz);
             let lane = b - a;
             let rotation = Quat::from_rotation_arc(Vec3::NEG_Z, lane.normalize());
             for k in 0..count {
@@ -416,7 +441,7 @@ pub(super) fn slipway(harbour: Harbour) -> Mesh {
             (-44., 0.91),
         ] {
             for side in [-1., 1.] {
-                let x = 6. + side * 2.65;
+                let x = slip + side * 2.65;
                 m.girder(
                     v(x + 0.23 * side, -1.67, z),
                     v(x, deck + 0.52, z),
@@ -425,12 +450,17 @@ pub(super) fn slipway(harbour: Harbour) -> Mesh {
                 );
                 m.slab(v(x, deck + 0.28, z), v(0.61, 0.14, 0.61), IRON);
             }
-            m.girder(v(3.43, 0.0, z), v(8.57, deck - 0.40, z), 0.29, TIMBER);
+            m.girder(
+                v(slip - 2.57, 0.0, z),
+                v(slip + 2.57, deck - 0.40, z),
+                0.29,
+                TIMBER,
+            );
         }
     }
     // The level work aprons sit on the island's shelf, clear of the fairway.
     for side in [-1., 1.] {
-        let center_x = 6. + side * 4.76;
+        let center_x = slip + side * 4.76;
         if harbour == Harbour::Foundry {
             m.slab(v(center_x, 3.92, -6.9), v(0.24, 0.18, 9.6), STEEL);
             m.slab(v(center_x, 3.96, -11.4), v(2.35, 0.08, 0.26), STRIPE);
@@ -474,35 +504,34 @@ pub(super) fn slipway(harbour: Harbour) -> Mesh {
             );
         }
     }
-    if harbour == Harbour::Foundry {
-        let east = [
-            (6., 17.),
-            (10.5, 16.9),
-            (14.4, 14.8),
-            (17.0, 11.5),
-            (17.25, 7.3),
-            (16.9, 2.7),
-            (15.4, -1.),
-            (12.2, -4.),
-            (11.0, -7.2),
-            (11., -10.1),
-        ]
-        .map(Vec2::from);
-        m.supply_track(&east);
-        m.plate_trolley(east[1], east[2]);
-        let west = [
-            (-17., -7.9),
-            (-13.1, -8.),
-            (-8.5, -8.2),
-            (-4.8, -9.1),
-            (-1.1, -10.4),
-            (1.2, -11.8),
-        ]
-        .map(Vec2::from);
-        m.supply_track(&west);
-        m.plate_trolley(west[1], west[2]);
+}
+
+/// The heavy yard's plate tracks, from the furnace halls to the outer apron of each wet
+/// berth: round the east end of the island to the first, and across the west shelf to
+/// the second.
+fn supply_tracks(m: &mut Works, harbour: Harbour) {
+    if harbour != Harbour::Foundry {
+        return;
     }
-    m.finish()
+    let east = [
+        (6., 17.),
+        (10.5, 16.9),
+        (14.4, 14.8),
+        (17.0, 11.5),
+        (17.25, 7.3),
+        (16.9, 2.7),
+        (15.4, -1.),
+        (12.2, -4.),
+        (11.0, -7.2),
+        (11., -10.1),
+    ]
+    .map(Vec2::from);
+    m.supply_track(&east);
+    m.plate_trolley(east[1], east[2]);
+    let apron = harbour.slips()[1] - 4.76;
+    let west = [(-21.5, -3.6), (-19.6, -6.5), (-17.2, -8.6), (apron, -10.1)].map(Vec2::from);
+    m.supply_track(&west);
+    m.plate_trolley(west[1], west[2]);
 }
 
 /// Each dock shares the target envelope and keeps an open lane for the hull on the ways.
@@ -1025,6 +1054,65 @@ pub(super) fn gun_platform() -> Mesh {
     m.finish()
 }
 
+/// The foot of a shore gunhouse's shield, across and along, before it is widened for its
+/// barrels. It runs from the eaves at 0.94 m up to the roof at 3.12 m, drawing in by a
+/// sixth across and a fifth along.
+const GUNHOUSE: [(f32, f32); 8] = [
+    (-2.4, -1.9),
+    (-1.78, -2.52),
+    (1.78, -2.52),
+    (2.4, -1.9),
+    (2.5, 1.26),
+    (1.75, 2.),
+    (-1.75, 2.),
+    (-2.5, 1.26),
+];
+const GUNHOUSE_FOOT: f32 = 0.94;
+const GUNHOUSE_ROOF: f32 = 3.12;
+
+fn gunhouse_width(barrels: u8) -> f32 {
+    0.65 + 0.15 * f32::from(barrels)
+}
+
+/// Where the shield of a shore gunhouse with `barrels` stands toward `toward`, in the
+/// mount's own frame, and which way the plate faces there: the point at the height of
+/// `toward` on the bearing from the centre. A mark set there lies on the shield.
+pub(super) fn gunhouse_face(barrels: u8, toward: Vec3) -> (Vec3, Vec3) {
+    let width = gunhouse_width(barrels);
+    let y = toward.y.clamp(GUNHOUSE_FOOT + 0.2, GUNHOUSE_ROOF - 0.2);
+    let rise = (y - GUNHOUSE_FOOT) / (GUNHOUSE_ROOF - GUNHOUSE_FOOT);
+    let bearing = Vec2::new(toward.x, toward.z)
+        .try_normalize()
+        .unwrap_or(Vec2::NEG_Y);
+    let at = |(x, z): (f32, f32), rise: f32| {
+        Vec3::new(x * width * (1. - 0.16 * rise), 0., z * (1. - 0.2 * rise))
+    };
+    for i in 0..GUNHOUSE.len() {
+        let (a, b) = (GUNHOUSE[i], GUNHOUSE[(i + 1) % GUNHOUSE.len()]);
+        let (p, q) = (at(a, rise).xz(), at(b, rise).xz());
+        let edge = q - p;
+        let across = bearing.perp_dot(edge);
+        if across.abs() < 1e-6 {
+            continue;
+        }
+        let out = p.perp_dot(edge) / across;
+        let along = p.perp_dot(bearing) / across;
+        if out <= 0. || !(0.0..=1.).contains(&along) {
+            continue;
+        }
+        let foot = at(a, 0.) + Vec3::Y * GUNHOUSE_FOOT;
+        let next = at(b, 0.) + Vec3::Y * GUNHOUSE_FOOT;
+        let roof = at(a, 1.) + Vec3::Y * GUNHOUSE_ROOF;
+        let mut normal = (next - foot).cross(roof - foot).normalize_or_zero();
+        let point = bearing * out;
+        if normal.xz().dot(point) < 0. {
+            normal = -normal;
+        }
+        return (Vec3::new(point.x, y, point.y), normal);
+    }
+    (Vec3::new(0., y, -2.4), Vec3::NEG_Z)
+}
+
 /// The shield, service walk and sight turn with the shore mount. A silenced station keeps a
 /// twisted shield and a dark central socket on the same base.
 pub(super) fn battery(barrels: u8) -> Mesh {
@@ -1043,17 +1131,8 @@ pub(super) fn battery(barrels: u8) -> Mesh {
         m.girder(v(-2.2, 1.55, -0.1), v(-1.65, 0.83, -4.24), 0.42, IRON);
         return m.finish();
     }
-    let width = 0.65 + 0.15 * f32::from(barrels);
-    let outline = [
-        (-2.4, -1.9),
-        (-1.78, -2.52),
-        (1.78, -2.52),
-        (2.4, -1.9),
-        (2.5, 1.26),
-        (1.75, 2.),
-        (-1.75, 2.),
-        (-2.5, 1.26),
-    ];
+    let width = gunhouse_width(barrels);
+    let outline = GUNHOUSE;
     for i in 0..outline.len() {
         let (x, z) = outline[i];
         let (u, w) = outline[(i + 1) % outline.len()];

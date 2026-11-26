@@ -35,7 +35,8 @@ impl Coast {
         }
     }
 
-    /// The level yard apron and the bluff behind it follow the two land volumes on the chart.
+    /// The level yard apron and the bluff behind it follow the port's land volumes on the
+    /// chart, whose tiers step up this dome. Reshape one and the other must follow.
     fn crest(self, p: Vec2) -> f32 {
         if self == Self::Landmark(LandmarkKind::Glacier) {
             // The ice cap rises to the high ground the lookouts see across the water. On
@@ -111,13 +112,50 @@ pub(super) fn material(images: &mut Assets<Image>) -> StandardMaterial {
     }
 }
 
-// Edges of the foundry's dredged slot in the island frame.
-const PORT_WALL: f32 = 2.7;
-const STARBOARD_WALL: f32 = 9.3;
+// The foundry's dredged slots run from this wall to the sea, each this far either side
+// of its dock's slip, in the island frame.
 const END_WALL: f32 = 1.4;
+const SLOT_HALF: f32 = 3.3;
 
-fn inside_berth(p: Vec2) -> bool {
-    (PORT_WALL..=STARBOARD_WALL).contains(&p.x) && p.y <= END_WALL
+/// The port and starboard walls of each dredged slot cut into this coast.
+fn slots(coast: Coast) -> Vec<(f32, f32)> {
+    if !coast.foundry() {
+        return Vec::new();
+    }
+    (Harbour::Foundry.slips().into_iter())
+        .map(|x| (x - SLOT_HALF, x + SLOT_HALF))
+        .collect()
+}
+
+fn inside_berth(slots: &[(f32, f32)], p: Vec2) -> bool {
+    p.y <= END_WALL
+        && slots
+            .iter()
+            .any(|&(port, starboard)| (port..=starboard).contains(&p.x))
+}
+
+/// What is left of `poly` outside one slot: the parts to port and starboard of its walls,
+/// and the part inland of its end wall.
+fn outside_slot(poly: Vec<Vec3>, (port, starboard): (f32, f32)) -> Vec<Vec<Vec3>> {
+    if poly.iter().all(|p| p.x <= port)
+        || poly.iter().all(|p| p.x >= starboard)
+        || poly.iter().all(|p| p.z >= END_WALL)
+    {
+        return vec![poly];
+    }
+    if poly
+        .iter()
+        .all(|p| (port..=starboard).contains(&p.x) && p.z <= END_WALL)
+    {
+        return Vec::new();
+    }
+    let left = clip(&poly, |p| port - p.x);
+    let right = clip(&poly, |p| p.x - starboard);
+    let strip = clip(&clip(&poly, |p| p.x - port), |p| starboard - p.x);
+    [left, right, clip(&strip, |p| p.z - END_WALL)]
+        .into_iter()
+        .filter(|part| part.len() >= 3)
+        .collect()
 }
 
 fn clip(poly: &[Vec3], distance: impl Fn(Vec3) -> f32) -> Vec<Vec3> {
@@ -143,26 +181,23 @@ fn clip(poly: &[Vec3], distance: impl Fn(Vec3) -> f32) -> Vec<Vec3> {
 
 struct Outcrop {
     facets: Facets,
-    berth: bool,
+    /// The dredged slots cut out of the land, if any.
+    slots: Vec<(f32, f32)>,
 }
 
 impl Outcrop {
     fn face(&mut self, v: [Vec3; 3], colour: Color) {
-        if !self.berth
-            || v.iter().all(|p| p.x <= PORT_WALL)
-            || v.iter().all(|p| p.x >= STARBOARD_WALL)
-            || v.iter().all(|p| p.z >= END_WALL)
-        {
+        if self.slots.is_empty() {
             self.facets.triangle(v, colour);
             return;
         }
-        if v.iter().all(|p| inside_berth(p.xz())) {
-            return;
+        let mut parts = vec![v.to_vec()];
+        for &slot in &self.slots {
+            parts = (parts.into_iter())
+                .flat_map(|part| outside_slot(part, slot))
+                .collect();
         }
-        let left = clip(&v, |p| PORT_WALL - p.x);
-        let right = clip(&v, |p| p.x - STARBOARD_WALL);
-        let strip = clip(&clip(&v, |p| p.x - PORT_WALL), |p| STARBOARD_WALL - p.x);
-        for part in [left, right, clip(&strip, |p| p.z - END_WALL)] {
+        for part in parts {
             for i in 1..part.len().saturating_sub(1) {
                 let [a, b, c] = [part[0], part[i], part[i + 1]];
                 if (b - a).cross(c - a).length_squared() > 1e-10 {
@@ -288,7 +323,7 @@ pub(super) fn bright(rgb: [f32; 3], gain: f32) -> Color {
 pub(super) fn mesh(coast: Coast) -> Mesh {
     let mut out = Outcrop {
         facets: Facets::default(),
-        berth: coast.foundry(),
+        slots: slots(coast),
     };
     let seed = coast.seed();
     const N: u32 = 64;
@@ -513,10 +548,11 @@ pub(crate) fn shoals(battle: &shipvivor_encounter::Battle) -> (Image, Vec4) {
             continue;
         }
         let to_local = Mat2::from_angle(-body.heading) * (ISLAND_RADIUS / radius);
+        let cut = slots(coast);
         for z in first.y..end.y {
             for x in first.x..end.x {
                 let local = to_local * (at(x, z) - body.pos);
-                let height = if coast.foundry() && inside_berth(local) {
+                let height = if inside_berth(&cut, local) {
                     -5.
                 } else {
                     coast.height(local)
@@ -553,13 +589,18 @@ mod tests {
             .unwrap()
             .as_float3()
             .unwrap();
-        // Clipping splits each triangle at a wall. Every surviving face must lie outside one wall.
+        // Clipping splits each triangle at a wall. Every surviving face must lie outside
+        // one wall of each slot.
+        let cuts = slots(Coast::Yard(Harbour::Foundry));
+        assert_eq!(cuts.len(), 2);
         for face in points.as_chunks::<3>().0 {
-            assert!(
-                face.iter().all(|p| p[0] <= PORT_WALL + 0.001)
-                    || face.iter().all(|p| p[0] >= STARBOARD_WALL - 0.001)
-                    || face.iter().all(|p| p[2] >= END_WALL - 0.001)
-            );
+            for &(port, starboard) in &cuts {
+                assert!(
+                    face.iter().all(|p| p[0] <= port + 0.001)
+                        || face.iter().all(|p| p[0] >= starboard - 0.001)
+                        || face.iter().all(|p| p[2] >= END_WALL - 0.001)
+                );
+            }
         }
 
         let battle = crate::state::Encounter::default();
@@ -573,7 +614,9 @@ mod tests {
             map.data.as_ref().unwrap()[(pixel.y * size.x + pixel.x) as usize] as f32 * (12. / 255.)
                 - 8.
         };
+        // Water down each slot, and land between them.
         assert!(depth_sample(6.) < -4.5);
-        assert!(depth_sample(0.) > 2.);
+        assert!(depth_sample(-9.) < -4.5);
+        assert!(depth_sample(-1.5) > 2.);
     }
 }

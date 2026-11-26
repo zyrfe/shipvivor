@@ -6,7 +6,9 @@
 //! Each passage runs along a craggy mainland: the ship enters at one end and fights her
 //! way past the lightest base in the first bay and the middle base further on, to the
 //! heavy yard at the far end (see `passage`).
-use super::{ISLAND_RADIUS, IceShape, Landmark, LandmarkKind, PICKETS, Port, Set, Survey, Vec2};
+use super::{
+    Gyre, ISLAND_RADIUS, IceShape, Landmark, LandmarkKind, PICKETS, Port, Set, Survey, Vec2,
+};
 use std::f32::consts::TAU;
 
 mod passage;
@@ -24,40 +26,41 @@ const SHORTLIST: usize = 3;
 /// What a stage's waters are like. The seed decides the particulars.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Waters {
-    /// Typical distance in metres along the coast from the start to the heavy yard at
-    /// the far end of the passage.
-    pub length: f32,
-    /// How far off the shore the fairway runs, least and most, in metres.
-    pub offing: (f32, f32),
-    /// How far the shore swings in and out over its bays and points, in metres.
+    /// The bases, stage by stage up the channel, each given as its number of factories:
+    /// one for a cannery, two for the twin mills, three for the heavy yard. The last base
+    /// of the last stage stands at the head of the channel. A stage stirs only once
+    /// every base of the one before it is wrecked, or once it sights the ship.
+    pub stages: &'static [&'static [u8]],
+    /// Length of a reach holding one base, least and most, in metres along the channel.
+    /// A reach holding two is seven tenths as long again.
+    pub reach: (f32, f32),
+    /// Width of the channel in its reaches, shore to shore, least and most.
+    pub breadth: (f32, f32),
+    /// Width of the channel at the narrows between one reach and the next.
+    pub narrows: (f32, f32),
+    /// How far the channel's line swings from side to side, in metres.
+    pub bends: f32,
+    /// How far each shore swings in and out over its own bays and points, in metres.
     pub bays: f32,
-    /// Headlands thrust out toward the fairway between the bases, at least and at most,
-    /// up to one between each pair of bays and one before the first. A glacier coming
-    /// down to the sea takes the place of one.
-    pub headlands: (usize, usize),
     /// Crags standing out from the cliffs, per kilometre of shore.
     pub crags: f32,
-    /// How many islands to raise offshore, at least and at most. Crowded water can
-    /// leave fewer.
+    /// How many islands to raise in the channel, at least and at most. Crowded water
+    /// can leave fewer.
     pub islands: (usize, usize),
     /// Smallest and largest island radius in metres.
     pub island_radius: (f32, f32),
     /// Share of islands raised in groups rather than alone.
     pub clustering: f32,
     /// Pairs of islands to try either side of a leg, so the course runs through a strait.
-    pub narrows: usize,
-    /// Islands to try on a broken chain outside the fairway, so the passage runs through
-    /// sheltered water between them and the shore.
-    pub skerries: usize,
-    /// Open water kept either side of each leg, in metres, except at narrows.
+    pub straits: usize,
+    /// Open water kept either side of each leg, in metres, except at straits.
     pub fairway: f32,
     /// Share of lone islands allowed to stand in a fairway, so the leg is sailed round it.
     pub strays: f32,
     /// Relative odds of beacon, stack and pine islands.
     pub kinds: [f32; 3],
-    /// Glaciers to try, at least and at most, and their smallest and largest radius in
-    /// metres. A glacier comes down to the sea between two bays where there is room,
-    /// and otherwise stands offshore as a great island under ice.
+    /// Glaciers to bring down to the channel from either shore, at least and at most,
+    /// and their smallest and largest radius in metres. One more always fills the head.
     pub glaciers: (usize, usize),
     pub glacier_radius: (f32, f32),
     /// Speed of the open-water current, least and most, in metres per second.
@@ -68,97 +71,116 @@ pub struct Waters {
     pub bergs: f32,
 }
 impl Waters {
-    /// Islands in pairs either side of the course, and a glacier between two bays.
+    /// A winding channel with islands in pairs either side of the course.
     pub const NARROWS: Self = Self {
-        length: 2000.,
-        offing: (150., 240.),
-        bays: 60.,
-        headlands: (2, 3),
+        stages: &[&[1], &[2], &[2, 3]],
+        reach: (800., 950.),
+        breadth: (960., 1200.),
+        narrows: (520., 620.),
+        bends: 195.,
+        bays: 35.,
         crags: 8.,
-        islands: (6, 9),
-        island_radius: (20., 42.),
+        islands: (10, 16),
+        island_radius: (20., 40.),
         clustering: 0.3,
-        narrows: 2,
-        skerries: 0,
+        straits: 2,
         fairway: 55.,
         strays: 0.1,
         kinds: [1., 1., 1.],
         glaciers: (1, 1),
-        glacier_radius: (90., 140.),
+        glacier_radius: (90., 130.),
         drift: (0.35, 0.6),
-        ice: (18, 26),
+        ice: (32, 48),
         bergs: 0.35,
     };
-    /// A long, wide reach under the cliffs, with a few rocks and beacons off it.
+    /// A broad, straight reach under the cliffs, with a few rocks and beacons in it.
     pub const OPEN: Self = Self {
-        length: 2300.,
-        offing: (210., 300.),
-        bays: 85.,
-        headlands: (1, 2),
+        stages: &[&[1], &[1, 2], &[2], &[3]],
+        reach: (850., 1000.),
+        breadth: (1240., 1520.),
+        narrows: (620., 740.),
+        bends: 120.,
+        bays: 45.,
         crags: 5.,
-        islands: (4, 7),
+        islands: (8, 14),
         island_radius: (18., 40.),
         clustering: 0.2,
-        narrows: 0,
-        skerries: 0,
-        fairway: 90.,
+        straits: 0,
+        fairway: 80.,
         strays: 0.25,
         kinds: [1.5, 0.8, 0.7],
         glaciers: (1, 2),
-        glacier_radius: (110., 170.),
+        glacier_radius: (110., 160.),
         drift: (0.25, 0.45),
-        ice: (16, 24),
+        ice: (32, 48),
         bergs: 0.5,
     };
-    /// Sheltered water inside a broken chain of wooded islands.
+    /// Sheltered water among wooded islands.
     pub const SOUND: Self = Self {
-        length: 2000.,
-        offing: (160., 230.),
-        bays: 50.,
-        headlands: (1, 2),
+        stages: &[&[1], &[1, 2], &[3]],
+        reach: (825., 975.),
+        breadth: (1150., 1380.),
+        narrows: (570., 670.),
+        bends: 150.,
+        bays: 30.,
         crags: 6.,
-        islands: (9, 13),
-        island_radius: (22., 46.),
+        islands: (14, 22),
+        island_radius: (22., 44.),
         clustering: 0.35,
-        narrows: 1,
-        skerries: 6,
-        fairway: 55.,
+        straits: 1,
+        fairway: 50.,
         strays: 0.1,
         kinds: [0.6, 0.8, 1.6],
         glaciers: (1, 2),
-        glacier_radius: (90., 140.),
+        glacier_radius: (90., 130.),
         drift: (0.2, 0.35),
-        ice: (26, 36),
+        ice: (44, 60),
         bergs: 0.2,
     };
-    /// A tight course hard under the crags, threaded between crowded rocks.
+    /// A tight, crooked course hard under the crags, threaded between crowded rocks.
     pub const CUT: Self = Self {
-        length: 1900.,
-        offing: (135., 200.),
-        bays: 70.,
-        headlands: (3, 3),
+        stages: &[&[1], &[1, 2], &[2], &[2], &[2, 3]],
+        reach: (800., 900.),
+        breadth: (920., 1100.),
+        narrows: (490., 570.),
+        bends: 225.,
+        bays: 40.,
         crags: 11.,
-        islands: (8, 12),
-        island_radius: (18., 38.),
+        islands: (12, 20),
+        island_radius: (18., 36.),
         clustering: 0.5,
-        narrows: 3,
-        skerries: 0,
+        straits: 2,
         fairway: 40.,
         strays: 0.18,
         kinds: [0.8, 1.6, 0.6],
         glaciers: (1, 2),
-        glacier_radius: (80., 120.),
+        glacier_radius: (80., 110.),
         drift: (0.5, 0.8),
-        ice: (16, 24),
+        ice: (32, 48),
         bergs: 0.3,
     };
+
+    /// The same waters with the bases staged differently.
+    pub const fn staged(self, stages: &'static [&'static [u8]]) -> Self {
+        Self { stages, ..self }
+    }
+    /// How many bases the waters hold.
+    pub fn bases(&self) -> usize {
+        self.stages.iter().map(|stage| stage.len()).sum()
+    }
 }
 
-/// Where a harbour stands and the way its slip faces.
+/// Where a harbour stands, the way its slip faces, what it works and when it stirs.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HarbourSite {
     pub pos: Vec2,
     pub heading: f32,
+    /// Factories: one at a cannery, two at the twin mills, three at the heavy yard.
+    pub works: u8,
+    /// The stage of the passage the base belongs to. The bases of stage 0 are roused
+    /// when the ship arrives, and each later stage once every base of the one before
+    /// it is wrecked, or as soon as one of its own lookouts sights her.
+    pub stage: u8,
 }
 
 /// A piece of ice adrift when the ship enters the sector.
@@ -185,8 +207,8 @@ pub enum Course {
     /// A closed circuit of buoys, the hand-set charts and the helm trial: the last gate
     /// leads back to the first.
     Circuit,
-    /// A run along a coast: from the start through each mark in turn, past base A, then
-    /// B, to C at the far end.
+    /// A run up a channel: from the start through each mark in turn, past the bases
+    /// stage by stage, to the heavy yard at its head.
     Passage,
 }
 
@@ -196,22 +218,25 @@ pub struct Chart {
     /// The seed the chart was drawn from, or `None` for a classic hand-set chart.
     pub seed: Option<u64>,
     pub course: Course,
-    /// The buoys of a circuit, or the marks a passage runs through. Patrols sail them
-    /// unmarked: they set out the fairways the survey keeps open.
-    pub gates: [Vec2; 5],
-    /// Bases A, B and C, with one, two and three factories. On a passage they stand in
-    /// that order along the coast.
-    pub harbours: [HarbourSite; 3],
+    /// The five buoys of a circuit, or the marks a passage runs through. Patrols sail
+    /// them unmarked: they set out the fairways the survey keeps open.
+    pub gates: Vec<Vec2>,
+    /// The bases, lettered from A in this order. On a passage they come stage by stage
+    /// up the channel, the heavy yard last at its head.
+    pub harbours: Vec<HarbourSite>,
     /// Islands standing alone in the water.
     pub islets: Vec<Islet>,
-    /// The mainland a passage runs along, as overlapping pieces of one shore, with any
-    /// glacier that comes down to the sea from it. A circuit has none.
+    /// The mainland a passage runs through, as overlapping pieces of both shores, with
+    /// the glaciers that come down to the water from them. A circuit has none.
     pub coast: Vec<Islet>,
     /// Where the two patrol boats, then the two destroyers, are on patrol when the ship
     /// arrives.
     pub pickets: [Vec2; 4],
     /// The current far from land. The islands shape it into the stream sailed.
     pub set: Set,
+    /// The water turning slowly round in each reach of a channel closed at its head,
+    /// where the set itself reaches only a little way in.
+    pub gyres: Vec<Gyre>,
     /// Ice adrift on the current when the ship arrives.
     pub ice: Vec<Ice>,
 }
@@ -219,18 +244,19 @@ impl Chart {
     /// The hand-set layout around a buoy circuit: a harbour outside gates 1, 2 and 4,
     /// and an island either side of each leg where there is room.
     pub fn classic(gates: [Vec2; 5]) -> Self {
-        let harbours = Port::classic_sites(gates);
+        let harbours = Port::classic_sites(gates).to_vec();
         let islets = Landmark::classic(gates, &harbours);
         let ahead = gates[0].normalize_or(Vec2::NEG_Y);
         Self {
             seed: None,
             course: Course::Circuit,
-            gates,
+            gates: gates.to_vec(),
             harbours,
             islets,
             coast: vec![],
             pickets: PICKETS.map(|(range, lateral)| ahead * range + ahead.perp() * lateral),
             set: Set::SLACK,
+            gyres: vec![],
             ice: vec![],
         }
     }
@@ -284,6 +310,7 @@ impl Chart {
             coast: passage.coast,
             pickets: passage.pickets,
             set: passage.set,
+            gyres: passage.gyres,
             ice,
         }
     }
@@ -295,8 +322,16 @@ impl Chart {
     /// Each leg of the course in turn. A circuit's run from gate `k` to the next, the
     /// last closing the lap; a passage's from the start to the first mark and on to
     /// the last.
-    pub fn legs(&self) -> [(Vec2, Vec2); 5] {
+    pub fn legs(&self) -> Vec<(Vec2, Vec2)> {
         legs(self.course, &self.gates)
+    }
+    /// How many stages the bases come in.
+    pub fn stages(&self) -> usize {
+        self.harbours
+            .iter()
+            .map(|h| usize::from(h.stage) + 1)
+            .max()
+            .unwrap_or(0)
     }
     /// Corners of the water the chart sets out: the start, gates, harbours and islands,
     /// and the shore of any coast within a few hundred metres of them.
@@ -334,12 +369,13 @@ impl Chart {
 /// How far beyond the open water the chart's extent takes in the coast.
 const COAST_IN_VIEW: f32 = 300.;
 
-fn legs(course: Course, gates: &[Vec2; 5]) -> [(Vec2, Vec2); 5] {
+fn legs(course: Course, gates: &[Vec2]) -> Vec<(Vec2, Vec2)> {
+    let n = gates.len();
     match course {
-        Course::Circuit => std::array::from_fn(|k| (gates[k], gates[(k + 1) % 5])),
-        Course::Passage => {
-            std::array::from_fn(|k| (if k == 0 { Vec2::ZERO } else { gates[k - 1] }, gates[k]))
-        }
+        Course::Circuit => (0..n).map(|k| (gates[k], gates[(k + 1) % n])).collect(),
+        Course::Passage => (0..n)
+            .map(|k| (if k == 0 { Vec2::ZERO } else { gates[k - 1] }, gates[k]))
+            .collect(),
     }
 }
 
@@ -347,8 +383,8 @@ fn legs(course: Course, gates: &[Vec2; 5]) -> [(Vec2, Vec2); 5] {
 /// stations of the ships already at sea, the harbours and their slips, where the flagship
 /// also sails from, and the fairways.
 struct Keepout {
-    gate_lanes: [(Vec2, Vec2); 5],
-    gates: [Vec2; 5],
+    gate_lanes: Vec<(Vec2, Vec2)>,
+    gates: Vec<Vec2>,
     fairways: Vec<(Vec2, Vec2)>,
     stations: Vec<(Vec2, f32)>,
     harbours: Vec<(Vec2, [Vec2; 3])>,
@@ -358,24 +394,27 @@ impl Keepout {
     fn new(
         waters: &Waters,
         course: Course,
-        gates: &[Vec2; 5],
-        harbours: &[HarbourSite; 3],
+        gates: &[Vec2],
+        harbours: &[HarbourSite],
         pickets: &[Vec2; 4],
     ) -> Self {
         let mut previous = Vec2::ZERO;
-        let gate_lanes = gates.map(|g| {
-            let dir = (g - previous).normalize_or_zero();
-            previous = g;
-            (g - dir * 70., g + dir * 70.)
-        });
-        let mut fairways = legs(course, gates).to_vec();
+        let gate_lanes = gates
+            .iter()
+            .map(|&g| {
+                let dir = (g - previous).normalize_or_zero();
+                previous = g;
+                (g - dir * 70., g + dir * 70.)
+            })
+            .collect();
+        let mut fairways = legs(course, gates);
         fairways.push((Vec2::ZERO, gates[0]));
         let mut stations: Vec<(Vec2, f32)> = pickets.iter().map(|&p| (p, 45.)).collect();
         stations.push((Vec2::ZERO, 70.));
         let ports = Port::chart(harbours, 1., &mut 0);
         Self {
             gate_lanes,
-            gates: *gates,
+            gates: gates.to_vec(),
             fairways,
             stations,
             harbours: ports
@@ -436,8 +475,8 @@ const SLABS: (f32, f32) = (19., 30.);
 fn ice(
     rng: &mut Rng,
     waters: &Waters,
-    gates: &[Vec2; 5],
-    harbours: &[HarbourSite; 3],
+    gates: &[Vec2],
+    harbours: &[HarbourSite],
     islets: &[Islet],
     coast: &[Islet],
     pickets: &[Vec2; 4],
@@ -486,7 +525,7 @@ fn ice(
 /// same rules, so a hand-set chart with ice in the way fails too.
 pub(super) struct IceKeepout {
     land: Vec<(Vec2, f32)>,
-    gates: [Vec2; 5],
+    gates: Vec<Vec2>,
     lanes: Vec<(Vec2, Vec2)>,
     aprons: Vec<Vec2>,
     stations: Vec<Vec2>,
@@ -495,8 +534,8 @@ pub(super) struct IceKeepout {
 }
 impl IceKeepout {
     pub(super) fn new(
-        gates: &[Vec2; 5],
-        harbours: &[HarbourSite; 3],
+        gates: &[Vec2],
+        harbours: &[HarbourSite],
         islets: &[Islet],
         coast: &[Islet],
         pickets: &[Vec2; 4],
@@ -533,7 +572,7 @@ impl IceKeepout {
             .fold((Vec2::MAX, Vec2::MIN), |(lo, hi), p| (lo.min(p), hi.max(p)));
         Self {
             land,
-            gates: *gates,
+            gates: gates.to_vec(),
             lanes,
             aprons,
             stations,

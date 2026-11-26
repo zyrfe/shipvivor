@@ -6,6 +6,26 @@ use shipvivor_shipyard::GunStation;
 
 pub const CALIBRES: [u16; 6] = [4, 6, 8, 12, 15, 18];
 
+/// The rank of the biggest calibre no wider than `inches`.
+fn shells_for(inches: u16) -> u16 {
+    CALIBRES.iter().rposition(|&c| c <= inches).unwrap_or(0) as u16
+}
+
+/// The biggest bore a turret with these barrels can carry on this beam, in a wing
+/// gallery or on the centreline. Zero is a cradle too heavy for the beam even at four
+/// inches. A single gun carries no more than a twin.
+pub fn cradle(beam: ShipBeam, paired: bool, barrels: TurretLayout) -> u16 {
+    let limits = match (beam, paired) {
+        (ShipBeam::Escort, false) => [6, 6, 4, 4],
+        (ShipBeam::Escort, true) => [4, 4, 0, 0],
+        (ShipBeam::Cruiser, false) => [12, 12, 8, 6],
+        (ShipBeam::Cruiser, true) => [6, 6, 4, 4],
+        (ShipBeam::Capital, false) => [18, 18, 15, 12],
+        (ShipBeam::Capital, true) => [8, 8, 8, 6],
+    };
+    limits[barrels.count() - 1]
+}
+
 /// Classes of beam, narrowest first.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ShipBeam {
@@ -31,6 +51,15 @@ impl ShipBeam {
             Self::Escort => 0.,
             Self::Cruiser => 35.,
             Self::Capital => 40.,
+        }
+    }
+    /// The most modules, bow and stern included, a hull this broad may run to. She
+    /// is widened before she is lengthened further, so she never grows long and thin.
+    pub const fn most_modules(self) -> usize {
+        match self {
+            Self::Escort => 8,
+            Self::Cruiser => 11,
+            Self::Capital => 14,
         }
     }
     /// The most ranks of armor plate a hull this broad can carry. Each step of beam
@@ -66,15 +95,7 @@ impl Fittings {
     /// Maximum available calibre in inches. Zero denotes an oversize cradle even
     /// at the starting four-inch bore.
     pub fn capacity_for(&self, beam: ShipBeam, paired: bool) -> u16 {
-        let limits = match (beam, paired) {
-            (ShipBeam::Escort, false) => [6, 4, 4],
-            (ShipBeam::Escort, true) => [4, 0, 0],
-            (ShipBeam::Cruiser, false) => [12, 8, 6],
-            (ShipBeam::Cruiser, true) => [6, 4, 4],
-            (ShipBeam::Capital, false) => [18, 15, 12],
-            (ShipBeam::Capital, true) => [8, 8, 6],
-        };
-        limits[self.turrets.count() - 2]
+        cradle(beam, paired, self.turrets)
     }
 
     /// The biggest gun the current ship can carry at any of its stations.
@@ -85,7 +106,7 @@ impl Fittings {
     fn sized_for(mut self, wings_only: bool) -> Self {
         self.wings_only = wings_only;
         if self.capacity() == 0 {
-            self.turrets = TurretLayout::Twin;
+            self.turrets = TurretLayout::Single;
         }
         if self.calibre() > self.capacity() {
             self.shells = CALIBRES
@@ -96,20 +117,34 @@ impl Fittings {
         self
     }
 
+    /// These fittings as they stand at one turret: its own barrels and bore, as far
+    /// as its cradle carries them.
     pub fn for_station(self, station: &GunStation) -> Self {
-        self.sized_for(station.paired())
+        Self {
+            turrets: station.gunhouse.barrels,
+            shells: shells_for(station.gunhouse.bore),
+            ..self
+        }
+        .sized_for(station.paired())
     }
 
-    pub(crate) fn on_deck(mut self, beam: ShipBeam, wings_only: bool) -> Self {
+    /// The ship's own figures for her turrets as fitted: the biggest bore aboard, and
+    /// the lightest full-bore turret, which sets the biggest bore any turret could take.
+    pub(crate) fn on_deck(mut self, beam: ShipBeam, stations: &[GunStation]) -> Self {
         self.beam = beam;
+        let wings_only = stations.iter().all(GunStation::paired);
+        self.turrets = stations
+            .iter()
+            .filter(|s| wings_only || !s.paired())
+            .map(|s| s.gunhouse.barrels)
+            .min()
+            .unwrap_or_default();
+        let fitted = self;
+        self.shells = stations
+            .iter()
+            .map(|s| fitted.for_station(s).shells)
+            .max()
+            .unwrap_or(0);
         self.sized_for(wings_only)
-    }
-
-    pub(crate) fn can_carry(&self, layout: TurretLayout) -> bool {
-        let trial = Self {
-            turrets: layout,
-            ..*self
-        };
-        trial.calibre() <= trial.capacity()
     }
 }

@@ -68,19 +68,41 @@ pub(super) struct Plating {
     tower: ArmorPanel,
     pub scars: Vec<Scar>,
 }
+impl EnemyClass {
+    /// The grade of her side belt, which a round has to open to reach her hull.
+    pub fn belt(self) -> ArmorGrade {
+        if self == EnemyClass::Battleship {
+            ArmorGrade::Capital
+        } else {
+            ArmorGrade::Light
+        }
+    }
+    /// The grade of plate on her main turrets.
+    pub fn turret_plate(self) -> ArmorGrade {
+        if matches!(self, EnemyClass::Battleship | EnemyClass::Commodore) {
+            ArmorGrade::Reinforced
+        } else {
+            ArmorGrade::Light
+        }
+    }
+}
+impl Raider {
+    /// The plate a round has to open to hurt her: her belt, or while a flagship's
+    /// turrets still screen her hull, theirs.
+    pub fn telling_plate(&self) -> ArmorGrade {
+        if self.protected() {
+            self.class.turret_plate()
+        } else {
+            self.class.belt()
+        }
+    }
+}
+
 impl Plating {
     pub fn new(class: EnemyClass) -> Self {
         let heavy = class == EnemyClass::Battleship;
         Self {
-            belt: ArmorPanel::new(
-                if heavy {
-                    ArmorGrade::Capital
-                } else {
-                    ArmorGrade::Light
-                },
-                88,
-                4,
-            ),
+            belt: ArmorPanel::new(class.belt(), 88, 4),
             deck: ArmorPanel::new(
                 if heavy {
                     ArmorGrade::Reinforced
@@ -143,6 +165,8 @@ impl Raider {
         clip_hull(&vertices, a, delta)
     }
 
+    /// What became of a round on her hull, the outward normal it met, and the grade of
+    /// the plate there.
     pub(super) fn strike_hull(
         &mut self,
         point: Vec3,
@@ -150,7 +174,7 @@ impl Raider {
         (ammo, shell): (Ammo, ShellClass),
         bore: u16,
         tower: bool,
-    ) -> (Impact, Vec3) {
+    ) -> (Impact, Vec3, ArmorGrade) {
         let scale = super::MainShell {
             bore,
             ..super::MainShell::STOCK
@@ -218,6 +242,7 @@ impl Raider {
             Surface::Deck => &mut self.plate.deck,
             Surface::Tower => &mut self.plate.tower,
         };
+        let grade = panel.grade();
         let outcome = panel
             .resolve_ammo(ammo, shell, angle, &[cell], bore)
             .expect("local armor cell");
@@ -247,9 +272,10 @@ impl Raider {
                 });
             }
         }
-        (outcome, world)
+        (outcome, world, grade)
     }
 
+    /// As [`Raider::strike_hull`], for a round on her main gun `i`.
     pub(super) fn strike_mount(
         &mut self,
         i: usize,
@@ -257,7 +283,7 @@ impl Raider {
         travel: Vec3,
         (ammo, shell): (Ammo, ShellClass),
         bore: u16,
-    ) -> (Impact, Vec3) {
+    ) -> (Impact, Vec3, ArmorGrade) {
         let profile = self.class.profile();
         let gun = &mut self.guns[i];
         let base = gun.base(&self.body, profile);
@@ -277,6 +303,6 @@ impl Raider {
             .plate
             .resolve_ammo(ammo, shell, incidence(travel, normal), &[cell], bore)
             .expect("local mount cell");
-        (outcome, normal)
+        (outcome, normal, gun.plate.grade())
     }
 }

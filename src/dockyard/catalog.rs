@@ -1,16 +1,7 @@
 //! The refits listed in a section's callout: pictogram tiles with a one-word caption,
-//! one row per kind of work.
+//! one row per kind of work. A click picks one out, and a second click orders it.
 use super::*;
-
-pub(super) fn required_beam(
-    fit: shipvivor_campaign::Fittings,
-    inches: u16,
-    paired: bool,
-) -> Option<ShipBeam> {
-    ShipBeam::ALL
-        .into_iter()
-        .find(|&beam| fit.capacity_for(beam, paired) >= inches)
-}
+use shipvivor_encounter::TurretLayout;
 
 pub(super) fn slot_name(design: &Design, at: usize) -> &'static str {
     use shipvivor_shipyard::Component::*;
@@ -62,7 +53,11 @@ pub(super) fn stock_caption(module: DockModule) -> &'static str {
 enum Row {
     /// What stands on the bay, and where the bay sits.
     Bay,
+    /// The bore of this bay's turrets.
     Bore,
+    /// This bay's turrets: their barrels and how high they stand.
+    Turret,
+    /// Shells and gear, the same in every turret.
     Guns,
     Secondaries,
     Machinery,
@@ -72,25 +67,35 @@ fn row_of(job: DockJob) -> Row {
     use Card::*;
     match job {
         DockJob::Replace { .. } | DockJob::Move { .. } => Row::Bay,
-        DockJob::Calibre(_) => Row::Bore,
-        DockJob::TwinTurrets
-        | DockJob::Fitting(
+        DockJob::Calibre { .. } => Row::Bore,
+        DockJob::Barrels { .. } | DockJob::Barbette { .. } => Row::Turret,
+        DockJob::Fitting(
             TripleTurrets | QuadTurrets | ArmorPiercing | Caps | Velocity | Loader | Shells,
         ) => Row::Guns,
         DockJob::Fitting(TrainingGear) => Row::Guns,
-        DockJob::Fitting(Turbines | Hardening) => Row::Machinery,
+        DockJob::Fitting(Turbines | Hardening | Pumps) => Row::Machinery,
         DockJob::Fitting(Armor) => Row::Hull,
         DockJob::Fitting(_) => Row::Secondaries,
         DockJob::Insert { .. } | DockJob::WidenBeam => Row::Hull,
     }
 }
-/// Bore, barrels and shells are the same in every turret.
+/// Shells and gear are the same in every turret. Bore and barrels are each turret's own.
 pub(super) fn ship_wide(job: DockJob) -> bool {
-    matches!(row_of(job), Row::Bore | Row::Guns)
+    matches!(row_of(job), Row::Guns)
+}
+
+/// The pictogram for a turret with this many barrels.
+fn barrels_art(barrels: TurretLayout, art: &Insignia) -> Handle<Image> {
+    match barrels {
+        TurretLayout::Single => art.turret.clone(),
+        TurretLayout::Twin => art.twin.clone(),
+        TurretLayout::Triple => art.fitting(Card::TripleTurrets),
+        TurretLayout::Quad => art.fitting(Card::QuadTurrets),
+    }
 }
 
 /// The pictogram on a refit's tile.
-fn tile_art(job: DockJob, run: &Campaign, art: &Insignia) -> Handle<Image> {
+pub(super) fn tile_art(job: DockJob, run: &Campaign, art: &Insignia) -> Handle<Image> {
     let empty = |at: usize| {
         run.ship
             .design()
@@ -109,9 +114,33 @@ fn tile_art(job: DockJob, run: &Campaign, art: &Insignia) -> Handle<Image> {
         DockJob::Move { .. } => art.aft.clone(),
         DockJob::Insert { module, .. } => stock_art(module, art),
         DockJob::WidenBeam => art.beam.clone(),
-        DockJob::TwinTurrets => art.twin.clone(),
+        DockJob::Barrels { to, .. } => barrels_art(to, art),
+        DockJob::Barbette { from, to, .. } if to > from => art.raise.clone(),
+        DockJob::Barbette { .. } => art.turret.clone(),
         DockJob::Fitting(card) => art.fitting(card),
-        DockJob::Calibre(_) => art.fitting(Card::Shells),
+        DockJob::Calibre { .. } => art.fitting(Card::Shells),
+    }
+}
+
+/// A word or two for an order on the yard's list. Unlike a tile's caption it describes
+/// the order itself, not the bay as it stands after it.
+pub(super) fn order_caption(job: DockJob, run: &Campaign) -> String {
+    match job {
+        DockJob::Calibre { to, .. } => format!("{to}\""),
+        DockJob::Replace { with, .. } => match with {
+            DeckModule::CentreBattery => "Turret",
+            DeckModule::WingBattery => "Wings",
+            DeckModule::Reserve => "Remove",
+        }
+        .into(),
+        DockJob::Barrels { to, .. } => match to {
+            TurretLayout::Single => "Single",
+            TurretLayout::Twin => "Twin",
+            TurretLayout::Triple => "Triple",
+            TurretLayout::Quad => "Quad",
+        }
+        .into(),
+        _ => caption(job, run).into(),
     }
 }
 
@@ -130,8 +159,15 @@ pub(super) fn caption(job: DockJob, run: &Campaign) -> &'static str {
         DockJob::Move { .. } => "Aft",
         DockJob::Insert { module, .. } => stock_caption(module),
         DockJob::WidenBeam => "Widen",
-        DockJob::TwinTurrets => "Twin",
-        DockJob::Calibre(_) => "",
+        DockJob::Barrels { from, to, .. } if to < from => "Fewer",
+        DockJob::Barrels { to, .. } => match to {
+            TurretLayout::Twin => "Twin",
+            TurretLayout::Triple => "Triple",
+            _ => "Quad",
+        },
+        DockJob::Barbette { from, to, .. } if to > from => "Raise",
+        DockJob::Barbette { .. } => "Lower",
+        DockJob::Calibre { .. } => "",
         DockJob::Fitting(card) => match card {
             TripleTurrets => "Triple",
             QuadTurrets => "Quad",
@@ -148,10 +184,10 @@ pub(super) fn caption(job: DockJob, run: &Campaign) -> &'static str {
             TrainingGear => "Train",
             Armor => "Armor",
             Hardening => "Harden",
-            AntiAir => "AA",
             MoreAntiAir => "More AA",
             HeavyAntiAir => "Flak",
             QuickAntiAir => "Reload",
+            Pumps => "Pumps",
         },
     }
 }
@@ -163,9 +199,9 @@ pub(super) fn options(
     art: &Insignia,
     jobs: &[DockJob],
 ) {
-    let mounted = run.fittings.round().calibre_inches() as u16;
     let mut rows: Vec<(Row, Entity)> = Vec::new();
     let mut tagged = false;
+    let beckoned = super::need(run);
     for (i, &job) in jobs.iter().enumerate() {
         let kind = row_of(job);
         let row = match rows.iter().find(|(r, _)| *r == kind) {
@@ -210,18 +246,26 @@ pub(super) fn options(
         // Cyan is what the ship carries now: the bore mounted, or a fitting at its last rank.
         let tint = if selected {
             brass()
-        } else if job == DockJob::Calibre(mounted) || fully_fitted(job, run) {
+        } else if matches!(job, DockJob::Calibre { from, to, .. } if from == to)
+            || fully_fitted(job, run)
+        {
             cyan()
         } else if job.fits(run) {
             paper()
         } else {
             rule()
         };
-        if let DockJob::Calibre(inches) = job {
+        // A click picks a refit out to show its figures, and a second click orders it.
+        let action = if selected {
+            Action::Order(i)
+        } else {
+            Action::Preview(i)
+        };
+        if let DockJob::Calibre { to: inches, .. } = job {
             let chip = button(
                 cmd,
                 row,
-                Some(Action::Preview(i)),
+                Some(action),
                 selected,
                 false,
                 Node {
@@ -234,12 +278,16 @@ pub(super) fn options(
                 },
             );
             text(cmd, chip, format!("{inches}\""), 16., tint);
+            short_price(cmd, chip, run, art, job);
+            if beckoned == Some(Need::Job(job)) {
+                cmd.entity(chip).insert(Beckon);
+            }
             continue;
         }
         let tile = button(
             cmd,
             row,
-            Some(Action::Preview(i)),
+            Some(action),
             selected,
             false,
             Node {
@@ -255,9 +303,21 @@ pub(super) fn options(
         );
         icon(cmd, tile, tile_art(job, run, art), tint, 22.);
         text(cmd, tile, caption(job, run), 10., tint);
+        short_price(cmd, tile, run, art, job);
+        if beckoned == Some(Need::Job(job)) {
+            cmd.entity(tile).insert(Beckon);
+        }
         if let DockJob::Fitting(card) = job {
             rank_pips(cmd, tile, run, card, selected);
         }
+    }
+}
+
+/// Work the ship could take but the points left cannot cover shows its price in red, as
+/// the hull and stock tiles do.
+fn short_price(cmd: &mut Commands, tile: Entity, run: &Campaign, art: &Insignia, job: DockJob) {
+    if job.fits(run) && run.points_after(job).is_none() {
+        price_tag(cmd, tile, art, job.cost(), cards::Change::Cost.color());
     }
 }
 
@@ -272,8 +332,8 @@ pub(super) fn fully_fitted(job: DockJob, run: &Campaign) -> bool {
     }
 }
 
-/// The ranks of a stacking fitting along the top of its tile: cyan for each one fitted,
-/// brass for the one being previewed.
+/// The ranks of a stacking fitting along the top left of its tile, clear of the price:
+/// cyan for each one fitted, brass for the one being previewed.
 fn rank_pips(cmd: &mut Commands, tile: Entity, run: &Campaign, card: Card, previewed: bool) {
     let Some((fitted, most)) = run.fittings.ranks(card) else {
         return;
@@ -284,7 +344,7 @@ fn rank_pips(cmd: &mut Commands, tile: Entity, run: &Campaign, card: Card, previ
         Node {
             position_type: PositionType::Absolute,
             top: px(3),
-            right: px(3),
+            left: px(3),
             column_gap: px(2),
             ..default()
         },

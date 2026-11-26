@@ -1,5 +1,5 @@
 //! A shore-based floatplane flies one pass, alights at its slip and rearms.
-use super::{Battery, Battle, Body, YardState, aviation::Bomb, bearing, body, fire};
+use super::{Battery, Battle, Body, aviation::Bomb, bearing, body, fire};
 use glam::{Vec2, Vec3, Vec3Swizzles};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,7 +49,7 @@ impl AttackPlane {
 
 impl AirStation {
     pub fn operational(&self, port: &super::Port) -> bool {
-        port.yard_state() != YardState::Ruined && port.factories()[0].live()
+        !port.wrecked() && port.factories()[0].live()
     }
 
     pub fn slip(&self, port: &super::Port) -> Vec2 {
@@ -64,7 +64,7 @@ enum Flight {
 }
 
 /// A curved departure or recovery with its end tangent aligned to the next leg.
-struct Transit {
+pub(super) struct Transit {
     points: [Vec2; 4],
     duration: f32,
     elapsed: f32,
@@ -72,19 +72,22 @@ struct Transit {
 
 const SPEED: f32 = 46.;
 impl Transit {
-    fn new(start: Vec2, outbound: Vec2, end: Vec2, inbound: Vec2) -> Self {
+    /// From `start` heading `outbound` to `end` heading `inbound`, at about `speed`
+    /// metres per second.
+    pub(super) fn new(start: Vec2, outbound: Vec2, end: Vec2, inbound: Vec2, speed: f32) -> Self {
         let reach = (start.distance(end) * 0.45).clamp(40., 100.);
         let a = start + outbound * reach;
         let b = end - inbound * reach;
         Self {
             points: [start, a, b, end],
             duration: (start.distance(end) + start.distance(a) + a.distance(b) + b.distance(end))
-                / (2. * SPEED),
+                / (2. * speed),
             elapsed: 0.,
         }
     }
 
-    fn step(&mut self, dt: f32) -> (Vec2, Vec2, f32) {
+    /// Where it is after `dt` more seconds, which way it is going, and how far along.
+    pub(super) fn step(&mut self, dt: f32) -> (Vec2, Vec2, f32) {
         self.elapsed += dt;
         let t = (self.elapsed / self.duration).min(1.);
         let [a, b, c, d] = self.points;
@@ -128,7 +131,7 @@ impl Battle {
                     raid: base.next,
                     health: super::flak::ATTACK_STRENGTH,
                     way: Vec2::ZERO,
-                    flight: Flight::Out(Transit::new(slip, forward, entry, axis)),
+                    flight: Flight::Out(Transit::new(slip, forward, entry, axis, SPEED)),
                 });
                 base.next = if base.bombers && base.next == AirRaid::Strafe {
                     AirRaid::Bomb
@@ -213,7 +216,8 @@ impl Battle {
                     AirRaid::Bomb => {}
                 }
                 if left < -65. {
-                    plane.flight = Flight::Home(Transit::new(plane.body.pos, axis, slip, -forward));
+                    plane.flight =
+                        Flight::Home(Transit::new(plane.body.pos, axis, slip, -forward, SPEED));
                 }
             }
         }

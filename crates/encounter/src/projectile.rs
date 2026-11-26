@@ -1,6 +1,6 @@
 use super::{
     Battery, Battle, Blow, Body, Effect, EffectKind, Events, Landmark, MainShell, Orders, Port,
-    Raider, Vec2, WingGun, YardState, bearing, body,
+    Raider, Vec2, WingGun, bearing, body, harrier::MOORED_TOP,
 };
 use glam::{Vec3, Vec3Swizzles};
 use shipvivor_artillery::{Ammo, Impact, ShellArc};
@@ -123,7 +123,7 @@ impl FlightPath {
             Battery::Secondary | Battery::EnemySecondary | Battery::Aircraft => 1.8,
             Battery::AntiAir => 1.1,
             Battery::Raider => 2.8,
-            Battery::Shore => 8.,
+            Battery::Shore | Battery::Heavy => 8.,
         };
         Self::from_barrel(mount, target, battery, barrel)
     }
@@ -153,7 +153,11 @@ impl FlightPath {
         let muzzle = mount.xz() + dir * barrel.min(offset.length() * 0.5);
         let distance = muzzle.distance(target.xz()).min(reach);
         let duration = (distance / speed).max(0.015);
-        let arc = ShellArc::between(mount.y, target.y, duration);
+        let arc = if battery == Battery::Heavy {
+            ShellArc::lobbed(mount.y, target.y, duration, super::ranging::HEAVY_DROP)
+        } else {
+            ShellArc::between(mount.y, target.y, duration)
+        };
         let diameter = match battery {
             Battery::Main => shell.diameter_metres(),
             Battery::Secondary | Battery::EnemySecondary | Battery::Aircraft => 0.07,
@@ -161,6 +165,7 @@ impl FlightPath {
             // The same gun asset is drawn at a different scale on each enemy class.
             Battery::Raider => 0.15 * barrel / 3.2,
             Battery::Shore => 0.32,
+            Battery::Heavy => super::HEAVY_CALIBRE * 0.0254,
         };
         Some(Self {
             diameter,
@@ -228,8 +233,10 @@ pub(super) fn ballistics(battery: Battery, shell: MainShell) -> (f32, f32) {
         Battery::AntiAir => (AA_SPEED, 2. * AA_SPEED),
         Battery::Secondary => (240., 290.),
         Battery::EnemySecondary | Battery::Aircraft => (240., 405.),
-        Battery::Raider => (245., 545.),
+        // Out past the Regent's greatest reach.
+        Battery::Raider => (245., 800.),
         Battery::Shore => (280., super::SHORE_RANGE + 35.),
+        Battery::Heavy => (super::ranging::HEAVY_SPEED, super::ranging::HEAVY_REACH),
     }
 }
 
@@ -319,17 +326,25 @@ impl Raider {
                 visit(span, p.deck, p.deck + 1., ShipPart::SecondaryMount(i));
             }
         }
-        let hull = if self.class == super::EnemyClass::Patrol {
+        // The small silhouettes keep a forgiving acquisition volume: the patrol boat's,
+        // a coaster's up to the top of her deck cargo and wheelhouse, and a torpedo
+        // boat's up to her funnel cap.
+        let small = matches!(
+            self.class,
+            super::EnemyClass::Patrol | super::EnemyClass::Coaster | super::EnemyClass::TorpedoBoat
+        );
+        let hull = if small {
             footprint(local(self, a), local(self, b), Vec2::ZERO, 1.)
         } else {
             self.hull_span(a, b)
         };
         if let Some(span) = hull {
-            // The small patrol silhouette keeps its forgiving acquisition volume.
-            let roof = if self.class == super::EnemyClass::Patrol {
-                3.8
-            } else {
-                p.deck
+            let roof = match self.class {
+                super::EnemyClass::Patrol => 3.8,
+                super::EnemyClass::Coaster => 3.,
+                // Up to the top of her funnel.
+                super::EnemyClass::TorpedoBoat => 2.6,
+                _ => p.deck,
             };
             visit(span, 0., roof, ShipPart::Hull);
         }
@@ -353,11 +368,13 @@ enum Contact {
     },
     Raider(usize, ShipPart),
     Port(usize, PortPart),
+    /// A harrier lying at a base's mooring, by its index among them.
+    Moored(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PortPart {
-    Dock,
+    Dock(usize),
     Factory(usize),
     Gun(usize),
     Ground,
@@ -366,8 +383,10 @@ enum PortPart {
 impl super::Port {
     /// The gunsight and flying rounds use the same building and terrain volumes.
     fn contacts(&self, a: Vec2, b: Vec2, mut visit: impl FnMut((f32, f32), f32, f32, PortPart)) {
-        if let Some(span) = self.yard_span(a, b) {
-            visit(span, 3.2, self.yard_top(), PortPart::Dock);
+        for i in 0..self.docks().len() {
+            if let Some(span) = self.dock_span(i, a, b) {
+                visit(span, 3.2, self.dock_top(i), PortPart::Dock(i));
+            }
         }
         for i in 0..self.factories().len() {
             if let Some(span) = self.factory_span(i, a, b) {
@@ -375,10 +394,10 @@ impl super::Port {
             }
         }
         for (i, gun) in self.turrets().iter().enumerate() {
-            if let Some(span) = footprint(a, b, gun.position(&self.body), 5.) {
+            if let Some(span) = footprint(a, b, gun.position(&self.body), gun.radius()) {
                 visit(span, 0., 3.9, PortPart::Ground);
                 if gun.live() {
-                    visit(span, 3.9, 7.5, PortPart::Gun(i));
+                    visit(span, 3.9, gun.top(), PortPart::Gun(i));
                 }
             }
         }
@@ -392,6 +411,8 @@ impl super::Port {
 
 // A structure can stand on a low shelf while a bluff or another building masks it.
 // Use the same three-dimensional sightline for the crew and the player's reticle.
+/// `trees` says whether a pine islet's trees stop the line. They hide what is behind
+/// them from a crew, but the captain's sight passes over them.
 fn first_visible(
     eye: Vec3,
     end: Vec3,
@@ -399,6 +420,7 @@ fn first_visible(
     ports: &[Port],
     landmarks: &[Landmark],
     ice: &[super::Iceberg],
+    trees: bool,
 ) -> Option<(f32, Contact)> {
     let hit = |span: Option<(f32, f32)>, bottom: f32, top: f32| {
         let (mut enter, mut exit) = span?;
@@ -426,7 +448,7 @@ fn first_visible(
         });
     }
     for island in landmarks {
-        for (center, radius, top) in island.volumes() {
+        for (center, radius, top) in island.volumes_seen(trees) {
             record(
                 hit(footprint(eye.xz(), end.xz(), center, radius), 0., top),
                 Contact::Land,
@@ -461,16 +483,16 @@ impl WingGun {
         let eye = self.pivot(orders.player, orders.heading);
         let mut nearest = None;
         let mut limit = range * range;
-        for (i, port) in ports
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.yard_state() != YardState::Ruined)
-        {
-            let dock = (
-                PortPart::Dock,
-                port.yard_position(),
-                (3.2 + port.yard_top()) * 0.5,
-            );
+        for (i, port) in ports.iter().enumerate() {
+            let docks = (0..port.docks().len())
+                .filter(|&j| port.docks()[j].live())
+                .map(|j| {
+                    (
+                        PortPart::Dock(j),
+                        port.dock_position(j),
+                        (3.2 + port.dock_top(j)) * 0.5,
+                    )
+                });
             let guns = port
                 .turrets()
                 .iter()
@@ -489,13 +511,13 @@ impl WingGun {
                         (3.2 + port.factory_top(j)) * 0.5,
                     )
                 });
-            for (part, pos, height) in std::iter::once(dock).chain(guns).chain(factories) {
+            for (part, pos, height) in docks.chain(guns).chain(factories) {
                 let distance = pos.distance_squared(orders.player);
                 if distance > limit || !self.covers(orders.player, orders.heading, pos) {
                     continue;
                 }
                 let point = pos.extend(height).xzy();
-                if matches!(first_visible(eye, point, raiders, ports, landmarks, ice),
+                if matches!(first_visible(eye, point, raiders, ports, landmarks, ice, true),
                     Some((_,Contact::Port(hit, object))) if hit == i && object == part)
                 {
                     nearest = Some(point);
@@ -510,7 +532,8 @@ impl WingGun {
 #[derive(Clone, Copy, Default)]
 pub struct Sighting {
     pub point: Vec3,
-    pub yard: Option<usize>,
+    /// The port and drydock under the crosshair. Both indices start at zero.
+    pub yard: Option<(usize, usize)>,
     /// The port and factory under the crosshair. Both indices start at zero.
     pub factory: Option<(usize, usize)>,
     pub shore_turret: Option<(usize, usize)>,
@@ -526,7 +549,9 @@ impl Battle {
         self.sight(eye, ray, fallback).point
     }
 
-    /// First visible contact, shared by the main battery and the spotting display.
+    /// First visible contact, shared by the main battery and the spotting display. The
+    /// sight passes over trees and harriers at their moorings: the main guns never engage
+    /// them, so they would only snatch the sight off what it is laid on.
     pub fn sight(&self, eye: Vec3, ray: Vec3, fallback: Vec2) -> Sighting {
         let sea = Vec3::new(fallback.x, 0., fallback.y);
         let length = (sea.xz() - eye.xz()).length() / ray.xz().length().max(0.01);
@@ -538,6 +563,7 @@ impl Battle {
             &self.ports,
             &self.landmarks,
             &self.floe.icebergs,
+            false,
         );
         let mut sight = Sighting {
             point: sea,
@@ -547,7 +573,7 @@ impl Battle {
             sight.point = eye.lerp(end, time);
             match object {
                 Contact::Port(i, PortPart::Gun(j)) => sight.shore_turret = Some((i, j)),
-                Contact::Port(i, PortPart::Dock) => sight.yard = Some(i),
+                Contact::Port(i, PortPart::Dock(j)) => sight.yard = Some((i, j)),
                 Contact::Port(i, PortPart::Factory(j)) => sight.factory = Some((i, j)),
                 Contact::Raider(i, part) => {
                     let r = &self.raiders[i];
@@ -566,6 +592,64 @@ impl Battle {
             }
         }
         sight
+    }
+
+    /// What the crew of a main turret engages on its own: the nearest enemy ship it can see
+    /// in its arc and reach that has found her or come within the secondaries' range, led
+    /// by her way over the round's flight, or failing one, the nearest gun it can see at a
+    /// base that is awake. The crew leaves sleeping ships and bases, yards and factories to
+    /// the captain.
+    pub(super) fn crew_target(&self, mount: &super::MainMount, orders: &Orders) -> Option<Vec3> {
+        let eye = mount.pivot(orders.player, orders.heading);
+        let (speed, reach) = ballistics(Battery::Main, mount.round(orders.shell));
+        let fits = |p: Vec3| {
+            p.xz().distance_squared(eye.xz()) <= reach * reach
+                && mount.bears_on(orders.player, orders.heading, p)
+        };
+        let seen = |mark: Vec3| {
+            first_visible(
+                eye,
+                mark,
+                &self.raiders,
+                &self.ports,
+                &self.landmarks,
+                &self.floe.icebergs,
+                true,
+            )
+            .map(|(_, contact)| contact)
+        };
+        let nearest = |a: &Vec3, b: &Vec3| {
+            (a.xz().distance_squared(eye.xz())).total_cmp(&b.xz().distance_squared(eye.xz()))
+        };
+        let close = self.secondaries.range.powi(2);
+        let ship = (self.raiders.iter().enumerate())
+            .filter(|(_, r)| {
+                r.afloat()
+                    && (r.has_contact || r.body.pos.distance_squared(orders.player) <= close)
+            })
+            .filter_map(|(i, r)| {
+                let mark = r.aim_point(orders.player);
+                let flight = mark.xz().distance(eye.xz()) / speed;
+                let led = mark + (r.way * flight).extend(0.).xzy();
+                (fits(led) && matches!(seen(mark), Some(Contact::Raider(j, _)) if j == i))
+                    .then_some(led)
+            })
+            .min_by(nearest);
+        ship.or_else(|| {
+            (self.ports.iter().enumerate())
+                .filter(|(_, port)| port.roused() && !port.wrecked())
+                .flat_map(|(i, port)| {
+                    (port.turrets().iter().enumerate())
+                        .filter(|(_, gun)| gun.live())
+                        .map(move |(j, gun)| (i, j, gun.position(&port.body).extend(5.7).xzy()))
+                })
+                .filter(|&(i, j, p)| {
+                    let gun = PortPart::Gun(j);
+                    fits(p) && matches!(seen(p), Some(Contact::Port(h, part)) if h == i && part == gun)
+                })
+                .map(|(.., p)| p)
+                .min_by(nearest)
+        })
     }
 
     pub(super) fn advance_shots(&mut self, dt: f32, player: Vec2, events: &mut Events) {
@@ -627,6 +711,9 @@ impl Battle {
                 });
             }
             if friendly {
+                for (i, span) in self.moorings.crossings(a, b) {
+                    consider(contact_time(Some(span), 0., MOORED_TOP), Contact::Moored(i));
+                }
                 for (i, r) in self.raiders.iter().enumerate().filter(|(_, r)| r.afloat()) {
                     r.contacts(a, b, |span, low, high, part| {
                         consider(
@@ -663,6 +750,8 @@ impl Battle {
                     .normalize_or_zero();
                 let mut heading = shot.body.heading;
                 let shell = shot.shell.at_contact(time);
+                // What became of the round on a ship's plate, and the grade of that plate.
+                let mut met = None;
                 let mut armor_effect = |outcome: Impact, normal: Vec3| {
                     let out = if outcome == Impact::Bounced {
                         travel.reflect(normal)
@@ -681,11 +770,19 @@ impl Battle {
                 if matches!(object, Contact::Raider(..)) {
                     events.hits += 1;
                 }
+                // A base under Breakwater's fire is roused, whatever its stage.
+                if let Contact::Port(i, _) = object
+                    && matches!(shot.battery, Battery::Main | Battery::Secondary)
+                {
+                    self.ports[i].alarm = true;
+                }
                 let mut effect_at = p;
                 let kind = match object {
+                    // A heavy shell throws up a column that reads from far off.
+                    Contact::Water if shot.battery == Battery::Heavy => EffectKind::Column,
                     Contact::Water => EffectKind::Splash,
                     Contact::Ice(i) => {
-                        self.floe.icebergs[i].integrity -= f32::from(shot.damage);
+                        self.floe.icebergs[i].strike(f32::from(shot.damage), travel.xz());
                         EffectKind::Burst
                     }
                     Contact::Land | Contact::Port(_, PortPart::Ground) => EffectKind::Burst,
@@ -706,17 +803,16 @@ impl Battle {
                             damage: shot.damage,
                             calibre: Some(shot.calibre()),
                             reach: Reach::Track(track),
+                            breach: false,
                         });
                         EffectKind::Burst
                     }
-                    Contact::Port(i, PortPart::Dock) => {
+                    Contact::Port(i, PortPart::Dock(j)) => {
                         let port = &mut self.ports[i];
-                        let standing = port.live_factories() as u8;
-                        if port.damage_yard(shot.damage) {
-                            events.recovered += self
-                                .rewards
-                                .at_once(super::DRYDOCK_STORES + super::FACTORY_STORES * standing);
-                            effect_at = port.yard_position().extend(3.2).xzy();
+                        if port.damage_dock(j, shot.damage) {
+                            events.recovered += self.rewards.at_once(super::DRYDOCK_STORES);
+                            events.docks_felled += 1;
+                            effect_at = port.dock_position(j).extend(3.2).xzy();
                             EffectKind::Demolition { dock: true }
                         } else {
                             EffectKind::Burst
@@ -733,8 +829,17 @@ impl Battle {
                         }
                     }
                     Contact::Port(i, PortPart::Gun(j)) => {
-                        let gun = &mut self.ports[i].turrets[j];
+                        let port = &mut self.ports[i];
+                        let at = port.turrets[j].position(&port.body);
+                        let gun = &mut port.turrets[j];
+                        let was_live = gun.live();
                         gun.strength = gun.strength.saturating_sub(shot.damage);
+                        if was_live && !gun.live() {
+                            events.guns_silenced += 1;
+                        }
+                        if gun.live() {
+                            gun.pock(at, p, shot.calibre());
+                        }
                         EffectKind::Burst
                     }
                     Contact::Raider(i, ShipPart::SecondaryMount(index)) => {
@@ -752,13 +857,14 @@ impl Battle {
                     }
                     Contact::Raider(i, ShipPart::Mount(index)) => {
                         let r = &mut self.raiders[i];
-                        let (outcome, normal) = r.strike_mount(
+                        let (outcome, normal, grade) = r.strike_mount(
                             index,
                             p,
                             travel,
                             (shot.shell.ammo, shell),
                             shot.shell.bore,
                         );
+                        met = Some((outcome, grade));
                         let dealt = outcome.dealt(shot.damage);
                         if dealt > 0 && r.hit_gun(index, dealt) {
                             let gun = &r.guns[index];
@@ -779,13 +885,14 @@ impl Battle {
                     // turn every round from the hull.
                     Contact::Raider(i, ShipPart::Tower) if self.raiders[i].bridge_standing() => {
                         let r = &mut self.raiders[i];
-                        let (outcome, normal) = r.strike_hull(
+                        let (outcome, normal, grade) = r.strike_hull(
                             p,
                             travel,
                             (shot.shell.ammo, shell),
                             shot.shell.bore,
                             true,
                         );
+                        met = Some((outcome, grade));
                         let dealt = outcome.dealt(shot.damage);
                         if dealt > 0 && r.hit_bridge(dealt) {
                             self.effects.push(Effect {
@@ -809,13 +916,14 @@ impl Battle {
                     Contact::Raider(i, part) => {
                         let r = &mut self.raiders[i];
                         let tower = matches!(part, ShipPart::Tower);
-                        let (outcome, normal) = r.strike_hull(
+                        let (outcome, normal, grade) = r.strike_hull(
                             p,
                             travel,
                             (shot.shell.ammo, shell),
                             shot.shell.bore,
                             tower,
                         );
+                        met = Some((outcome, grade));
                         let dealt = outcome.dealt(shot.damage);
                         if dealt > 0 {
                             if tower && r.class == super::EnemyClass::Battleship {
@@ -826,7 +934,17 @@ impl Battle {
                         }
                         armor_effect(outcome, normal)
                     }
+                    Contact::Moored(i) => {
+                        self.moorings.wreck(i, self.at_sea, &mut self.effects);
+                        events.planes_downed += 1;
+                        EffectKind::Burst
+                    }
                 };
+                // Her shells' splinters wreck any harrier lying close by where they burst.
+                if matches!(shot.battery, Battery::Main | Battery::Secondary) {
+                    events.planes_downed +=
+                        (self.moorings).blast(p, shot.calibre(), self.at_sea, &mut self.effects);
+                }
                 if let EffectKind::Armor {
                     battery: Battery::Main,
                     outcome,
@@ -834,6 +952,17 @@ impl Battle {
                 } = kind
                 {
                     self.last_strike = Some((outcome, 1.35));
+                    // HE that the plate held, where the same gun's AP would have opened it.
+                    let ap = MainShell {
+                        ammo: Ammo::Ap,
+                        ..shot.shell
+                    };
+                    if shot.shell.ammo == Ammo::He
+                        && let Some((Impact::Embedded, grade)) = met
+                        && ap.at_contact(time).opens(grade)
+                    {
+                        self.ap_called_for = super::AP_CALL;
+                    }
                 }
                 self.effects.push(Effect {
                     body: body(&mut self.serial, effect_at.xz(), heading),
@@ -852,7 +981,7 @@ impl Battle {
             true
         });
         for (at, damage) in bursts {
-            self.burst_flak(at, damage);
+            self.burst_flak(at, damage, events);
         }
     }
 }

@@ -5,7 +5,7 @@ use bevy::{
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
-use shipvivor_encounter::EnemyClass;
+use shipvivor_encounter::{EnemyClass, ShoreTurret};
 
 /// Shapes are laid out in units on a 48-unit square and drawn at [`SCALE`] pixels a
 /// unit, so they stay sharp on a Retina display. Emblems stay within [`REACH`] units of
@@ -23,49 +23,90 @@ const GOLD: [u8; 3] = [255, 200, 94];
 const INK: [u8; 3] = [21, 38, 44];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Emblem {
+pub(crate) enum Emblem {
     Patrol,
+    /// A torpedo boat: long, lean and fine in the bow, with her tube along the
+    /// centreline aft.
+    TorpedoBoat,
     Destroyer,
     Cruiser,
     Battleship,
     Freighter,
+    /// A coaster: short and beamy, her hold forward and her wheelhouse aft.
+    Coaster,
     /// A flagship: the crown she carries on the chart.
     Crown,
     Plane,
     /// A shore battery, as a star fort.
     Fort,
+    /// A heavy battery: the star fort with its long gun, which points the way it is laid.
+    Heavy,
     /// Fire from a gun that cannot be named.
     Unknown,
+    /// An enemy torpedo running at her: its head, body, fins and screw, with the bubbles
+    /// of its track behind.
+    Torpedo,
 }
 impl Emblem {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 13] = [
         Self::Patrol,
+        Self::TorpedoBoat,
         Self::Destroyer,
         Self::Cruiser,
         Self::Battleship,
         Self::Freighter,
+        Self::Coaster,
         Self::Crown,
         Self::Plane,
         Self::Fort,
+        Self::Heavy,
         Self::Unknown,
+        Self::Torpedo,
     ];
     pub fn of(class: EnemyClass) -> Self {
         match class {
             EnemyClass::Freighter => Self::Freighter,
+            EnemyClass::Coaster => Self::Coaster,
             EnemyClass::Patrol => Self::Patrol,
+            EnemyClass::TorpedoBoat => Self::TorpedoBoat,
             EnemyClass::Destroyer => Self::Destroyer,
             EnemyClass::Cruiser => Self::Cruiser,
             EnemyClass::Battleship => Self::Battleship,
-            EnemyClass::Parliament | EnemyClass::Regent => Self::Crown,
+            EnemyClass::Commodore | EnemyClass::Parliament | EnemyClass::Regent => Self::Crown,
         }
     }
-    /// Hulls and aircraft turn with their heading. A crown, a fort and an unknown stay upright.
+    /// A harbour gun: a heavy battery, or a light one.
+    pub fn battery(gun: &ShoreTurret) -> Self {
+        if gun.heavy_battery() {
+            Self::Heavy
+        } else {
+            Self::Fort
+        }
+    }
+    /// Hulls and aircraft turn with their heading, and a heavy battery's gun with its
+    /// training. A crown, a fort and an unknown stay upright.
     pub fn turns(self) -> bool {
         !matches!(self, Self::Crown | Self::Fort | Self::Unknown)
     }
-    /// Freighters and flagships are gold, as on the chart.
+    /// Cargo ships and flagships are gold, as on the chart.
     pub fn gold(self) -> bool {
-        matches!(self, Self::Freighter | Self::Crown)
+        matches!(self, Self::Freighter | Self::Coaster | Self::Crown)
+    }
+    /// How serious a threat of this kind is. The more serious pip draws on top where
+    /// pips overlap. A torpedo in the water is the thing to dodge, then a flagship,
+    /// then the heaviest guns down to an armed merchantman.
+    pub fn menace(self) -> u8 {
+        match self {
+            Self::Freighter | Self::Coaster => 0,
+            Self::Unknown => 1,
+            Self::Patrol => 2,
+            Self::Plane | Self::Fort => 3,
+            Self::Destroyer | Self::TorpedoBoat => 4,
+            Self::Cruiser => 5,
+            Self::Battleship | Self::Heavy => 6,
+            Self::Crown => 7,
+            Self::Torpedo => 8,
+        }
     }
 
     /// Whether a point, in units from the centre with y down, is inked. Classes differ
@@ -75,6 +116,10 @@ impl Emblem {
             |wells: &[(f32, f32)]| wells.iter().any(|&(y, r)| p.distance(Vec2::new(0., y)) < r);
         match self {
             Self::Patrol => hull(p, 11.5, 4., 6.) && !wells(&[(-3., 2.4)]),
+            Self::TorpedoBoat => {
+                let tube = p.x.abs() < 1. && (1.5..=9.5).contains(&p.y);
+                hull(p, 13.5, 3., 9.) && !tube
+            }
             Self::Destroyer => hull(p, 17.5, 4.2, 8.) && !wells(&[(-8., 2.5), (10., 2.5)]),
             Self::Cruiser => hull(p, 18., 6.2, 8.) && !wells(&[(-8., 3.4), (10., 3.4)]),
             Self::Battleship => {
@@ -86,6 +131,10 @@ impl Emblem {
                     .any(|&y| p.x.abs() < 3.2 && (p.y - y).abs() < 2.2);
                 hull(p, 16., 6., 3.5) && !hatch
             }
+            Self::Coaster => {
+                let hatch = p.x.abs() < 2.4 && (p.y + 1.5).abs() < 3.;
+                hull(p, 10., 5., 4.) && !hatch
+            }
             Self::Crown => {
                 // Three points over a band, with a line between them.
                 let x = p.x.abs();
@@ -95,6 +144,16 @@ impl Emblem {
                     -1. - (x - 6.8) / 6.7 * 8.5
                 };
                 x <= 13.5 && p.y <= 9.5 && p.y >= top && !(2.5..4.2).contains(&p.y)
+            }
+            Self::Torpedo => {
+                let head = p.y < -9. && p.distance(Vec2::new(0., -9.)) <= 2.3;
+                let body = p.x.abs() <= 2.3 && (-9. ..=7.5).contains(&p.y);
+                let fins = (7.5..=10.5).contains(&p.y) && p.x.abs() <= 5. - (p.y - 7.5) * 0.4;
+                let screw = (10.5..=12.).contains(&p.y) && p.x.abs() <= 1.3;
+                let track = [(15., 1.5), (18., 1.1)]
+                    .iter()
+                    .any(|&(y, r)| p.distance(Vec2::new(0., y)) <= r);
+                head || body || fins || screw || track
             }
             Self::Plane => {
                 let fuselage = p.x.abs() <= 2.2 && (-15.5..=14.).contains(&p.y);
@@ -107,6 +166,11 @@ impl Emblem {
                 let bastion = (p.abs() - Vec2::splat(10.)).abs().element_sum() <= 6.5;
                 let yard = p.x.abs() < 4.5 && p.y.abs() < 4.5;
                 (walls || bastion) && !yard
+            }
+            Self::Heavy => {
+                let gunhouse = p.length() <= 3.;
+                let barrel = p.x.abs() <= 1.6 && (-19. ..=0.).contains(&p.y);
+                Self::Fort.covers(p) || gunhouse || barrel
             }
             Self::Unknown => p.length() <= 6.5,
         }

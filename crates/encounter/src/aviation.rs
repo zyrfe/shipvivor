@@ -384,6 +384,7 @@ impl Battle {
                         damage,
                         calibre: None,
                         reach: shipvivor_shipyard::Reach::Bays,
+                        breach: false,
                     });
                     events.damage = events.damage.saturating_add(damage);
                     EffectKind::Burst

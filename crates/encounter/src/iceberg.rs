@@ -1,10 +1,12 @@
 //! Ice adrift on the current: growlers and bergs. They ride the stream round the islands,
-//! ground on the shores and break up there, split under shellfire, stop rounds and
-//! torpedoes, and stove in any hull that meets them too fast.
+//! ground on the shores and break up there, stop rounds and torpedoes, and stove in any
+//! hull that meets them too fast. Fire breaks them down a size at a time: a hit splits a
+//! berg into pieces that fly on along the line of the shot, and a hit on a growler leaves
+//! nothing but brash.
 use super::{Battle, Blow, Body, Chart, Effect, EffectKind, Events, Orders, Vec2, bearing, body};
 use super::{Currents, SPAWN_STANDOFF, chart::Ice, chart::Rng, ram};
 use shipvivor_compass::direction;
-use std::f32::consts::TAU;
+use std::f32::consts::{PI, TAU};
 
 /// Seconds the stream may pin ice against a shore before it breaks up there.
 const GROUNDED_SECS: f32 = 45.;
@@ -16,8 +18,20 @@ const REFILL_SECS: f32 = 25.;
 const ICE_MARGIN: f32 = 260.;
 /// Ice at least this big is worth steering round. Raiders shoulder smaller pieces aside.
 pub const AVOIDED_RADIUS: f32 = 5.;
-/// Share of a hull's closing speed that ice takes as damage to its integrity.
-const CRUSHING: f32 = 4.;
+/// Damage ice takes per metre of its radius before it splits. A stock main-battery round
+/// splits anything up to 10 m in radius and a light round a growler. The biggest bergs
+/// take a few hits.
+const TOUGHNESS: f32 = 0.2;
+/// Share of a hull's closing speed that ice takes as damage to its integrity. A cruiser
+/// at full speed breaks a berg up to about 8 m in radius in one ram.
+const CRUSHING: f32 = 0.12;
+/// Speed of the pieces a blow breaks off, in metres per second for a piece 1 m in radius.
+/// Smaller pieces fly faster, as the square root of their size.
+const SCATTER: f32 = 12.;
+/// Half the angle, either side of the line of the blow, that the pieces fan out across.
+const FAN: f32 = 0.8;
+/// Speed at which the pieces of ice crushed on a shore come apart.
+const PARTING: f32 = 0.4;
 /// Fraction of the closing speed returned when two pieces of ice meet.
 const ICE_REBOUND: f32 = 0.1;
 
@@ -78,6 +92,9 @@ pub struct Iceberg {
     pub spin: f32,
     /// Damage the ice can take before it splits.
     pub integrity: f32,
+    /// The blows it has taken, each along its line and weighted by its damage. The pieces
+    /// fly on along their sum when the ice splits.
+    blow: Vec2,
     /// Seconds the stream has held it against a shore.
     aground: f32,
     /// Seconds before a hull grinding against it can be hurt again.
@@ -91,10 +108,17 @@ impl Iceberg {
             shape,
             way,
             spin: 0.,
-            integrity: 2. + 0.6 * radius * radius,
+            integrity: TOUGHNESS * radius,
+            blow: Vec2::ZERO,
             aground: 0.,
             rest: 0.,
         }
+    }
+    /// A blow of `damage` travelling along `along`. If it splits the ice, the pieces fly
+    /// on that way.
+    pub(super) fn strike(&mut self, damage: f32, along: Vec2) {
+        self.integrity -= damage;
+        self.blow += along.normalize_or_zero() * damage;
     }
     /// Height of the highest ice above the water.
     pub fn top(&self) -> f32 {
@@ -158,7 +182,7 @@ impl Battle {
     /// Solve the chart's current and set its ice adrift on it.
     pub fn with_sea(mut self, chart: &Chart) -> Self {
         let (lo, hi) = chart.extent();
-        let currents = Currents::solve(chart.set, &chart.land(), lo, hi);
+        let currents = Currents::solve(chart.set, &chart.land(), &chart.gyres, lo, hi);
         let icebergs = chart
             .ice
             .iter()
@@ -283,12 +307,14 @@ impl Battle {
     }
 
     /// Ice the shore or the guns have beaten splits into two or three smaller pieces, or
-    /// melts away if it was small already.
+    /// shatters into brash if it was small already. Pieces knocked off by a blow fly on
+    /// along its line, fanned out either side of it, the smaller the faster. Ice crushed
+    /// on a shore just comes apart.
     fn break_up(&mut self, index: usize) {
         let berg = self.floe.icebergs.swap_remove(index);
         self.effects.push(Effect {
             body: body(&mut self.serial, berg.body.pos, berg.body.heading),
-            kind: EffectKind::Splash,
+            kind: EffectKind::Shatter(berg.radius.round().min(255.) as u8),
             height: 0.,
             age: 0.,
         });
@@ -298,16 +324,25 @@ impl Battle {
         let draw = self.floe.rng.next();
         let pieces = 2 + (draw % 2) as usize;
         let radius = berg.radius * if pieces == 2 { 0.66 } else { 0.55 };
+        let (line, arc, speed) = match berg.blow.try_normalize() {
+            Some(along) => (bearing(along), FAN, SCATTER / radius.sqrt()),
+            // Evenly round the compass: opposite ways for two pieces, a third apart for three.
+            None => (berg.body.heading, PI * (1. - 1. / pieces as f32), PARTING),
+        };
         for k in 0..pieces {
-            let out = direction(berg.body.heading + k as f32 * TAU / pieces as f32);
+            // From -1 on one edge of the fan to +1 on the other.
+            let across = 2. * k as f32 / (pieces - 1) as f32 - 1.;
+            let jitter = self.floe.rng.range(-0.15, 0.15);
+            let out = direction(line + arc * across + jitter);
             let at = body(
                 &mut self.serial,
                 berg.body.pos + out * (berg.radius - radius * 0.8),
                 berg.body.heading + k as f32 * 1.9,
             );
             let shape = IceShape::for_radius(radius, draw >> (8 * k + 4));
-            let mut piece = Iceberg::new(at, radius, shape, berg.way + out * 0.25);
-            piece.spin = berg.spin + (k as f32 - 1.) * 0.02;
+            let mut piece = Iceberg::new(at, radius, shape, berg.way + out * speed);
+            // Each piece is struck off-centre and tumbles away from the line of the blow.
+            piece.spin = berg.spin + across * (0.02 + 0.03 * speed);
             self.floe.icebergs.push(piece);
         }
     }
@@ -384,7 +419,8 @@ impl Battle {
             berg.way += hit.kick[1];
             if hit.closing >= ram::BUMP && berg.rest == 0. {
                 berg.rest = ram::RAM_REST;
-                berg.integrity -= CRUSHING * hit.closing;
+                // The pieces fly on ahead of her stem, along the line from her to the ice.
+                berg.strike(CRUSHING * hit.closing, hit.normal);
                 events.damage = events.damage.saturating_add(hit.damage[0]);
                 if hit.damage[0] > 0 {
                     let reach = orders.hull.bow + orders.hull.stern;
@@ -395,6 +431,7 @@ impl Battle {
                         damage: hit.damage[0],
                         calibre: None,
                         reach: shipvivor_shipyard::Reach::Bays,
+                        breach: false,
                     });
                 }
                 self.effects.push(Effect {
@@ -419,7 +456,7 @@ impl Battle {
                 if hit.closing >= ram::BUMP && raider.ram_rest == 0. {
                     raider.ram_rest = ram::RAM_REST;
                     raider.hit_hull(hit.point, hit.damage[0]);
-                    berg.integrity -= CRUSHING * hit.closing;
+                    berg.strike(CRUSHING * hit.closing, hit.normal);
                     self.effects.push(Effect {
                         body: body(&mut self.serial, hit.point, bearing(hit.normal)),
                         kind: EffectKind::Crunch,

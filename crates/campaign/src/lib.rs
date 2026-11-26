@@ -1,9 +1,13 @@
 //! Run progression: the mission clock, objectives, hull, fittings and routes of one run.
 //! Timers advance only while the ship is sailing. Menus, pausing and the helm trial
-//! belong to the application, not to the run.
+//! belong to the application, not to the run. A patrol is sailed until every base is
+//! down or she sinks: the clock is the time to beat, each base wrecked puts time back on
+//! it, and finishing inside it pays a star's worth of yard points.
 mod battery;
+mod plan;
 mod workshop;
 pub use battery::{CALIBRES, ShipBeam};
+pub use plan::{Order, Plan};
 use shipvivor_artillery::{
     AntiAir, MainShell, STOCK_TRAVERSE, Secondaries, TurretLayout, training_rate,
 };
@@ -27,11 +31,11 @@ pub enum Phase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LegEnd {
     BasesDestroyed,
-    TimeExpired,
-    Extracted,
     RegentSunk,
 }
 
+/// One sea of a run. Each belongs to one round of [`SEAS`], except Crown Deep, where
+/// every route ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Stage {
     #[default]
@@ -42,7 +46,52 @@ pub enum Stage {
     CrownDeep,
     LanternBay,
     BlackcapReach,
+    // Seas past the second round come after the first seven, so their discriminants,
+    // and the leg seeds drawn from them, stay as they were.
+    SealersRoad,
+    KittiwakeSound,
+    RimeGate,
+    WhalebackReach,
+    FogboundBay,
+    TheGullet,
+    LongnightRoad,
+    HollowSound,
+    SplinterCut,
+    FrostlineReach,
+    TernHaven,
+    DevilsThroat,
+    BorealRoad,
+    CalvingSound,
+    RegentsGate,
 }
+
+/// Patrols in a full run before the intercept: an anchorage, then a passage from each yard.
+pub const PATROLS: usize = 7;
+/// Rounds in a full run: the patrols, then Crown Deep.
+pub const ROUNDS: usize = PATROLS + 1;
+
+/// The seas of every patrol round, three to a round. The first round is the choice of
+/// anchorage. From each yard after it the chart offers the next round's three, lane by
+/// lane as [`LANES`] prices them: open water, a sheltered sound and a hard passage.
+pub const SEAS: [[Stage; 3]; PATROLS] = [
+    [Stage::LanternBay, Stage::IronNarrows, Stage::BlackcapReach],
+    [Stage::OuterRoad, Stage::GreywaterSound, Stage::PilotsCut],
+    [Stage::SealersRoad, Stage::KittiwakeSound, Stage::RimeGate],
+    [Stage::WhalebackReach, Stage::FogboundBay, Stage::TheGullet],
+    [Stage::LongnightRoad, Stage::HollowSound, Stage::SplinterCut],
+    [Stage::FrostlineReach, Stage::TernHaven, Stage::DevilsThroat],
+    [Stage::BorealRoad, Stage::CalvingSound, Stage::RegentsGate],
+];
+
+/// What each lane of a passage round asks of the leg just sailed and grants on arrival.
+/// Open water is always open. A sheltered sound needs two stars, and the yard there
+/// repairs her further. The hard passage needs three, fits a card on arrival and runs
+/// under enemy air cover.
+pub const LANES: [(u8, Perk); 3] = [
+    (0, Perk::None),
+    (2, Perk::Repair(30)),
+    (3, Perk::FreeFitting),
+];
 
 pub struct Anchorage {
     pub stage: Stage,
@@ -74,24 +123,92 @@ pub struct Mission {
 }
 
 impl Stage {
+    /// Its round and lane in [`SEAS`], counting from zero. Crown Deep has none.
+    fn place(self) -> Option<(usize, usize)> {
+        SEAS.iter().enumerate().find_map(|(round, seas)| {
+            seas.iter()
+                .position(|&sea| sea == self)
+                .map(|lane| (round, lane))
+        })
+    }
+    /// The round this sea is sailed in, from 1 for an anchorage to [`ROUNDS`] for Crown Deep.
+    pub fn round(self) -> usize {
+        self.place().map_or(ROUNDS, |(round, _)| round + 1)
+    }
+    /// Its place across its round: 0 for open water, 1 for the sheltered sound, 2 for the
+    /// hard passage. Crown Deep lies in the middle.
+    pub fn lane(self) -> usize {
+        self.place().map_or(1, |(_, lane)| lane)
+    }
     pub fn is_opening(self) -> bool {
-        ANCHORAGES.iter().any(|port| port.stage == self)
+        self.round() == 1
+    }
+    /// The last patrol before the intercept. Its yard sails her on to Crown Deep.
+    pub fn is_last_patrol(self) -> bool {
+        self.round() == PATROLS
     }
 
-    /// The three-star passage takes the ship into enemy air cover.
+    /// A hard passage takes the ship into enemy air cover.
     pub fn enters_air_cover(self) -> bool {
-        self == Self::PilotsCut
+        self.round() > 1 && self.round() <= PATROLS && self.lane() == 2
+    }
+
+    /// The way into this sea from the yard before it. An anchorage and Crown Deep ask
+    /// nothing.
+    pub fn exit(self) -> Exit {
+        let (stars, perk) = if self.round() > 1 && self.round() <= PATROLS {
+            LANES[self.lane()]
+        } else {
+            (0, Perk::None)
+        };
+        Exit {
+            stage: self,
+            stars,
+            perk,
+        }
+    }
+    /// The passages the yard after this sea offers, or `None` after the last patrol.
+    pub fn exits(self) -> Option<[Exit; 3]> {
+        SEAS.get(self.round()).map(|seas| seas.map(Self::exit))
+    }
+
+    /// Yard points each star earned in this sea pays. A passage pays more the harder
+    /// its lane, and every anchorage pays the open-water rate. Crown Deep earns no stars.
+    pub fn star_points(self) -> u16 {
+        match self.round() {
+            1 => STAR_POINTS,
+            round if round <= PATROLS => LANE_STAR_POINTS[self.lane()],
+            _ => 0,
+        }
     }
 
     pub fn mission(self) -> Mission {
+        // Every patrol is short. A clean sweep of its bases takes about four minutes,
+        // and the clock, the time to beat, leaves a minute or so over, with
+        // `BASE_TIME` more for each base wrecked. The goals rise round by round.
         let (name, minutes, kills, crates) = match self {
-            Self::CrownDeep => ("Crown Deep", 15, 0, 0),
-            Self::IronNarrows => ("The Iron Narrows", 10, 4, 2),
-            Self::LanternBay => ("Lantern Bay", 12, 3, 2),
-            Self::BlackcapReach => ("Blackcap Reach", 9, 5, 2),
-            Self::OuterRoad => ("Outer Road", 12, 7, 3),
-            Self::GreywaterSound => ("Greywater Sound", 12, 6, 4),
-            Self::PilotsCut => ("Pilot's Cut", 15, 8, 3),
+            Self::CrownDeep => ("Crown Deep", 8, 0, 0),
+            Self::LanternBay => ("Lantern Bay", 5, 3, 2),
+            Self::IronNarrows => ("The Iron Narrows", 5, 4, 2),
+            Self::BlackcapReach => ("Blackcap Reach", 5, 5, 2),
+            Self::OuterRoad => ("Outer Road", 5, 5, 2),
+            Self::GreywaterSound => ("Greywater Sound", 5, 5, 3),
+            Self::PilotsCut => ("Pilot's Cut", 5, 6, 3),
+            Self::SealersRoad => ("Sealers' Road", 5, 6, 3),
+            Self::KittiwakeSound => ("Kittiwake Sound", 5, 6, 3),
+            Self::RimeGate => ("Rime Gate", 5, 7, 3),
+            Self::WhalebackReach => ("Whaleback Reach", 6, 7, 3),
+            Self::FogboundBay => ("Fogbound Bay", 6, 7, 4),
+            Self::TheGullet => ("The Gullet", 6, 8, 3),
+            Self::LongnightRoad => ("Longnight Road", 6, 8, 3),
+            Self::HollowSound => ("Hollow Sound", 6, 8, 4),
+            Self::SplinterCut => ("Splinter Cut", 6, 9, 4),
+            Self::FrostlineReach => ("Frostline Reach", 6, 9, 4),
+            Self::TernHaven => ("Tern Haven", 6, 9, 4),
+            Self::DevilsThroat => ("Devil's Throat", 6, 10, 4),
+            Self::BorealRoad => ("Boreal Road", 6, 10, 4),
+            Self::CalvingSound => ("Calving Sound", 6, 10, 5),
+            Self::RegentsGate => ("Regent's Gate", 6, 11, 4),
         };
         Mission {
             name,
@@ -103,9 +220,19 @@ impl Stage {
 }
 
 pub const MAX_HULL: u16 = 100;
-/// One star per mission goal.
+/// One star per mission goal. The clock takes none of them away: beating it pays a
+/// star's worth of yard points on top.
 pub const MAX_STARS: u8 = 3;
-pub const RESERVE_STARS: u8 = 2;
+/// Seconds the leg's clock gains for each base wrecked, so a patrol that keeps working
+/// through its bases has a reason to press on and no need to rush.
+pub const BASE_TIME: f32 = 45.;
+/// Yard points for each star a leg in open water earns.
+pub const STAR_POINTS: u16 = 2;
+/// Yard points for each star by lane: open water, the sheltered sound and the hard
+/// passage. The harder way pays double.
+pub const LANE_STAR_POINTS: [u16; 3] = [STAR_POINTS, 3, 4];
+/// Yard points for each enemy yard whose gantry comes down on a leg.
+pub const YARD_POINTS: u16 = 1;
 
 /// A whole section the yard can splice into the hull: a straight frame and what stands on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,13 +274,28 @@ impl DockModule {
         Module::new(Frame::Straight, fit)
     }
 }
-/// Hull restored by each recovered crate.
-pub const CRATE_REPAIR: u16 = 12;
-/// Hull points of repair the dock gives between legs. A badly damaged ship sails with
+/// Hull restored by each recovered crate: 8% of the stock hull, so a run of pickups
+/// patches her up without swinging her from battered to sound in a few seconds.
+pub const CRATE_REPAIR: u16 = 8;
+/// Rounds this wide or wider, in inches, strike her with their full damage.
+const FULL_BORE: f32 = 10.;
+/// Rounds this wide or narrower do this share of their damage, and the share rises
+/// evenly from here to [`FULL_BORE`]: a light gun stings, a heavy one hurts.
+const LIGHT_BORE: (f32, f32) = (3., 0.5);
+
+/// Share of its damage a round `calibre` inches across does to her, or all of it for a
+/// blow no plate can turn, such as a ram, a bomb or a torpedo.
+fn bore_share(calibre: Option<f32>) -> f32 {
+    let Some(calibre) = calibre else {
+        return 1.;
+    };
+    let (light, share) = LIGHT_BORE;
+    let t = ((calibre - light) / (FULL_BORE - light)).clamp(0., 1.);
+    share + (1. - share) * t
+}
+/// Hull points of repair the dock gives after each patrol. A badly damaged ship sails with
 /// whatever this does not reach.
 pub const DOCK_REPAIR: u16 = 40;
-/// Time until extraction opens if no drydock has been destroyed.
-pub const EXTRACT_SECONDS: f32 = 60.;
 
 /// What a route grants on arrival.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,31 +305,14 @@ pub enum Perk {
     FreeFitting,
 }
 
-/// A route out of the first leg and the stars needed to take it.
-#[derive(Clone, Copy, Debug)]
+/// A passage from a yard to the next round, the stars the leg just sailed must have
+/// earned to take it, and what it grants on arrival.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Exit {
     pub stage: Stage,
     pub stars: u8,
     pub perk: Perk,
 }
-
-pub const EXITS: [Exit; 3] = [
-    Exit {
-        stage: Stage::OuterRoad,
-        stars: 0,
-        perk: Perk::None,
-    },
-    Exit {
-        stage: Stage::GreywaterSound,
-        stars: 2,
-        perk: Perk::Repair(30),
-    },
-    Exit {
-        stage: Stage::PilotsCut,
-        stars: 3,
-        perk: Perk::FreeFitting,
-    },
-];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Card {
@@ -216,18 +341,110 @@ pub enum Card {
     Armor,
     /// A stronger engine and stronger deck fittings.
     Hardening,
-    /// A pair of light anti-aircraft guns.
-    AntiAir,
     /// Another pair of AA guns.
     MoreAntiAir,
     /// More damage from each AA burst.
     HeavyAntiAir,
     /// A shorter AA reload.
     QuickAntiAir,
+    /// Bigger pumps, which clear the water from flooding compartments faster.
+    Pumps,
+}
+impl Card {
+    /// How often a level-up hand deals this card, or `None` for work only the yard does.
+    pub fn rarity(self) -> Option<Rarity> {
+        DECK.iter()
+            .find(|(card, _)| *card == self)
+            .map(|&(_, rarity)| rarity)
+    }
+}
+
+/// How often a level-up hand deals a card, against the other cards the ship can take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Rarity {
+    Common,
+    Uncommon,
+    Rare,
+}
+impl Rarity {
+    /// The card's share of each draw: a common card comes up six times as often as a rare.
+    pub const fn weight(self) -> u32 {
+        match self {
+            Self::Common => 6,
+            Self::Uncommon => 3,
+            Self::Rare => 1,
+        }
+    }
+}
+
+/// The level-up deck: every card a hand can deal, and how rare it is. The bore and the
+/// barrels a turret carries are yard work, so they are not here. A new card joins the deck
+/// with one line.
+pub const DECK: &[(Card, Rarity)] = &[
+    (Card::Loader, Rarity::Common),
+    (Card::Velocity, Rarity::Common),
+    (Card::TrainingGear, Rarity::Common),
+    (Card::Turbines, Rarity::Common),
+    (Card::QuickSecondaries, Rarity::Common),
+    (Card::SecondaryRange, Rarity::Common),
+    (Card::HeavySecondaries, Rarity::Common),
+    (Card::QuickAntiAir, Rarity::Common),
+    (Card::MoreAntiAir, Rarity::Common),
+    (Card::HeavyAntiAir, Rarity::Common),
+    (Card::Pumps, Rarity::Common),
+    (Card::Caps, Rarity::Uncommon),
+    (Card::Armor, Rarity::Uncommon),
+    (Card::Hardening, Rarity::Uncommon),
+    (Card::MoreSecondaries, Rarity::Uncommon),
+    (Card::ArmorPiercing, Rarity::Uncommon),
+    (Card::TwinSecondaries, Rarity::Rare),
+];
+/// Cards in a level-up hand, when that many fit.
+pub const HAND: usize = 3;
+
+/// The splitmix64 finaliser: every bit of `x` reaches every bit of the result.
+fn mix(mut x: u64) -> u64 {
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+/// The next number in a splitmix64 stream.
+fn next(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    mix(*state)
+}
+/// Keeps the hands' stream apart from anything else drawn from the run seed.
+const HAND_STREAM: u64 = 0x6861_6e64_7300_0000;
+
+/// Up to [`HAND`] different cards from `pool`, each draw weighted by rarity among the cards
+/// not yet drawn.
+fn draw(mut pool: Vec<(Card, Rarity)>, key: u64) -> Vec<Card> {
+    let mut state = key;
+    let mut hand = Vec::with_capacity(HAND);
+    while hand.len() < HAND && !pool.is_empty() {
+        let weight = |at: usize| u64::from(pool[at].1.weight());
+        let total: u64 = (0..pool.len()).map(weight).sum();
+        let mut roll = next(&mut state) % total;
+        let mut pick = 0;
+        while roll >= weight(pick) {
+            roll -= weight(pick);
+            pick += 1;
+        }
+        hand.push(pool.remove(pick).0);
+    }
+    hand
 }
 
 /// Metres each rangefinder card adds to the secondaries' reach.
 const WING_RANGE_STEP: f32 = 40.;
+/// The share of a barrel's loading time each rank of loaders takes off, for the main
+/// battery, the secondaries and the AA alike. It comes off what the ranks before left,
+/// so every rank is worth the same to the crew: four ranks take it down to about half.
+pub const LOADER_CUT: f32 = 0.15;
+/// The share of the stock loading time a crew drilled with `ranks` of loaders takes.
+pub fn drilled(ranks: u16) -> f32 {
+    (1. - LOADER_CUT).powi(i32::from(ranks))
+}
 /// The most ranks of each refit the ship can take.
 pub mod limits {
     pub const TRAINING_GEAR: u16 = shipvivor_artillery::MOST_TRAINING_GEAR;
@@ -237,7 +454,10 @@ pub mod limits {
     pub const AA_MOUNTS: u16 = 2;
     pub const AA_SHELLS: u16 = 2;
     pub const AA_LOADERS: u16 = 3;
+    pub const PUMPS: u16 = 3;
 }
+/// Each rank of pumps adds this share of the stock pumping.
+const PUMP_STEP: f32 = 0.5;
 /// Each rank of armor plate adds this share of stock strength to every panel, and
 /// this many inches to its thickness. On sound plate the stock beam's two ranks turn
 /// the enemy's secondaries and aircraft guns, then patrol boats and destroyers. A
@@ -247,9 +467,6 @@ const ARMOR_PLATE: f32 = 0.5;
 const ARMOR_INCHES: f32 = 3.;
 /// Each rank of hardening adds this share of stock strength to every deck fitting.
 const HARDENED_FITTINGS: f32 = 0.5;
-
-/// Seconds per inch of calibre for one barrel to reload with stock gear: 6.4 s at four inches.
-const RELOAD_PER_INCH: f32 = 1.6;
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fittings {
@@ -270,10 +487,10 @@ pub struct Fittings {
     pub training_gear: u16,
     pub armor: u16,
     pub hardening: u16,
-    pub anti_air: u16,
     pub aa_mounts: u16,
     pub aa_shells: u16,
     pub aa_loaders: u16,
+    pub pumps: u16,
 }
 impl Fittings {
     /// These fittings with one more rank of `card`.
@@ -297,28 +514,31 @@ impl Fittings {
             Card::TrainingGear => &mut self.training_gear,
             Card::Armor => &mut self.armor,
             Card::Hardening => &mut self.hardening,
-            Card::AntiAir => &mut self.anti_air,
             Card::MoreAntiAir => &mut self.aa_mounts,
             Card::HeavyAntiAir => &mut self.aa_shells,
             Card::QuickAntiAir => &mut self.aa_loaders,
-            Card::TripleTurrets | Card::QuadTurrets => {
-                self.turrets = match (card, self.turrets) {
-                    (Card::TripleTurrets, TurretLayout::Twin) => TurretLayout::Triple,
-                    (Card::QuadTurrets, TurretLayout::Triple) => TurretLayout::Quad,
-                    _ => self.turrets,
-                };
-                return self;
-            }
+            Card::Pumps => &mut self.pumps,
+            // Bore and barrels are fitted turret by turret in the yard.
+            Card::TripleTurrets | Card::QuadTurrets => return self,
         };
         *rank = rank.saturating_add(1);
         self
     }
     /// Seconds for one main battery barrel to reload. A twin mount working both barrels
-    /// in turn fires every half of this. A heavier shell takes longer to load, in proportion
-    /// to its calibre. Each rank of quick loaders divides that down, so four ranks bring an
-    /// eight-inch battery back to the four-inch stock time.
+    /// in turn fires every half of this. A light gun loads in moments and a heavy one
+    /// slowly, faster than in step with its calibre: see [`MainShell::load_seconds`].
+    /// Each rank of quick loaders takes [`LOADER_CUT`] off it: see [`drilled`].
     pub fn reload(&self) -> f32 {
-        RELOAD_PER_INCH * self.round().calibre_inches() / (1. + 0.25 * f32::from(self.loader))
+        self.round().load_seconds() * drilled(self.loader)
+    }
+    /// Seconds for one barrel of a `calibre`-inch gun to reload with this crew's drill.
+    /// Turrets of different bores load on the same curve, each at its own pace.
+    pub fn reload_for(&self, calibre: u16) -> f32 {
+        let round = MainShell {
+            bore: calibre.saturating_sub(CALIBRES[0]),
+            ..MainShell::STOCK
+        };
+        round.load_seconds() * drilled(self.loader)
     }
     /// The main battery round as fitted, filled with HE. The crew loads whichever
     /// filling is selected, and AP only once it is fitted.
@@ -338,18 +558,16 @@ impl Fittings {
     pub fn traverse(&self) -> f32 {
         STOCK_TRAVERSE * training_rate(self.round().calibre_inches(), self.training_gear)
     }
-    /// The light AA battery: a pair of guns once fitted and another pair per mounting
+    /// The light AA battery: the pair she is built with and another pair per mounting
     /// card, one more damage a burst per heavier round, and quick loaders working as
     /// they do for the main battery.
     pub fn anti_air(&self) -> AntiAir {
-        if self.anti_air == 0 {
-            return AntiAir::NONE;
-        }
+        let stock = AntiAir::STOCK;
         AntiAir {
-            mounts: (2 + 2 * usize::from(self.aa_mounts)).min(AntiAir::MOST_MOUNTS),
-            damage: AntiAir::NONE.damage.saturating_add(self.aa_shells),
-            reload: AntiAir::NONE.reload / (1. + 0.25 * f32::from(self.aa_loaders)),
-            range: AntiAir::NONE.range,
+            mounts: (stock.mounts + 2 * usize::from(self.aa_mounts)).min(AntiAir::MOST_MOUNTS),
+            damage: stock.damage.saturating_add(self.aa_shells),
+            reload: stock.reload * drilled(self.aa_loaders),
+            range: stock.range,
         }
     }
     /// The hull's protection with these fittings, on a hull built with `stock`. Armor
@@ -367,136 +585,37 @@ impl Fittings {
             fittings: stock.fittings * (1. + HARDENED_FITTINGS * hardening),
         }
     }
-    /// The close-range battery: one more gun a beam per mounting card, one more damage a
-    /// hit per heavier round, quick loaders working as they do for the main battery, 40 m
-    /// more reach per rangefinder and a second barrel on every gun once twinned.
+    /// The close-range battery: the stock guns on the bow and the beam and one more gun a
+    /// beam per mounting card, one more damage a hit per heavier round, quick loaders
+    /// working as they do for the main battery, 40 m more reach per rangefinder and a
+    /// second barrel on every gun once twinned.
     pub fn secondaries(&self) -> Secondaries {
+        let stock = Secondaries::STOCK.per_side;
         Secondaries {
-            per_side: (1 + usize::from(self.wing_mounts)).min(Secondaries::MOST_PER_SIDE),
+            per_side: (stock + usize::from(self.wing_mounts)).min(Secondaries::MOST_PER_SIDE),
             damage: Secondaries::STOCK.damage.saturating_add(self.wing_shells),
-            reload: Secondaries::STOCK.reload / (1. + 0.25 * f32::from(self.wing_loaders)),
+            reload: Secondaries::STOCK.reload * drilled(self.wing_loaders),
             range: Secondaries::STOCK.range + WING_RANGE_STEP * f32::from(self.wing_range),
             barrels: if self.wing_twin > 0 { 2 } else { 1 },
         }
     }
 
-    /// Hands come round in four themes: ammunition first, then the main battery, then
-    /// machinery and protection, then the close-range and anti-aircraft guns. A hand
-    /// that runs out of its own cards is filled from the rest.
-    pub fn offers(&self) -> Vec<Card> {
-        use Card::*;
-        let installed = [
-            self.shells,
-            self.caps,
-            self.velocity,
-            self.loader,
-            self.turbines,
-            self.armor_piercing,
-            self.wing_mounts,
-            self.wing_shells,
-            self.wing_loaders,
-            self.wing_range,
-            self.wing_twin,
-            self.training_gear,
-            self.armor,
-            self.hardening,
-            self.anti_air,
-            self.aa_mounts,
-            self.aa_shells,
-            self.aa_loaders,
-        ]
-        .into_iter()
-        .map(u32::from)
-        .sum::<u32>()
-            + (self.turrets.count() - 2) as u32;
-        // Each close-range hand leads with a different card.
-        let mut close = [
-            MoreSecondaries,
-            AntiAir,
-            TwinSecondaries,
-            HeavySecondaries,
-            MoreAntiAir,
-            SecondaryRange,
-            HeavyAntiAir,
-            QuickSecondaries,
-            QuickAntiAir,
-        ];
-        let turn = (installed / 4) as usize % close.len();
-        close.rotate_left(turn);
-        let (lead, rest): (&[Card], &[Card]) = match installed % 4 {
-            0 => (
-                &[ArmorPiercing, Caps, Shells, Velocity],
-                &[
-                    Loader,
-                    TrainingGear,
-                    Turbines,
-                    Armor,
-                    Hardening,
-                    TripleTurrets,
-                    QuadTurrets,
-                ],
-            ),
-            1 => (
-                &[Loader, TripleTurrets, QuadTurrets, TrainingGear],
-                &[
-                    Turbines,
-                    Armor,
-                    Caps,
-                    Velocity,
-                    Shells,
-                    ArmorPiercing,
-                    Hardening,
-                ],
-            ),
-            2 => (
-                &[Armor, Turbines, Hardening],
-                &[
-                    Velocity,
-                    Shells,
-                    TrainingGear,
-                    TripleTurrets,
-                    QuadTurrets,
-                    Caps,
-                    Loader,
-                    ArmorPiercing,
-                ],
-            ),
-            _ => (
-                &close,
-                &[
-                    ArmorPiercing,
-                    Caps,
-                    Turbines,
-                    Hardening,
-                    Loader,
-                    Velocity,
-                    Shells,
-                    Armor,
-                    TrainingGear,
-                    TripleTurrets,
-                    QuadTurrets,
-                ],
-            ),
-        };
-        let close_after = if installed % 4 == 3 {
-            &[][..]
-        } else {
-            &close[..]
-        };
-        lead.iter()
-            .chain(rest)
-            .chain(close_after)
+    /// A hand drawn from `key`: up to [`HAND`] different cards from the [`DECK`] that the
+    /// ship can take, each draw weighted by rarity. Fewer are dealt when fewer fit.
+    pub fn deal(&self, key: u64) -> Vec<Card> {
+        let pool = DECK
+            .iter()
             .copied()
-            .filter(|card| self.can_fit(*card))
-            .take(3)
-            .collect()
+            .filter(|&(card, _)| self.can_fit(card))
+            .collect();
+        draw(pool, key)
     }
     /// Ranks of `card` fitted, out of the most the ship can ever take, for a card that
     /// stacks to a limit. `None` for a card that is fitted once and replaced, or that has
     /// no limit.
     pub fn ranks(&self, card: Card) -> Option<(u16, u16)> {
         use Card::*;
-        let most_per_side = Secondaries::MOST_PER_SIDE as u16 - 1;
+        let most_per_side = (Secondaries::MOST_PER_SIDE - Secondaries::STOCK.per_side) as u16;
         Some(match card {
             MoreSecondaries => (self.wing_mounts.min(most_per_side), most_per_side),
             HeavySecondaries => (self.wing_shells, 2),
@@ -509,6 +628,7 @@ impl Fittings {
             MoreAntiAir => (self.aa_mounts, limits::AA_MOUNTS),
             HeavyAntiAir => (self.aa_shells, limits::AA_SHELLS),
             QuickAntiAir => (self.aa_loaders, limits::AA_LOADERS),
+            Pumps => (self.pumps, limits::PUMPS),
             _ => return None,
         })
     }
@@ -529,21 +649,22 @@ impl Fittings {
             TrainingGear => self.training_gear < limits::TRAINING_GEAR,
             Armor => self.armor < self.beam.most_armor(),
             Hardening => self.hardening < limits::HARDENING,
-            AntiAir => self.anti_air == 0,
-            MoreAntiAir => self.anti_air > 0 && self.aa_mounts < limits::AA_MOUNTS,
-            HeavyAntiAir => self.anti_air > 0 && self.aa_shells < limits::AA_SHELLS,
-            QuickAntiAir => self.anti_air > 0 && self.aa_loaders < limits::AA_LOADERS,
-            TripleTurrets => {
-                self.turrets == TurretLayout::Twin && self.can_carry(TurretLayout::Triple)
-            }
-            QuadTurrets => {
-                self.turrets == TurretLayout::Triple && self.can_carry(TurretLayout::Quad)
-            }
+            MoreAntiAir => self.aa_mounts < limits::AA_MOUNTS,
+            HeavyAntiAir => self.aa_shells < limits::AA_SHELLS,
+            QuickAntiAir => self.aa_loaders < limits::AA_LOADERS,
+            Pumps => self.pumps < limits::PUMPS,
+            // The yard rebores and rearms each turret on its own: see `DockJob::Calibre`
+            // and `DockJob::Barrels`.
+            TripleTurrets | QuadTurrets => false,
             _ => true,
         }
     }
     pub fn speed_factor(&self) -> f32 {
         1. + 0.15 * f32::from(self.turbines)
+    }
+    /// Her pumping, as a multiple of the stock pumps.
+    pub fn pumping(&self) -> f32 {
+        1. + PUMP_STEP * f32::from(self.pumps.min(limits::PUMPS))
     }
 }
 
@@ -552,25 +673,58 @@ pub struct Objectives {
     pub kills: u16,
     pub crates: u16,
     pub destroyed_drydock: bool,
+    /// Enemy yards whose gantry has come down. Each pays [`YARD_POINTS`] at the leg's end.
+    pub yards: u16,
+    /// Coasters sunk. Each pays [`COASTER_XP`] and no stores, and is no raider.
+    pub coasters: u16,
+    /// Cargo sent to the bottom, in yard points. Each whole point it makes, with what
+    /// was carried over from earlier legs, is a yard point.
+    pub cargo: f32,
+    /// Enemy aircraft shot down. Each pays [`PLANE_XP`].
+    pub planes: u16,
+    /// Harbour guns silenced. Each pays [`GUN_XP`]. They fight on apart from their yard,
+    /// so they are worth taking out or worth steering clear of.
+    pub guns: u16,
 }
 pub const CRATE_XP: u32 = 10;
+/// Experience for each coaster sunk.
+pub const COASTER_XP: u32 = 5;
+/// Experience for each enemy aircraft shot down.
+pub const PLANE_XP: u32 = 3;
+/// Experience for each harbour gun silenced.
+pub const GUN_XP: u32 = 4;
+/// Experience for each torpedo boat sunk. She is a nuisance and no raider.
+pub const TORPEDO_BOAT_XP: u32 = 5;
 
 pub struct Run {
     phase: Phase,
     pub stage: Stage,
     /// Where the ship began her first patrol, retained on subsequent charts.
     pub origin: Stage,
-    /// The exit actually sailed, retained after the routes meet at Crown Deep.
-    pub passage: Option<Stage>,
+    /// The passages taken from each yard, in order, retained after the routes meet at
+    /// Crown Deep. The anchorage is [`Run::origin`], and Crown Deep is no passage.
+    pub course: Vec<Stage>,
     pub elapsed: f32,
     /// Breakwater herself: her modules, what is fitted to them, and their condition.
     pub ship: Ship,
     pub fittings: Fittings,
     pub objectives: Objectives,
+    /// Stars earned on every leg before this one.
     pub previous_stars: u8,
     pub experience: u32,
     pub level: u32,
+    /// Charts every leg of the run and deals every level-up hand.
+    pub seed: u64,
+    /// Level-up hands owed. Each is a free card.
     pending_cards: u16,
+    /// Hands a card has been taken from, so each hand is dealt afresh from the seed.
+    hands: u32,
+    /// Yard points earned and not yet spent. They carry from one yard to the next.
+    points: u16,
+    /// Cargo sunk on earlier legs short of a whole yard point, carried into this one.
+    cargo_carried: f32,
+    /// The patrol just sailed finished with time still on its clock.
+    beat_clock: bool,
 }
 impl Default for Run {
     fn default() -> Self {
@@ -578,7 +732,7 @@ impl Default for Run {
             phase: Phase::Sailing,
             stage: Stage::IronNarrows,
             origin: Stage::IronNarrows,
-            passage: None,
+            course: Vec::new(),
             elapsed: 0.,
             ship: Ship::new(Design::breakwater()),
             fittings: Fittings::default(),
@@ -586,7 +740,12 @@ impl Default for Run {
             previous_stars: 0,
             experience: 0,
             level: 1,
+            seed: 0,
             pending_cards: 0,
+            hands: 0,
+            points: 0,
+            cargo_carried: 0.,
+            beat_clock: false,
         }
     }
 }
@@ -595,15 +754,64 @@ impl Run {
     pub fn phase(&self) -> Phase {
         self.phase
     }
-    /// Seconds until the leg ends on its own.
+    /// The last passage taken from a yard, or `None` while she is on her first patrol.
+    pub fn passage(&self) -> Option<Stage> {
+        self.course.last().copied()
+    }
+    /// A hard passage sails under enemy air cover, and so does the intercept after one.
+    pub fn under_air_cover(&self) -> bool {
+        match self.stage {
+            Stage::CrownDeep => self.passage(),
+            stage => Some(stage),
+        }
+        .is_some_and(Stage::enters_air_cover)
+    }
+    /// Seconds on the leg's clock: its minutes, and [`BASE_TIME`] for each base wrecked.
+    pub fn clock(&self) -> f32 {
+        f32::from(self.stage.mission().minutes) * 60. + BASE_TIME * f32::from(self.objectives.yards)
+    }
+    /// Seconds left on the leg's clock, the time to beat. Past it the leg goes on and
+    /// this runs negative, until a base wrecked puts time back on it.
     pub fn remaining(&self) -> f32 {
-        f32::from(self.stage.mission().minutes) * 60. - self.elapsed
+        self.clock() - self.elapsed
+    }
+    /// Past the leg's clock. Finishing like this forgoes the clock's points.
+    pub fn late(&self) -> bool {
+        self.remaining() < 0.
+    }
+    /// Yard points the clock pays: a star's worth at the lane's rate, for a patrol
+    /// finished with time still on it.
+    pub fn clock_points(&self) -> u16 {
+        if self.beat_clock {
+            self.stage.star_points()
+        } else {
+            0
+        }
+    }
+    /// The patrol just finished with time still on the clock.
+    pub fn beat_clock(&self) -> bool {
+        self.beat_clock
     }
     pub fn next_level_xp(&self) -> u32 {
         self.level.saturating_add(2).saturating_mul(10)
     }
+    /// Torpedo boats sunk on the step just settled, which counted them among the ships
+    /// sunk. Each pays [`TORPEDO_BOAT_XP`] and none counts toward the raider goal, so
+    /// chasing them earns no star. A level they make is dealt on the next step.
+    pub fn sink_torpedo_boats(&mut self, count: u16) {
+        if count == 0 || !matches!(self.phase, Phase::Sailing | Phase::Refit) {
+            return;
+        }
+        self.objectives.kills = self.objectives.kills.saturating_sub(count);
+        self.experience += u32::from(count) * TORPEDO_BOAT_XP;
+    }
 
+    /// Stars for the goals met. The clock never takes one away.
     pub fn stars(&self) -> u8 {
+        self.goals_met()
+    }
+    /// Goals met so far.
+    pub fn goals_met(&self) -> u8 {
         if self.stage == Stage::CrownDeep {
             return 0;
         }
@@ -611,15 +819,6 @@ impl Run {
         u8::from(self.objectives.kills >= goals.kills)
             + u8::from(self.objectives.crates >= goals.crates)
             + u8::from(self.objectives.destroyed_drydock)
-    }
-    pub fn can_extract(&self) -> bool {
-        self.stage != Stage::CrownDeep
-            && (self.objectives.destroyed_drydock || self.elapsed >= EXTRACT_SECONDS)
-    }
-    pub fn extract(&mut self) {
-        if self.phase == Phase::Sailing && self.can_extract() {
-            self.finish_leg(LegEnd::Extracted);
-        }
     }
     /// The installed drydock sections and their compartment indices, from bow to stern.
     /// A centre turret is not listed: she was built with two of her own.
@@ -641,47 +840,72 @@ impl Run {
         self.ship.design().length() - Design::BREAKWATER_LENGTH
     }
 
-    fn finish_leg(&mut self, reason: LegEnd) {
-        if self.stage.is_opening() {
-            self.ship.dock(f32::from(DOCK_REPAIR));
-            for (earned, module) in [
-                (self.stars() >= RESERVE_STARS, DockModule::Reserve),
-                (reason == LegEnd::BasesDestroyed, DockModule::EngineRoom),
-            ] {
-                if earned {
-                    let aft_gun = self.ship.design().modules().len() - 2;
-                    self.ship
-                        .insert_module(aft_gun, module.build())
-                        .expect("a midship frame fits before the aft gun");
-                }
-            }
-            let dock_fittings = 1 + u16::from(reason == LegEnd::BasesDestroyed);
-            self.pending_cards = self.pending_cards.saturating_add(dock_fittings);
-            self.phase = Phase::Drydock(reason);
-        } else {
-            self.phase = Phase::Intercept(reason);
-        }
+    /// Yard points this leg has earned so far: its lane's [`LANE_STAR_POINTS`] a star,
+    /// [`YARD_POINTS`] a wrecked yard, one for each whole point of cargo sunk, and once
+    /// she has finished inside it, the clock's [`Run::clock_points`].
+    pub fn leg_points(&self) -> u16 {
+        self.stage
+            .star_points()
+            .saturating_mul(u16::from(self.stars()))
+            .saturating_add(YARD_POINTS.saturating_mul(self.objectives.yards))
+            .saturating_add(self.cargo_points())
+            .saturating_add(self.clock_points())
     }
-    /// All second-leg routes rendezvous here. Keep earned upgrades and honour any
-    /// fitting earned on the last tick before putting the player back under way.
+    /// Cargo sunk this leg and carried over from the last, in yard points.
+    fn cargo_sunk(&self) -> f32 {
+        self.cargo_carried + self.objectives.cargo.max(0.)
+    }
+    /// Yard points the cargo sunk has made this leg. They rank up on their own, apart
+    /// from the level: one each time the cargo sunk crosses a whole point.
+    pub fn cargo_points(&self) -> u16 {
+        self.cargo_sunk().floor().min(f32::from(u16::MAX)) as u16
+    }
+    /// How far the cargo sunk has come toward the next yard point, from 0 to 1.
+    pub fn cargo_progress(&self) -> f32 {
+        self.cargo_sunk().fract()
+    }
+    /// A new leg starts its goals afresh. Cargo short of a whole point carries over.
+    fn new_leg(&mut self) {
+        self.cargo_carried = self.cargo_progress();
+        self.objectives = Objectives::default();
+        self.beat_clock = false;
+    }
+    /// Yard points to spend, earned on every leg and kept until they are spent.
+    pub fn points(&self) -> u16 {
+        self.points
+    }
+
+    /// Every patrol ends in the yard, which repairs her. Level-ups still owed are dealt as
+    /// free hands before it takes her.
+    fn finish_leg(&mut self, reason: LegEnd) {
+        self.beat_clock = !self.late();
+        self.points = self.points.saturating_add(self.leg_points());
+        self.ship.dock(f32::from(DOCK_REPAIR));
+        self.phase = Phase::Drydock(reason);
+    }
+    /// Every route rendezvous here, sailing from the last patrol's yard with what it
+    /// fitted and repaired. The crossing itself mends nothing.
     pub fn engage_regent(&mut self) -> bool {
         if !matches!(self.phase, Phase::Intercept(_)) {
             return false;
         }
         self.previous_stars += self.stars();
         self.stage = Stage::CrownDeep;
-        self.objectives = Objectives::default();
+        self.new_leg();
         self.elapsed = 0.;
-        self.ship.dock(f32::from(DOCK_REPAIR));
-        self.phase = if self.pending_cards > 0 {
-            Phase::Refit
-        } else {
-            Phase::Sailing
-        };
+        self.phase = Phase::Sailing;
         true
     }
+    /// Level-up hands owed, each a free card.
     pub fn fittings_remaining(&self) -> u16 {
         self.pending_cards
+    }
+    /// The hand for the next level-up. It is drawn from the run seed and the count of hands
+    /// already taken, so it stands until a card is fitted from it, and the same seed and the
+    /// same choices always deal the same hands.
+    pub fn offers(&self) -> Vec<Card> {
+        let hand = mix(u64::from(self.hands).wrapping_add(HAND_STREAM));
+        self.fittings.deal(mix(self.seed ^ hand))
     }
     /// Commit one gameplay tick. A lethal hit ends the run before any rewards.
     ///
@@ -690,8 +914,8 @@ impl Run {
     pub fn tick(&mut self, dt: f32, gains: Objectives, incoming: u16) {
         self.tick_sector(dt, gains, incoming, false);
     }
-    /// Resolve the encounter and deadline together. A surviving ship that destroys
-    /// the last yard on the closing tick earns the clearance.
+    /// Resolve one step of a patrol. A surviving ship that destroys the last yard
+    /// earns the clearance.
     pub fn tick_sector(
         &mut self,
         dt: f32,
@@ -707,7 +931,7 @@ impl Run {
         );
     }
     /// Only the final flagship counts in Crown Deep. A lethal blow on the same tick
-    /// loses the run, while sinking the Regent at the deadline wins it.
+    /// loses the run. The clock never ends a leg: she fights on until she wins or sinks.
     pub fn tick_engagement(
         &mut self,
         dt: f32,
@@ -719,7 +943,6 @@ impl Run {
             return;
         }
         self.refit_protection();
-        let dt = dt.min(self.remaining().max(0.));
         self.elapsed += dt;
         if incoming > 0 {
             let design = self.ship.design().clone();
@@ -742,11 +965,19 @@ impl Run {
         }
         self.objectives.kills = self.objectives.kills.saturating_add(gains.kills);
         self.objectives.crates = self.objectives.crates.saturating_add(gains.crates);
+        self.objectives.yards = self.objectives.yards.saturating_add(gains.yards);
+        self.objectives.coasters = self.objectives.coasters.saturating_add(gains.coasters);
+        self.objectives.cargo += gains.cargo.max(0.);
         self.objectives.destroyed_drydock |=
-            gains.destroyed_drydock || objective == Some(LegEnd::BasesDestroyed);
+            gains.destroyed_drydock || gains.yards > 0 || objective == Some(LegEnd::BasesDestroyed);
         self.ship
             .patch(f32::from(gains.crates.saturating_mul(CRATE_REPAIR)));
         self.experience += u32::from(gains.crates) * CRATE_XP;
+        self.experience += u32::from(gains.coasters) * COASTER_XP;
+        self.objectives.planes = self.objectives.planes.saturating_add(gains.planes);
+        self.experience += u32::from(gains.planes) * PLANE_XP;
+        self.objectives.guns = self.objectives.guns.saturating_add(gains.guns);
+        self.experience += u32::from(gains.guns) * GUN_XP;
         while self.experience >= self.next_level_xp() {
             self.experience -= self.next_level_xp();
             self.level += 1;
@@ -756,12 +987,6 @@ impl Run {
             self.phase = Phase::Won(LegEnd::RegentSunk);
         } else if self.stage != Stage::CrownDeep && objective == Some(LegEnd::BasesDestroyed) {
             self.finish_leg(LegEnd::BasesDestroyed);
-        } else if self.remaining() <= 0. {
-            if self.stage == Stage::CrownDeep {
-                self.phase = Phase::Lost;
-            } else {
-                self.finish_leg(LegEnd::TimeExpired);
-            }
         } else if self.pending_cards > 0 {
             self.phase = Phase::Refit;
         }
@@ -776,7 +1001,8 @@ impl Run {
     /// A hit on her side, `aft` metres behind the bow tip and `abeam` metres to
     /// starboard, from a round `calibre` inches across or, with `None`, a blow no plate
     /// can turn. The plating there takes it first, then the module behind, and `reach`
-    /// says which of its bays the blow got into.
+    /// says which of its bays the blow got into. A light round does only part of its
+    /// damage: see [`bore_share`].
     pub fn strike_side(
         &mut self,
         aft: f32,
@@ -786,49 +1012,76 @@ impl Run {
         reach: shipvivor_shipyard::Reach,
     ) {
         if self.phase == Phase::Sailing {
-            self.ship
-                .strike_into(aft, abeam, f32::from(damage), calibre, reach);
+            let damage = f32::from(damage) * bore_share(calibre);
+            self.ship.strike_into(aft, abeam, damage, calibre, reach);
+        }
+    }
+    /// A torpedo's hole below her waterline, `aft` metres behind the bow tip, which the
+    /// sea pours into before the crew can shore it. The repair party drops whatever can
+    /// wait and goes to it.
+    pub fn breach(&mut self, aft: f32) {
+        if self.phase == Phase::Sailing {
+            self.ship.breach(aft);
+            let urgent = self.ship.triage();
+            if urgent.is_some() {
+                self.ship.assign(urgent);
+            }
         }
     }
     /// Total surviving structure, including any drydock sections.
     pub fn hull(&self) -> u16 {
         self.ship.hull().round() as u16
     }
-    /// Plate and harden the hull as her fittings say.
+    /// Plate, harden and pump the hull as her fittings say.
     pub(crate) fn refit_protection(&mut self) {
         self.ship
             .protect(self.fittings.protection(Protection::BREAKWATER));
+        self.ship.fit_pumps(self.fittings.pumping());
     }
     pub fn hull_percent(&self) -> u16 {
         (self.ship.integrity() * 100.).round() as u16
     }
+    /// Fit a card from the hand on offer, for one of the level-ups owed.
     pub fn install(&mut self, card: Card) {
         if !matches!(self.phase, Phase::Refit | Phase::Drydock(_))
             || self.pending_cards == 0
-            || !self.fittings.offers().contains(&card)
+            || !self.offers().contains(&card)
         {
             return;
         }
         self.fittings = self.fittings.with(card);
         self.refit_protection();
         self.pending_cards -= 1;
+        self.hands = self.hands.wrapping_add(1);
         // A ship in dock stays there until she is sailed, with [`Run::leave_dock`].
         if self.pending_cards == 0 && self.phase == Phase::Refit {
             self.phase = Phase::Sailing;
         }
     }
+    /// The passages on the chart from the yard she is in, or `None` once the next leg is
+    /// the intercept.
+    pub fn exits(&self) -> Option<[Exit; 3]> {
+        self.stage.exits()
+    }
+    /// Sail from the chart into the next round, by a passage the leg just sailed has
+    /// earned the stars for.
     pub fn depart(&mut self, next: Stage) -> bool {
-        let Some(exit) = EXITS.iter().find(|exit| exit.stage == next) else {
+        let Some(exit) = self
+            .exits()
+            .into_iter()
+            .flatten()
+            .find(|exit| exit.stage == next)
+        else {
             return false;
         };
         if self.phase != Phase::Chart || self.stars() < exit.stars {
             return false;
         }
-        self.previous_stars = self.stars();
-        self.passage = Some(next);
+        self.previous_stars += self.stars();
+        self.course.push(next);
         self.stage = next;
         self.elapsed = 0.;
-        self.objectives = Objectives::default();
+        self.new_leg();
         self.phase = Phase::Sailing;
         match exit.perk {
             Perk::None => {}
@@ -845,83 +1098,194 @@ impl Run {
 }
 
 #[cfg(test)]
+impl Run {
+    /// Bring down the last of her bases and end the leg, with nothing else gained.
+    pub(crate) fn clear(&mut self) {
+        self.tick_sector(0., Objectives::default(), 0, true);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use shipvivor_artillery::Ammo;
+
     #[test]
-    fn the_yard_installs_each_earned_section_once_and_it_sails_the_next_leg() {
+    fn stars_and_wrecked_yards_pay_the_yard_once_and_unspent_points_sail_on() {
         for combat_stars in 0..=2 {
-            for end in [
-                LegEnd::TimeExpired,
-                LegEnd::Extracted,
-                LegEnd::BasesDestroyed,
-            ] {
+            for late in [false, true] {
                 let mut run = Run::default();
                 let goals = run.stage.mission();
+                // Every yard comes down for a clearance.
+                let yards = 4;
                 let gains = Objectives {
                     kills: if combat_stars >= 1 { goals.kills } else { 0 },
                     crates: if combat_stars >= 2 { goals.crates } else { 0 },
+                    yards,
                     ..Default::default()
                 };
-                let time = if end == LegEnd::TimeExpired {
-                    run.remaining()
-                } else {
-                    EXTRACT_SECONDS
-                };
-                run.tick_sector(time, gains, 0, end == LegEnd::BasesDestroyed);
-                if end == LegEnd::Extracted {
-                    run.extract();
-                }
+                // The clock ends nothing and takes no star: she may sail on past it,
+                // and only forgoes what it pays. Each yard wrecked puts time back on it.
+                let clock = run.clock() + BASE_TIME * f32::from(yards);
+                let time = if late { clock + 1. } else { 1. };
+                run.tick_sector(time, gains, 0, false);
+                assert_eq!(run.clock(), clock);
+                assert_eq!((run.phase(), run.late()), (Phase::Sailing, late));
+                run.tick_sector(0., Objectives::default(), 0, true);
+                let end = LegEnd::BasesDestroyed;
                 assert_eq!(run.phase(), Phase::Drydock(end));
-                let stars = combat_stars + u8::from(end == LegEnd::BasesDestroyed);
-                assert_eq!(run.stars(), stars);
-                let mut expected = Vec::new();
-                if stars >= RESERVE_STARS {
-                    expected.push(DockModule::Reserve);
-                }
-                if end == LegEnd::BasesDestroyed {
-                    expected.push(DockModule::EngineRoom);
-                }
-                let count = expected.len();
-                run.extract();
+                let stars = combat_stars + 1;
+                assert_eq!((run.goals_met(), run.stars()), (stars, stars));
+                assert_eq!(run.beat_clock(), !late);
+                // Every anchorage pays the open-water rate, and the clock a star's worth.
+                assert_eq!(run.stage.star_points(), STAR_POINTS);
+                let clock_points = if late { 0 } else { STAR_POINTS };
+                assert_eq!(run.clock_points(), clock_points);
+                let earned = STAR_POINTS * u16::from(stars) + YARD_POINTS * yards + clock_points;
+                assert_eq!((run.points(), run.leg_points()), (earned, earned));
+                // Nothing is spliced in for her, and no hand is owed: the points buy her refits.
                 run.tick_sector(1., gains, 0, true);
-                assert_eq!(
-                    run.dock_modules()
-                        .map(|(_, module)| module)
-                        .collect::<Vec<_>>(),
-                    expected
-                );
-                assert_eq!(run.ship.design().length(), 30. + 5. * count as f32);
-                assert_eq!(run.ship.compartments().len(), 6 + count);
+                assert_eq!(run.points(), earned);
+                assert_eq!(run.dock_modules().count(), 0);
+                assert_eq!(run.ship.design().length(), 30.);
+                assert_eq!(run.ship.compartments().len(), 6);
                 assert_eq!(run.hull_percent(), 100);
-                assert_eq!(
-                    run.fittings_remaining(),
-                    1 + u16::from(end == LegEnd::BasesDestroyed)
-                );
-                while run.fittings_remaining() > 0 {
-                    run.install(run.fittings.offers()[0]);
-                }
-                assert_eq!(run.phase(), Phase::Drydock(end));
+                assert_eq!(run.fittings_remaining(), 0);
+                // She may sail without spending them, and they sail with her.
                 assert!(run.leave_dock());
                 assert!(run.depart(Stage::OuterRoad));
-                assert_eq!(
-                    run.ship.design().count(Component::Engine),
-                    1 + usize::from(end == LegEnd::BasesDestroyed)
+                assert_eq!(run.points(), earned);
+                // The second leg pays too, into a second yard, where the points carried
+                // from the first are added to its own.
+                run.tick_sector(
+                    1.,
+                    Objectives {
+                        yards: 3,
+                        ..Default::default()
+                    },
+                    0,
+                    true,
                 );
-                run.tick_sector(1., gains, 0, true);
+                assert_eq!(run.phase(), Phase::Drydock(LegEnd::BasesDestroyed));
+                // A new leg starts on time: its drydock star and its clock both pay.
+                assert!(run.beat_clock());
+                let both = earned + 2 * STAR_POINTS + 3 * YARD_POINTS;
+                assert_eq!(run.points(), both);
+                assert!(!run.engage_regent());
+                assert!(run.refit_in_dock(DockJob::Fitting(Card::Loader)));
+                assert_eq!(run.points(), both - 2);
+                // Each yard after charts the next round, until the last patrol's yard
+                // sails her on to intercept the Regent. Each clearance pays its star,
+                // and its clock.
+                let mut points = both - 2;
+                for round in 2..PATROLS {
+                    assert!(run.leave_dock());
+                    assert_eq!(run.phase(), Phase::Chart);
+                    assert!(!run.engage_regent());
+                    assert!(run.depart(SEAS[round][0]));
+                    assert_eq!(run.stage.round(), round + 1);
+                    run.tick_sector(1., Objectives::default(), 0, true);
+                    points += 2 * STAR_POINTS;
+                    assert_eq!(run.points(), points);
+                }
+                assert!(run.leave_dock());
                 assert_eq!(run.phase(), Phase::Intercept(LegEnd::BasesDestroyed));
-                assert_eq!(run.ship.compartments().len(), 6 + count);
+                assert!(run.engage_regent());
+                assert_eq!((run.stage, run.points()), (Stage::CrownDeep, points));
+                assert_eq!(run.course.len(), PATROLS - 1);
             }
         }
     }
 
+    /// Re-seed the run until its next hand deals `card`.
+    fn seed_dealing(run: &mut Run, card: Card) {
+        assert!(run.fittings.can_fit(card), "{card:?} cannot be dealt");
+        while !run.offers().contains(&card) {
+            run.seed += 1;
+        }
+    }
+
+    #[test]
+    fn hands_stand_until_a_card_is_taken_and_follow_the_run_seed() {
+        let levelled = |seed| {
+            let mut run = Run {
+                seed,
+                ..Run::default()
+            };
+            run.tick(
+                0.,
+                Objectives {
+                    crates: 18,
+                    ..Default::default()
+                },
+                0,
+            );
+            run
+        };
+        // 180 XP is four levels, each a hand.
+        let mut run = levelled(7);
+        assert_eq!((run.phase(), run.fittings_remaining()), (Phase::Refit, 4));
+        let mut hands = Vec::new();
+        while run.fittings_remaining() > 0 {
+            let hand = run.offers();
+            assert_eq!(run.offers(), hand, "a hand stands until a card is taken");
+            assert_eq!(hand.len(), HAND);
+            run.install(hand[HAND - 1]);
+            hands.push(hand);
+        }
+        assert_eq!(run.phase(), Phase::Sailing);
+        // The same seed and the same choices deal the same hands.
+        let mut again = levelled(7);
+        for hand in &hands {
+            assert_eq!(&again.offers(), hand);
+            again.install(hand[HAND - 1]);
+        }
+        assert_eq!(again.fittings, run.fittings);
+        // Another seed deals another hand.
+        assert!((8..16).any(|seed| levelled(seed).offers() != hands[0]));
+    }
+
+    #[test]
+    fn a_hand_deals_different_cards_that_fit_and_rare_ones_least_often() {
+        use Rarity::*;
+        let stock = Fittings::default();
+        let deals = 30_000;
+        let mut first = [0_u32; 3];
+        for key in 0..deals {
+            let hand = stock.deal(key);
+            assert_eq!(hand.len(), HAND);
+            assert!(hand.iter().all(|&card| stock.can_fit(card)), "{hand:?}");
+            assert!(hand[0] != hand[1] && hand[1] != hand[2] && hand[0] != hand[2]);
+            first[hand[0].rarity().unwrap() as usize] += 1;
+        }
+        // The stock ship can take eleven common cards, four uncommon and one rare, so the
+        // first card is common 66 times in 79, uncommon 12 and rare once.
+        let weights = [Common, Uncommon, Rare].map(|rarity| {
+            DECK.iter()
+                .filter(|&&(card, of)| of == rarity && stock.can_fit(card))
+                .map(|_| rarity.weight())
+                .sum::<u32>()
+        });
+        assert_eq!(weights, [66, 12, 1]);
+        for (seen, weight) in first.into_iter().zip(weights) {
+            let share = f64::from(seen) / deals as f64;
+            let expected = f64::from(weight) / 79.;
+            assert!((share - expected).abs() < 0.01, "{first:?}");
+        }
+        // Fewer are dealt when fewer fit.
+        let pair = vec![(Card::Loader, Common), (Card::TwinSecondaries, Rare)];
+        assert_eq!(draw(pair, 3).len(), 2);
+        assert!(draw(Vec::new(), 3).is_empty());
+    }
+
     #[test]
     fn ammunition_cards_change_distinct_properties_and_never_offer_a_spent_grade() {
+        let dealt = |fit: Fittings| (0..400).flat_map(|key| fit.deal(key)).collect::<Vec<_>>();
         let stock = Fittings::default();
-        assert_eq!(
-            stock.offers(),
-            [Card::ArmorPiercing, Card::Shells, Card::Velocity]
-        );
+        // The bore is yard work. Caps wait for AP.
+        let hands = dealt(stock);
+        assert!(hands.contains(&Card::ArmorPiercing) && hands.contains(&Card::Velocity));
+        assert!(!hands.contains(&Card::Shells) && !hands.contains(&Card::Caps));
         assert_eq!(stock.round().ammo, Ammo::He);
         let heavy = stock.with(Card::Shells).round();
         assert!(heavy.calibre_inches() > stock.round().calibre_inches());
@@ -931,7 +1295,9 @@ mod tests {
             ..f.round()
         };
         let armed = stock.with(Card::ArmorPiercing);
-        assert!(armed.armor_piercing() && !armed.offers().contains(&Card::ArmorPiercing));
+        let hands = dealt(armed);
+        assert!(armed.armor_piercing() && !hands.contains(&Card::ArmorPiercing));
+        assert!(hands.contains(&Card::Caps));
         let capped = armed.with(Card::Caps);
         assert_ne!(ap(capped).penetration(), ap(armed).penetration());
         assert_eq!(capped.round().penetration(), stock.round().penetration());
@@ -946,10 +1312,9 @@ mod tests {
             velocity: 4,
             ..stock
         };
-        let offers = max.offers();
-        assert_eq!(offers.len(), 3);
+        assert!((0..50).all(|key| max.deal(key).len() == HAND));
         assert!(
-            offers
+            dealt(max)
                 .iter()
                 .all(|card| !matches!(card, Card::ArmorPiercing | Card::Caps | Card::Shells))
         );
@@ -957,86 +1322,105 @@ mod tests {
     #[test]
     fn reload_grows_with_calibre_and_quick_loaders_cut_it_back() {
         let stock = Fittings::default();
-        assert!((stock.reload() - 6.4).abs() < 1e-5);
+        assert!((stock.reload() - 2.5).abs() < 1e-4);
+        // Each inch of bore costs more loading time than the inch before it.
+        let mut per_inch = 0.;
         for (rank, pair) in CALIBRES.windows(2).enumerate() {
             let now = Fittings {
                 shells: rank as u16,
                 beam: ShipBeam::Capital,
                 ..stock
             };
-            let step = now.with(Card::Shells).reload() - now.reload();
+            let step =
+                (now.with(Card::Shells).reload() - now.reload()) / f32::from(pair[1] - pair[0]);
             assert!(
-                (step - 1.6 * f32::from(pair[1] - pair[0])).abs() < 1e-5,
-                "each extra inch adds 1.6 s, got {step} for {pair:?}"
+                step > per_inch,
+                "{step} s an inch for {pair:?}, after {per_inch}"
             );
+            per_inch = step;
         }
+        let thirty = MainShell {
+            bore: 30 - CALIBRES[0],
+            ..MainShell::STOCK
+        };
+        assert!((thirty.load_seconds() - 30.).abs() < 1e-3);
         let eight = Fittings {
             shells: 2,
             beam: ShipBeam::Cruiser,
             ..stock
         };
-        assert!((eight.reload() - 12.8).abs() < 1e-5);
+        assert!((5.5..6.5).contains(&eight.reload()), "{}", eight.reload());
         assert!(eight.with(Card::Loader).reload() < eight.reload());
+        // Every rank takes the same share off, and four come to about half.
+        for rank in 0..6 {
+            let (now, next) = (
+                Fittings {
+                    loader: rank,
+                    ..eight
+                },
+                Fittings {
+                    loader: rank + 1,
+                    ..eight
+                },
+            );
+            assert!((next.reload() / now.reload() - (1. - LOADER_CUT)).abs() < 1e-4);
+        }
         let refit = Fittings { loader: 4, ..eight };
-        assert!((refit.reload() - stock.reload()).abs() < 1e-5);
+        assert!((0.5..0.55).contains(&(refit.reload() / eight.reload())));
+        // Each bore aboard loads at its own pace under the same drill.
+        assert!((refit.reload_for(8) - refit.reload()).abs() < 1e-4);
+        assert!(refit.reload_for(4) < refit.reload_for(6));
     }
+
     #[test]
     fn secondary_cards_mount_arm_and_drill_the_close_range_battery_up_to_their_limits() {
+        use Card::*;
+        let close = [
+            MoreSecondaries,
+            HeavySecondaries,
+            QuickSecondaries,
+            SecondaryRange,
+            TwinSecondaries,
+        ];
         let stock = Fittings::default();
         assert_eq!(stock.secondaries(), Secondaries::STOCK);
-        // Every fourth hand is for the close-range and anti-aircraft guns.
-        let fourth = Fittings {
-            velocity: 3,
-            ..stock
-        };
-        assert_eq!(
-            fourth.offers(),
-            [Card::MoreSecondaries, Card::AntiAir, Card::TwinSecondaries]
-        );
-        // The next close-range hand leads with a different card.
-        let eighth = Fittings {
-            velocity: 7,
-            ..stock
-        };
-        assert_eq!(eighth.offers()[0], Card::AntiAir);
+        // Every close-range card is dealt while it can still improve the battery.
+        let hands: Vec<_> = (0..400).flat_map(|key| stock.deal(key)).collect();
+        assert!(close.iter().all(|card| hands.contains(card)));
         let mut full = stock;
         for card in [
-            Card::MoreSecondaries,
-            Card::MoreSecondaries,
-            Card::HeavySecondaries,
-            Card::HeavySecondaries,
-            Card::QuickSecondaries,
-            Card::QuickSecondaries,
-            Card::QuickSecondaries,
-            Card::SecondaryRange,
-            Card::SecondaryRange,
-            Card::TwinSecondaries,
+            MoreSecondaries,
+            MoreSecondaries,
+            HeavySecondaries,
+            HeavySecondaries,
+            QuickSecondaries,
+            QuickSecondaries,
+            QuickSecondaries,
+            SecondaryRange,
+            SecondaryRange,
+            TwinSecondaries,
         ] {
             full = full.with(card);
         }
         let fit = full.secondaries();
-        assert_eq!((fit.per_side, fit.damage, fit.barrels), (3, 3, 2));
+        // The two she was built with a side, and two more abeam.
+        assert_eq!((fit.per_side, fit.damage, fit.barrels), (4, 3, 2));
         assert!((fit.range - 240.).abs() < 1e-5);
-        assert!((fit.reload - Secondaries::STOCK.reload / 1.75).abs() < 1e-5);
-        for velocity in 0..4 {
-            let offers = Fittings { velocity, ..full }.offers();
-            assert!(offers.iter().all(|card| !matches!(
-                card,
-                Card::MoreSecondaries
-                    | Card::HeavySecondaries
-                    | Card::QuickSecondaries
-                    | Card::SecondaryRange
-                    | Card::TwinSecondaries
-            )));
-        }
+        // Three ranks of loaders, each taking the same share off.
+        assert!((fit.reload - Secondaries::STOCK.reload * drilled(3)).abs() < 1e-5);
+        assert!((drilled(3) - 0.85_f32.powi(3)).abs() < 1e-6);
+        assert!(
+            (0..400)
+                .flat_map(|key| full.deal(key))
+                .all(|card| !close.contains(&card))
+        );
     }
     #[test]
     fn the_ranks_the_yard_shows_end_where_a_card_stops_fitting() {
         use Card::*;
-        // The broadest hull carries the most plate, and AA must be aboard to improve.
+        // The broadest hull carries the most plate.
         let stock = Fittings {
             beam: ShipBeam::Capital,
-            anti_air: 1,
             ..Fittings::default()
         };
         for card in [
@@ -1051,6 +1435,7 @@ mod tests {
             MoreAntiAir,
             HeavyAntiAir,
             QuickAntiAir,
+            Pumps,
         ] {
             let (none, most) = stock.ranks(card).unwrap();
             assert_eq!(none, 0, "{card:?}");
@@ -1064,24 +1449,11 @@ mod tests {
         }
         assert_eq!(stock.ranks(Loader), None);
     }
+
     #[test]
-    fn every_third_hand_is_for_machinery_and_protection_and_each_card_stops_at_its_limit() {
+    fn machinery_and_protection_cards_stop_at_their_limits_and_reach_the_ship_at_once() {
         use shipvivor_shipyard::Component;
         let stock = Fittings::default();
-        let third = Fittings {
-            velocity: 2,
-            ..stock
-        };
-        assert_eq!(
-            third.offers(),
-            [Card::Armor, Card::Turbines, Card::Hardening]
-        );
-        // The main battery's hand offers training gear beside the loaders and turrets.
-        let second = Fittings {
-            velocity: 1,
-            ..stock
-        };
-        assert!(second.offers().contains(&Card::TrainingGear));
         for (card, most) in [
             (Card::TrainingGear, limits::TRAINING_GEAR),
             (Card::Armor, stock.beam.most_armor()),
@@ -1093,6 +1465,10 @@ mod tests {
                 fit = fit.with(card);
             }
             assert!(!fit.can_fit(card) && fit.with(card) == fit, "{card:?}");
+            assert!(
+                (0..200).all(|key| !fit.deal(key).contains(&card)),
+                "{card:?}"
+            );
         }
         // A larger bore trains more slowly, and training gear wins it back.
         let heavy = Fittings {
@@ -1113,7 +1489,7 @@ mod tests {
             },
             0,
         );
-        run.fittings.velocity = 2;
+        seed_dealing(&mut run, Card::Armor);
         let plate = run.ship.design().plate_strength(1);
         run.install(Card::Armor);
         assert!(run.ship.design().plate_strength(1) > plate);
@@ -1125,15 +1501,56 @@ mod tests {
         );
     }
     #[test]
-    fn aa_guns_come_aboard_in_pairs_and_their_upgrades_wait_for_them() {
-        let stock = Fittings::default();
-        assert_eq!(stock.anti_air().mounts, 0);
-        for upgrade in [Card::MoreAntiAir, Card::HeavyAntiAir, Card::QuickAntiAir] {
-            assert!(!stock.can_fit(upgrade));
+    fn pumps_stop_at_three_ranks_and_reach_her_pumping_as_they_are_fitted() {
+        assert_eq!(Card::Pumps.rarity(), Some(Rarity::Common));
+        let mut run = Run::default();
+        assert_eq!(run.ship.design().pumps(), 1.);
+        // 180 XP is four levels, a hand each.
+        run.tick(
+            0.,
+            Objectives {
+                crates: 18,
+                ..Default::default()
+            },
+            0,
+        );
+        for rank in 1..=limits::PUMPS {
+            seed_dealing(&mut run, Card::Pumps);
+            run.install(Card::Pumps);
+            assert_eq!(run.fittings.ranks(Card::Pumps), Some((rank, limits::PUMPS)));
+            assert_eq!(run.ship.design().pumps(), 1. + 0.5 * f32::from(rank));
         }
-        let fitted = stock.with(Card::AntiAir);
-        assert!(!fitted.can_fit(Card::AntiAir));
-        assert_eq!(fitted.anti_air().mounts, 2);
+        // A fourth rank is neither fitted nor dealt.
+        assert!(!run.fittings.can_fit(Card::Pumps));
+        assert_eq!(run.fittings.with(Card::Pumps), run.fittings);
+        assert!((0..200).all(|key| !run.fittings.deal(key).contains(&Card::Pumps)));
+        run.install(run.offers()[0]);
+        assert_eq!(run.phase(), Phase::Sailing);
+        assert_eq!(run.ship.design().pumps(), 2.5);
+
+        // The yard sells them in the engine bay, and she sails with them.
+        let mut run = Run::default();
+        run.clear();
+        run.points = 2;
+        let pumps = DockJob::Fitting(Card::Pumps);
+        assert!(run.section_jobs(3).contains(&pumps) && pumps.cost() == 2);
+        assert!(run.refit_in_dock(pumps));
+        assert_eq!((run.points(), run.ship.design().pumps()), (0, 1.5));
+        assert!(run.leave_dock() && run.depart(Stage::OuterRoad));
+        run.tick(1., Objectives::default(), 0);
+        assert_eq!(run.ship.design().pumps(), 1.5);
+    }
+
+    #[test]
+    fn she_is_built_with_a_pair_of_aa_guns_and_the_cards_add_pairs_and_drill_them() {
+        let stock = Fittings::default();
+        assert_eq!(stock.anti_air(), AntiAir::STOCK);
+        assert_eq!(stock.anti_air().mounts, 2);
+        for upgrade in [Card::MoreAntiAir, Card::HeavyAntiAir, Card::QuickAntiAir] {
+            assert!(stock.can_fit(upgrade));
+            assert!(DECK.iter().any(|&(card, _)| card == upgrade));
+        }
+        assert_eq!(stock.with(Card::MoreAntiAir).anti_air().mounts, 4);
         let full = [
             Card::MoreAntiAir,
             Card::MoreAntiAir,
@@ -1144,53 +1561,105 @@ mod tests {
             Card::QuickAntiAir,
         ]
         .into_iter()
-        .fold(fitted, Fittings::with);
+        .fold(stock, Fittings::with);
         let aa = full.anti_air();
         assert_eq!((aa.mounts, aa.damage), (AntiAir::MOST_MOUNTS, 3));
-        assert!((aa.reload - AntiAir::NONE.reload / 1.75).abs() < 1e-5);
+        assert!((aa.reload - AntiAir::STOCK.reload * drilled(3)).abs() < 1e-5);
         for upgrade in [Card::MoreAntiAir, Card::HeavyAntiAir, Card::QuickAntiAir] {
             assert!(!full.can_fit(upgrade));
         }
     }
+
     #[test]
-    fn turret_cards_upgrade_both_stations_in_order_and_leave_the_deck_when_spent() {
+    fn each_plane_shot_down_pays_its_experience_toward_the_next_level() {
         let mut run = Run::default();
-        for (stores, between, card, count) in [
-            (3, 0, Card::Velocity, 2),
-            (4, 0, Card::TripleTurrets, 3),
-            // Three more fittings bring the main battery's hand round again.
-            (5, 3, Card::QuadTurrets, 4),
+        let downed = |planes| Objectives {
+            planes,
+            ..Default::default()
+        };
+        run.tick(1., downed(3), 0);
+        assert_eq!((run.experience, run.objectives.planes), (3 * PLANE_XP, 3));
+        assert_eq!(run.objectives.kills, 0, "an aircraft is no raider");
+        // Enough of them make a level, and a hand to choose from.
+        let short = run.next_level_xp() - run.experience;
+        run.tick(1., downed(short.div_ceil(PLANE_XP) as u16), 0);
+        assert_eq!((run.level, run.phase()), (2, Phase::Refit));
+    }
+
+    #[test]
+    fn a_torpedo_boat_sunk_pays_experience_and_is_no_raider() {
+        let mut run = Run::default();
+        // The step counts every ship sunk, a destroyer and two torpedo boats among them.
+        let sunk = |kills| Objectives {
+            kills,
+            ..Default::default()
+        };
+        run.tick(1., sunk(3), 0);
+        run.sink_torpedo_boats(2);
+        assert_eq!(run.objectives.kills, 1);
+        assert_eq!(run.experience, 2 * TORPEDO_BOAT_XP);
+        // Enough of them make a level, dealt on the next step.
+        let short = run.next_level_xp() - run.experience;
+        let boats = short.div_ceil(TORPEDO_BOAT_XP) as u16;
+        run.tick(1., sunk(boats), 0);
+        run.sink_torpedo_boats(boats);
+        assert_eq!(run.objectives.kills, 1);
+        run.tick(1., Objectives::default(), 0);
+        assert_eq!((run.level, run.phase()), (2, Phase::Refit));
+        // Once the leg is over, a boat that went down with it counts for nothing.
+        let mut run = Run::default();
+        run.tick_sector(1., sunk(1), 0, true);
+        let (kills, experience) = (run.objectives.kills, run.experience);
+        run.sink_torpedo_boats(1);
+        assert_eq!((run.objectives.kills, run.experience), (kills, experience));
+    }
+
+    #[test]
+    fn the_bore_and_the_barrels_are_bought_in_the_yard_and_never_dealt() {
+        use Card::*;
+        assert_eq!(
+            [Shells, TripleTurrets, QuadTurrets].map(Card::rarity),
+            [None; 3]
+        );
+        for fit in [
+            Fittings::default(),
+            Fittings {
+                beam: ShipBeam::Capital,
+                ..Fittings::default()
+            },
+            Fittings::default().with(TripleTurrets),
         ] {
-            for _ in 0..between {
-                run.fittings = run.fittings.with(Card::Turbines);
-            }
-            run.tick(
-                0.,
-                Objectives {
-                    crates: stores,
-                    ..Default::default()
-                },
-                0,
+            assert!(
+                (0..300)
+                    .flat_map(|key| fit.deal(key))
+                    .all(|card| card.rarity().is_some())
             );
-            if card != Card::QuadTurrets {
-                assert!(!run.fittings.offers().contains(&Card::QuadTurrets));
-            }
-            assert!(run.fittings.offers().contains(&card));
-            run.install(card);
-            assert_eq!(run.fittings.turrets.count(), count);
         }
-        for _ in 0..3 {
-            let offers = run.fittings.offers();
-            assert_eq!(offers.len(), 3);
-            assert!(!offers.contains(&Card::TripleTurrets) && !offers.contains(&Card::QuadTurrets));
-            run.fittings = run.fittings.with(Card::Loader);
+        // The yard sells barrels turret by turret, a twin then a triple then a quad, and
+        // they sail with her.
+        let mut run = Run::default();
+        run.clear();
+        run.points = 10;
+        assert!(!run.refit_in_dock(DockJob::Fitting(TripleTurrets)));
+        let at = run.ship.design().gun_stations()[0].berth.module;
+        let barrels = |run: &Run| run.ship.design().gun_stations()[0].gunhouse.barrels;
+        for (to, left) in [
+            (TurretLayout::Twin, 8),
+            (TurretLayout::Triple, 5),
+            (TurretLayout::Quad, 1),
+        ] {
+            let from = barrels(&run);
+            assert!(run.refit_in_dock(DockJob::Barrels { at, from, to }));
+            assert_eq!((barrels(&run), run.points()), (to, left));
         }
-        run.tick(60., Objectives::default(), 0);
-        run.extract();
-        run.install(run.fittings.offers()[0]);
+        assert_eq!(TurretLayout::Quad.more(), None);
         assert!(run.leave_dock());
         assert!(run.depart(Stage::OuterRoad));
-        assert_eq!(run.fittings.turrets, TurretLayout::Quad);
+        assert_eq!(barrels(&run), TurretLayout::Quad);
+        assert_eq!(
+            run.ship.design().gun_stations()[1].gunhouse.barrels,
+            TurretLayout::Single
+        );
     }
     #[test]
     fn hits_land_on_modules_and_the_ship_is_lost_when_she_founders() {
@@ -1209,7 +1678,7 @@ mod tests {
         assert_eq!(run.ship.propulsion(), 0.15);
         assert_eq!(run.hull(), 88);
         // The repair party goes to the engine unasked and has it turning again.
-        for _ in 0..15 {
+        for _ in 0..24 {
             run.tick(1., Objectives::default(), 0);
         }
         assert_ne!(run.ship.state(engine), State::Out);
@@ -1248,9 +1717,52 @@ mod tests {
         let bays = shipvivor_shipyard::Reach::Bays;
         run.strike_side(7.5, 2., 4, Some(5.9), bays);
         assert_eq!(run.hull(), hull);
+        // A cruiser's 7.6-inch round, still a light one, does about four fifths of its 4.
         run.strike_side(7.5, -2., 4, Some(7.6), bays);
+        assert_eq!(run.hull(), hull - 3);
+    }
+
+    #[test]
+    fn light_rounds_do_part_of_their_damage_and_heavy_ones_all_of_it() {
+        assert_eq!(bore_share(Some(2.8)), 0.5);
+        assert!((bore_share(Some(4.7)) - 0.62).abs() < 0.01);
+        assert_eq!(bore_share(Some(12.6)), 1.);
+        assert_eq!(bore_share(None), 1.);
+        // A patrol boat's 7 on sound plate does a little over 4.
+        let mut run = Run::default();
+        let hull = run.hull();
+        run.strike_side(7.5, 2., 7, Some(4.7), shipvivor_shipyard::Reach::Bays);
         assert_eq!(run.hull(), hull - 4);
     }
+
+    #[test]
+    fn a_torpedo_draws_the_party_to_the_hole_and_slows_her_until_it_is_pumped_out() {
+        let mut run = Run::default();
+        let gun = shipvivor_shipyard::Berth {
+            module: 2,
+            index: 1,
+        };
+        run.ship.strike_fitting(gun, 500.);
+        run.tick(1., Objectives::default(), 0);
+        assert_eq!(
+            run.ship.party(),
+            Some(shipvivor_shipyard::Task::Fitting(gun))
+        );
+        // A torpedo forward, as a torpedo boat's lands: its blow, and the sea let in.
+        run.strike_side(7.5, 2., 16, None, shipvivor_shipyard::Reach::Bays);
+        run.breach(7.5);
+        assert_eq!(run.ship.party(), Some(shipvivor_shipyard::Task::Module(1)));
+        let mut slowest = 1_f32;
+        for _ in 0..120 {
+            run.tick(1., Objectives::default(), 0);
+            slowest = slowest.min(run.ship.propulsion());
+        }
+        let hold = &run.ship.compartments()[1];
+        assert!(slowest < 0.85, "{slowest}");
+        assert!(!hold.wrecked() && hold.water() < 0.05, "{}", hold.water());
+        assert!(run.ship.propulsion() > 0.99);
+    }
+
     #[test]
     fn the_dock_between_legs_leaves_a_battered_ship_short_of_whole() {
         let mut run = Run::default();
@@ -1258,41 +1770,44 @@ mod tests {
         run.strike(22.5, 18);
         run.tick(60., Objectives::default(), 45);
         let before = run.hull();
-        run.extract();
+        run.clear();
         assert!(before + DOCK_REPAIR < MAX_HULL, "{before} hull");
         assert_eq!(run.hull(), before + DOCK_REPAIR);
-        run.install(run.fittings.offers()[0]);
         assert!(run.leave_dock());
         assert!(run.depart(Stage::OuterRoad));
         assert_eq!(run.hull(), before + DOCK_REPAIR);
         assert!(run.ship.compartments().iter().all(|hold| !hold.wrecked()));
+        // The second yard repairs her too, and open water onward mends nothing more.
+        run.tick(60., Objectives::default(), 30);
+        let battered = run.hull();
+        run.clear();
+        assert_eq!(run.phase(), Phase::Drydock(LegEnd::BasesDestroyed));
+        let repaired = run.hull();
+        assert!(repaired > battered && repaired <= battered + DOCK_REPAIR);
+        assert!(run.leave_dock() && run.depart(SEAS[2][0]));
+        assert_eq!(run.hull(), repaired);
     }
+
     #[test]
     fn patrol_stars_unlock_only_earned_routes_and_fittings_travel() {
-        for (goals, stars) in [
-            (Objectives::default(), 0),
+        let sunk = |kills, crates| Objectives {
+            kills,
+            crates,
+            ..Default::default()
+        };
+        // Every patrol ends with her bases down, which is the drydock goal. A leg
+        // finished past its clock keeps its stars and forgoes only the clock's points.
+        for (goals, late, stars) in [
+            (Objectives::default(), true, 1),
+            (Objectives::default(), false, 1),
+            (sunk(4, 1), false, 2),
+            (sunk(4, 1), true, 2),
             (
                 Objectives {
-                    kills: 4,
-                    crates: 1,
-                    destroyed_drydock: false,
+                    yards: 1,
+                    ..sunk(4, 3)
                 },
-                1,
-            ),
-            (
-                Objectives {
-                    kills: 4,
-                    crates: 2,
-                    destroyed_drydock: false,
-                },
-                2,
-            ),
-            (
-                Objectives {
-                    kills: 4,
-                    crates: 3,
-                    destroyed_drydock: true,
-                },
+                false,
                 3,
             ),
         ] {
@@ -1300,16 +1815,19 @@ mod tests {
                 stage: dest,
                 stars: required,
                 ..
-            } in EXITS
+            } in Stage::IronNarrows.exits().unwrap()
             {
                 let mut r = Run::default();
                 r.tick(60., goals, 50);
                 while r.phase == Phase::Refit {
-                    r.install(Card::Shells);
+                    r.install(r.offers()[0]);
                 }
+                if late {
+                    r.tick(r.remaining() + 1., Objectives::default(), 0);
+                }
+                let fitted = r.fittings;
                 let hull = r.hull();
-                r.extract();
-                r.install(r.fittings.offers()[0]);
+                r.clear();
                 assert!(r.leave_dock());
                 assert_eq!(r.stars(), stars);
                 assert_eq!(r.depart(dest), stars >= required);
@@ -1321,90 +1839,211 @@ mod tests {
                     } else {
                         40
                     };
-                    let extension = if stars >= RESERVE_STARS { 18 } else { 0 };
-                    assert_eq!(r.hull(), (hull + docked).min(100) + extension);
+                    assert_eq!(r.hull(), (hull + docked).min(100));
                     assert_eq!(r.previous_stars, stars);
                     if dest == Stage::PilotsCut {
                         assert_eq!(r.phase, Phase::Refit);
-                        r.install(r.fittings.offers()[0]);
+                        let hand = r.offers();
+                        r.install(hand[0]);
+                        assert_eq!(r.fittings, fitted.with(hand[0]));
+                    } else {
+                        assert_eq!(r.fittings, fitted);
                     }
+                    // Unspent points sail with her, the clock's among them if she beat it.
                     assert_eq!(
-                        r.fittings.round().breach_force(),
-                        2 + 2 * (goals.crates / 3)
+                        r.points(),
+                        STAR_POINTS * (u16::from(stars) + u16::from(!late))
+                            + YARD_POINTS * goals.yards
                     );
                     assert_eq!(r.experience, u32::from(goals.crates % 3) * CRATE_XP);
-                    r.tick(1000., Objectives::default(), 0);
-                    assert_eq!(r.phase, Phase::Intercept(LegEnd::TimeExpired));
+                    // The clock runs out and she sails on until her bases are down.
+                    let deadline = f32::from(dest.mission().minutes) * 60.;
+                    r.tick(deadline + 10., Objectives::default(), 0);
+                    assert_eq!((r.phase, r.late()), (Phase::Sailing, true));
+                    r.clear();
+                    assert_eq!(r.phase, Phase::Drydock(LegEnd::BasesDestroyed));
+                    // The second yard charts the third round, and a leg with only its
+                    // drydock star opens only its open water.
+                    assert_eq!((r.stars(), r.beat_clock()), (1, false));
+                    assert!(r.leave_dock());
+                    assert_eq!(r.phase, Phase::Chart);
+                    assert_eq!(r.exits(), Some(SEAS[2].map(Stage::exit)));
+                    assert!(!r.depart(SEAS[2][1]) && !r.depart(SEAS[3][0]));
+                    assert!(r.depart(SEAS[2][0]));
+                    assert_eq!(r.course, [dest, SEAS[2][0]]);
+                    assert_eq!(r.previous_stars, stars + 1);
                 } else {
                     assert_eq!(r.phase, Phase::Chart);
                 }
             }
         }
     }
+
     #[test]
-    fn multiple_levels_queue_one_choice_each_and_pause_even_at_deadline() {
+    fn harder_passages_pay_more_a_star_and_every_anchorage_pays_the_same() {
+        for (round, seas) in SEAS.iter().enumerate() {
+            for (lane, sea) in seas.iter().enumerate() {
+                let pay = if round == 0 {
+                    STAR_POINTS
+                } else {
+                    LANE_STAR_POINTS[lane]
+                };
+                assert_eq!(sea.star_points(), pay, "{sea:?}");
+            }
+        }
+        assert_eq!(Stage::CrownDeep.star_points(), 0);
+        assert!(LANE_STAR_POINTS.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(LANE_STAR_POINTS[2], 2 * LANE_STAR_POINTS[0]);
+        // Three stars in the hard passage of the second round pay twelve, and the clock
+        // four more.
+        let mut run = Run {
+            stage: SEAS[1][2],
+            ..Run::default()
+        };
+        let goals = run.stage.mission();
+        run.tick_sector(
+            1.,
+            Objectives {
+                kills: goals.kills,
+                crates: goals.crates,
+                ..Default::default()
+            },
+            0,
+            true,
+        );
+        assert_eq!((run.stars(), run.points()), (3, 16));
+    }
+
+    #[test]
+    fn a_run_is_seven_short_patrols_forking_at_every_yard_and_then_the_regent() {
+        let seas: Vec<Stage> = SEAS.iter().flatten().copied().collect();
+        for (i, sea) in seas.iter().enumerate() {
+            assert!(!seas[..i].contains(sea), "{sea:?} sails twice");
+            assert_ne!(*sea, Stage::CrownDeep);
+            let names = seas
+                .iter()
+                .filter(|other| other.mission().name == sea.mission().name);
+            assert_eq!(names.count(), 1, "{sea:?}");
+        }
+        assert_eq!(ANCHORAGES.map(|port| port.stage), SEAS[0]);
+        assert_eq!(Stage::CrownDeep.round(), ROUNDS);
+        // Each round asks at least as many sinkings as the open water before it.
+        let mut least = 0;
+        for (round, row) in SEAS.iter().enumerate() {
+            for (lane, &sea) in row.iter().enumerate() {
+                assert_eq!((sea.round(), sea.lane()), (round + 1, lane));
+                assert_eq!(sea.is_opening(), round == 0);
+                // Only a hard passage flies enemy aircraft, and an anchorage asks nothing.
+                assert_eq!(sea.enters_air_cover(), round > 0 && lane == 2);
+                let exit = sea.exit();
+                let priced = if round == 0 {
+                    (0, Perk::None)
+                } else {
+                    LANES[lane]
+                };
+                assert_eq!((exit.stars, exit.perk), priced);
+                let mission = sea.mission();
+                assert!((5..=6).contains(&mission.minutes), "{sea:?}");
+                assert!(mission.kills >= least, "{sea:?}");
+            }
+            least = row[0].mission().kills;
+            let next = row[0].exits();
+            assert_eq!(next, SEAS.get(round + 1).map(|seas| seas.map(Stage::exit)));
+        }
+        assert!(Stage::CrownDeep.exits().is_none() && !Stage::CrownDeep.enters_air_cover());
+
+        // The Regent fights under the air cover of the hard passage just sailed.
+        let mut run = Run {
+            stage: Stage::CrownDeep,
+            ..Run::default()
+        };
+        assert!(!run.under_air_cover());
+        run.course = vec![Stage::PilotsCut, SEAS[PATROLS - 1][2]];
+        assert!(run.under_air_cover());
+        run.course = vec![Stage::PilotsCut, SEAS[PATROLS - 1][0]];
+        assert!(!run.under_air_cover());
+    }
+
+    #[test]
+    fn levels_owed_at_the_clearance_are_dealt_as_free_hands_before_the_yard_opens() {
         let mut r = Run::default();
-        r.extract();
-        assert_eq!(r.phase, Phase::Sailing);
-        r.tick(
+        // Cleared late: the stores and drydock goals are met, and the clock pays nothing.
+        r.tick_sector(
             600.,
             Objectives {
                 crates: 8,
                 ..Default::default()
             },
             0,
+            true,
         );
         r.tick(10., Objectives::default(), 100);
         assert_eq!(r.hull(), 100);
         assert_eq!(r.elapsed, 600.);
+        assert_eq!((r.goals_met(), r.stars()), (2, 2));
         assert_eq!((r.level, r.experience, r.next_level_xp()), (3, 10, 50));
-        assert_eq!(r.phase, Phase::Drydock(LegEnd::TimeExpired));
-        assert_eq!(r.fittings_remaining(), 3);
-        r.install(Card::Velocity);
-        assert_eq!(r.phase, Phase::Drydock(LegEnd::TimeExpired));
+        assert_eq!(r.phase, Phase::Drydock(LegEnd::BasesDestroyed));
+        // Two levels are owed as hands, not points. The stars pay the yard.
+        assert_eq!((r.fittings_remaining(), r.points()), (2, 2 * STAR_POINTS));
+        // The yard and the chart both wait for the hands.
+        assert!(!r.refit_in_dock(DockJob::Fitting(Card::Loader)) && !r.leave_dock());
         // A card the hand does not offer is not fitted.
-        r.install(Card::Turbines);
-        assert_eq!((r.fittings.turbines, r.fittings_remaining()), (0, 2));
-        r.install(Card::Loader);
-        r.install(Card::Turbines);
+        let hand = r.offers();
+        let other = DECK
+            .iter()
+            .map(|&(card, _)| card)
+            .find(|card| r.fittings.can_fit(*card) && !hand.contains(card))
+            .unwrap();
+        r.install(other);
+        assert_eq!(
+            (r.fittings, r.fittings_remaining()),
+            (Fittings::default(), 2)
+        );
+        r.install(hand[0]);
+        assert_eq!(r.phase, Phase::Drydock(LegEnd::BasesDestroyed));
+        r.install(r.offers()[1]);
+        assert_eq!((r.fittings_remaining(), r.points()), (0, 2 * STAR_POINTS));
+        assert!(r.refit_in_dock(DockJob::Fitting(Card::Loader)));
+        assert_eq!(r.points(), STAR_POINTS);
         assert!(matches!(r.phase, Phase::Drydock(_)) && r.leave_dock());
         assert_eq!(r.phase, Phase::Chart);
-        assert!(r.fittings.round().speed() > Fittings::default().round().speed());
-        assert!(r.fittings.speed_factor() > 1.);
-        r.install(Card::Shells);
-        assert_eq!(r.fittings.shells, 0);
+        let fitted = r.fittings;
+        r.install(r.offers()[0]);
+        assert_eq!(r.fittings, fitted);
     }
+
     #[test]
-    fn clearing_on_the_deadline_banks_the_last_tick_and_awards_the_dock_once() {
+    fn clearing_banks_the_last_tick_and_pays_the_yard_once() {
         let mut r = Run::default();
-        r.tick_sector(
-            600.,
-            Objectives {
-                crates: 3,
-                ..Default::default()
-            },
-            0,
-            true,
-        );
+        let cleared = Objectives {
+            crates: 3,
+            yards: 4,
+            ..Default::default()
+        };
+        r.tick_sector(r.remaining(), cleared, 0, true);
+        assert!(!r.late());
         assert_eq!(r.phase(), Phase::Drydock(LegEnd::BasesDestroyed));
-        assert_eq!(r.fittings_remaining(), 3); // One level, one dock fitting, one clearance bonus.
+        // One level owed as a hand. Two stars, four yards and the clock pay ten points.
         assert_eq!((r.stars(), r.level), (2, 2));
-        r.tick_sector(10., Objectives::default(), 100, true);
-        r.extract();
+        assert_eq!((r.fittings_remaining(), r.points()), (1, 10));
+        r.tick_sector(10., cleared, 100, true);
+        assert_eq!((r.fittings_remaining(), r.points()), (1, 10));
         r.install(Card::QuadTurrets);
-        assert_eq!(r.fittings_remaining(), 3);
+        assert_eq!(r.fittings_remaining(), 1);
         assert!(!r.depart(Stage::OuterRoad));
-        for _ in 0..3 {
-            r.install(r.fittings.offers()[0]);
-        }
+        r.install(r.offers()[0]);
         assert!(r.leave_dock());
         assert_eq!(r.phase(), Phase::Chart);
         assert!(!r.depart(Stage::PilotsCut));
         assert!(r.depart(Stage::OuterRoad));
-        assert_eq!((r.elapsed, r.fittings_remaining()), (0., 0));
+        assert_eq!((r.elapsed, r.fittings_remaining(), r.points()), (0., 0, 10));
         r.tick_sector(1., Objectives::default(), 0, true);
-        assert_eq!(r.phase(), Phase::Intercept(LegEnd::BasesDestroyed));
+        assert_eq!(r.phase(), Phase::Drydock(LegEnd::BasesDestroyed));
+        assert_eq!(r.points(), 10 + 2 * STAR_POINTS);
+        assert!(r.leave_dock());
+        assert_eq!(r.phase(), Phase::Chart);
     }
+
     #[test]
     fn partial_experience_crosses_legs_and_restarts_cleanly() {
         let mut run = Run::default();
@@ -1412,19 +2051,18 @@ mod tests {
             crates,
             ..Default::default()
         };
-        // 50 lost, 12 mended by the crew over the minute, and 12 from each crate.
+        // 50 lost, 8 mended by the crew over the minute, and 8 from each crate.
         run.tick(60., stores(2), 50);
         assert_eq!(
             (run.phase, run.hull(), run.experience),
-            (Phase::Sailing, 86, 20)
+            (Phase::Sailing, 74, 20)
         );
-        run.extract();
-        run.install(run.fittings.offers()[0]);
+        run.clear();
         assert!(run.leave_dock());
         assert!(run.depart(Stage::OuterRoad));
         run.tick(1., stores(1), 0);
         assert_eq!((run.phase, run.level, run.experience), (Phase::Refit, 2, 0));
-        run.install(run.fittings.offers()[0]);
+        run.install(run.offers()[0]);
         run.tick(1., stores(3), 0);
         assert_eq!(
             (run.phase, run.experience, run.next_level_xp()),
@@ -1432,8 +2070,8 @@ mod tests {
         );
         run = Run::default();
         assert_eq!((run.level, run.experience, run.fittings.shells), (1, 0, 0));
+        assert_eq!(run.points(), 0);
     }
-
     #[test]
     fn sinking_overrides_salvage_and_restart_restores_the_starter_ship() {
         let mut r = Run::default();
@@ -1453,22 +2091,22 @@ mod tests {
         assert_eq!(r.stars(), 0);
     }
     #[test]
-    fn the_regent_must_sink_before_she_escapes_and_breakwater_must_survive() {
+    fn the_regent_must_sink_however_long_it_takes_and_breakwater_must_survive() {
         let finale = || {
             let mut run = Run::default();
-            run.stage = Stage::OuterRoad;
+            run.stage = SEAS[PATROLS - 1][0];
             run.tick_sector(1., Objectives::default(), 0, true);
+            assert!(!run.engage_regent() && run.leave_dock());
             assert!(run.engage_regent());
             assert!(!run.engage_regent());
             run
         };
-        let mut escape = finale();
-        escape.tick_sector(61., Objectives::default(), 0, true);
-        escape.extract();
-        assert_eq!(escape.phase(), Phase::Sailing);
-        escape.tick(escape.remaining(), Objectives::default(), 0);
-        assert_eq!(escape.phase(), Phase::Lost);
-        assert!(escape.ship.afloat());
+        // Her bases count for nothing here, and the clock runs out on nobody.
+        let mut fight = finale();
+        fight.tick_sector(61., Objectives::default(), 0, true);
+        fight.tick(fight.remaining() + 120., Objectives::default(), 0);
+        assert_eq!((fight.phase(), fight.late()), (Phase::Sailing, true));
+        assert!(fight.ship.afloat());
 
         let mut clutch = finale();
         clutch.tick_engagement(
@@ -1482,5 +2120,50 @@ mod tests {
         lost.tick_engagement(1., Objectives::default(), 1000, Some(LegEnd::RegentSunk));
         assert_eq!(lost.phase(), Phase::Lost);
         assert!(!lost.ship.afloat());
+    }
+
+    #[test]
+    fn sunk_cargo_ranks_up_into_yard_points_apart_from_the_level_and_carries_over() {
+        let mut run = Run::default();
+        let cargo = |cargo| Objectives {
+            cargo,
+            ..Default::default()
+        };
+        // A freighter's worth, hit by hit, and the rest as she goes down.
+        run.tick(1., cargo(0.75), 0);
+        assert_eq!((run.cargo_points(), run.cargo_progress()), (0, 0.75));
+        run.tick(1., cargo(0.25), 0);
+        assert_eq!((run.cargo_points(), run.cargo_progress()), (1, 0.));
+        assert_eq!((run.experience, run.leg_points()), (0, 1));
+        // Two coasters and some of a third: experience for the two, and no raiders.
+        run.tick(
+            1.,
+            Objectives {
+                coasters: 2,
+                cargo: 0.625,
+                ..Default::default()
+            },
+            0,
+        );
+        assert_eq!((run.cargo_points(), run.cargo_progress()), (1, 0.625));
+        assert_eq!(run.experience, 2 * COASTER_XP);
+        assert_eq!((run.objectives.kills, run.objectives.coasters), (0, 2));
+        // The whole point is banked at the yard with the stars. The rest sails on.
+        run.clear();
+        assert_eq!(run.phase(), Phase::Drydock(LegEnd::BasesDestroyed));
+        assert_eq!(run.clock_points(), STAR_POINTS);
+        assert_eq!(
+            run.points(),
+            1 + STAR_POINTS * u16::from(run.stars()) + run.clock_points()
+        );
+        let banked = run.points();
+        assert!(run.leave_dock());
+        assert!(run.depart(Stage::OuterRoad));
+        assert_eq!((run.cargo_points(), run.cargo_progress()), (0, 0.625));
+        run.tick(1., cargo(0.375 + 2.), 0);
+        assert_eq!((run.cargo_points(), run.cargo_progress()), (3, 0.));
+        run.tick(1., Objectives::default(), 0);
+        assert_eq!(run.leg_points(), 3);
+        assert_eq!(run.points(), banked);
     }
 }

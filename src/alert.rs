@@ -2,7 +2,7 @@
 //! or is being hit, and for a while after. Its siren and its flares both go by this.
 use crate::state::Encounter;
 use bevy::prelude::*;
-use shipvivor_encounter::{EffectKind, ISLAND_RADIUS, YardState};
+use shipvivor_encounter::{EffectKind, ISLAND_RADIUS};
 
 /// Seconds a base stays alerted after it last had word of the ship or was hit.
 const ALARM: f32 = 12.;
@@ -13,22 +13,25 @@ const ASHORE: f32 = 1.5 * ISLAND_RADIUS;
 #[derive(Resource, Default)]
 pub struct BaseAlerts {
     seen: f32,
-    until: [f32; 3],
+    until: Vec<f32>,
 }
 impl BaseAlerts {
-    /// Whether this base has its alarm up. A base whose yard is ruined has nobody
-    /// left to raise one.
+    /// Whether this base has its alarm up. A base with nothing left standing, not even a
+    /// gun, has nobody left to raise one.
     pub fn raised(&self, base: usize, battle: &Encounter) -> bool {
-        battle.at_sea() < self.until[base] && battle.ports()[base].yard_state() != YardState::Ruined
+        self.until
+            .get(base)
+            .is_some_and(|&until| battle.at_sea() < until)
+            && battle.ports()[base].lookout().is_some()
     }
 }
 
 /// Runs each tick after the battle steps, and before anything that goes by the alarm.
 pub fn watch(battle: Res<Encounter>, mut alerts: ResMut<BaseAlerts>) {
     let now = battle.at_sea();
-    if now < alerts.seen {
+    if now < alerts.seen || alerts.until.len() != battle.ports().len() {
         // The clock has gone back, so this is a new voyage and no alarm is up yet.
-        alerts.until = [0.; 3];
+        alerts.until = vec![0.; battle.ports().len()];
     }
     alerts.seen = now;
     for (port, until) in battle.ports().iter().zip(&mut alerts.until) {

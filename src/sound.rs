@@ -2,10 +2,11 @@
 //! which plays on the audio thread and makes the listener wait for distant sound.
 //! Shells are followed through the air, and the land and ice nearest the ship are
 //! charted so they can echo.
-//! A base that has word of the ship, or is being hit, sounds its siren, and a flagship
-//! sounds a deeper one as she puts to sea.
+//! A base that has word of the ship, or is being hit, sounds its siren, and a boss
+//! sounds her horn as she puts to sea: the bigger she is, the deeper it is.
 //! The engines are heard as they are: damaged ones stumble and bang, and those knocked
-//! out are silent. Around it all the places make their own sounds, which are surf,
+//! out are silent. An engine is heard to take the blow that damages it and to die when
+//! it is knocked out, and the repair party is heard at work where it has been sent. Around it all the places make their own sounds, which are surf,
 //! seabirds, ice and the work of a yard. Each base's spotter is heard overhead.
 use crate::{
     alert::BaseAlerts,
@@ -18,15 +19,15 @@ use bevy::{
     reflect::TypePath,
 };
 use shipvivor_acoustics::{
-    Air, Alert, Ambience, Bank, Cue, Cues, Feed, Haunt, Mixer, Place, Rotor, SAMPLE_RATE, Sound,
-    console,
+    AIRCRAFT, Air, Alert, Ambience, Bank, Cue, Cues, Feed, Haunt, Mixer, Place, Rotor, SAMPLE_RATE,
+    Sound, console,
 };
 use shipvivor_compass::direction;
 use shipvivor_encounter::{
-    Battery, EffectKind, ISLAND_RADIUS, Impact, LandmarkKind, Sortie, YardState,
+    Battery, EffectKind, Hull, ISLAND_RADIUS, Impact, LandmarkKind, YardState,
 };
 use shipvivor_navigation::Helm;
-use shipvivor_shipyard::{Component, State};
+use shipvivor_shipyard::{Component, State, Task};
 use std::{sync::Mutex, time::Duration};
 
 /// Height of the listener above the water, on the bridge.
@@ -45,18 +46,43 @@ const APART: f32 = 120.;
 const SURF: f32 = 420.;
 /// Height of a base's siren, on a mast over its yard.
 const MAST: f32 = 14.;
-/// Seconds a flagship sounds her own siren as she puts to sea, the slot the mixer
-/// keeps it in after the three bases, and its height above the water.
-const HERALD: f32 = 20.;
-const FLAGSHIP: usize = 3;
-const FUNNEL: f32 = 16.;
+/// Height above the water of a boss's horn, on her foremast.
+const HORN: f32 = 16.;
+/// The mixer's voices for base sirens, and for floatplanes. The fourth aircraft voice
+/// belongs to a shore-based attacker, and the rest to the harriers aloft. A sector may
+/// hold more bases than that, so the voices go to the nearest roused bases, and if
+/// more harriers are aloft than there are voices, to the nearest of them.
+const SIRENS: usize = 3;
+const SPOTTERS: usize = 3;
+const HARRIERS: usize = {
+    let (aloft, voices) = (shipvivor_encounter::MOST_ALOFT, AIRCRAFT - SPOTTERS - 1);
+    if aloft < voices { aloft } else { voices }
+};
 
 /// Height above the water from which a yard's work is heard.
 const SLIP: f32 = 6.;
 
+/// Seconds before an enemy torpedo would reach her that the alarm bell is rung for it,
+/// and the metres beyond her ends within which a track counts as closing on her.
+const TORPEDO_WARNING: f32 = 5.5;
+const TORPEDO_MARGIN: f32 = 4.;
+
 /// An aeroplane that has moved further than this in one tick has been put somewhere
 /// new, and has no speed to be reckoned from the move.
 const LEAP: f32 = 5.;
+
+/// Height above the water at which the repair party works, how far either side of the
+/// centreline, and the seconds after the party is sent before it is first heard.
+const DECK: f32 = 2.2;
+const ABEAM: f32 = 1.6;
+const SENT: f32 = 0.5;
+/// The repair party's work: each tool, how often it is taken up against the others, and
+/// the shortest and longest seconds from taking it up to the next.
+const TOOLS: [(Sound, f32, (f32, f32)); 3] = [
+    (Sound::Hammer, 0.45, (1.8, 3.2)),
+    (Sound::Ratchet, 0.3, (2., 3.4)),
+    (Sound::Torch, 0.25, (3.2, 4.4)),
+];
 
 /// Blasts of the klaxon when the ship first comes close to sinking, the seconds from
 /// one to the next, and the seconds before they are sounded again while she stays so.
@@ -72,6 +98,34 @@ struct Klaxon {
     again: f32,
 }
 
+/// Seconds left on the leg's clock when the bridge clock starts to be heard.
+const LAST_MINUTE: f32 = 60.;
+/// Seconds the ticking takes to swell in, and to fade out once a base puts time back.
+const TICK_FADE: f32 = 1.5;
+/// How loud a tick is at the minute, against its full strength in the last seconds.
+const FIRST_TICK: f32 = 0.45;
+/// Seconds of the clock a base's time holds the ticking off for, so even time won in
+/// the last seconds, which leaves the clock inside its last minute, is a relief.
+const TICK_GRACE: f32 = 15.;
+/// The ticking's strength below which a fading beat is no longer struck: about three
+/// dying beats once a base puts time back.
+const TICK_FLOOR: f32 = 0.1;
+
+/// The bridge clock counting out a leg's last minute: soft at the minute and firmer as
+/// it runs down. Time put back on the clock lets the ticking die away, not stop dead.
+#[derive(Default)]
+struct Countdown {
+    /// The whole seconds the clock read at the last look.
+    shown: Option<i32>,
+    /// How strongly it is ticking, from 0 to 1.
+    level: f32,
+    /// Seconds on the leg's clock at the last look, to hear time put on it.
+    clock: f32,
+    /// Seconds left that the clock must come down to before it ticks again, once a base
+    /// has put time on it.
+    hush: Option<f32>,
+}
+
 /// What `report` keeps from one tick to the next about the ship's surroundings: the
 /// maker of their sounds, the engine order last rung, when the battle was last seen,
 /// and where each aircraft was.
@@ -80,8 +134,65 @@ pub struct Surroundings {
     ambience: Ambience,
     order: Option<f32>,
     klaxon: Klaxon,
+    countdown: Countdown,
     seen: f32,
-    aircraft: [Option<Vec3>; 4],
+    aircraft: [Option<Vec3>; SPOTTERS + 1 + HARRIERS],
+    /// Which base each siren voice and each floatplane voice is following, and which
+    /// harrier each harrier voice.
+    sirens: [Option<usize>; SIRENS],
+    spotters: [Option<usize>; SPOTTERS],
+    harriers: [Option<u64>; HARRIERS],
+    /// Where each siren voice last sounded from.
+    siren_at: [Vec3; SIRENS],
+    /// Enemy torpedoes already heard leaving the tube, and those the alarm bell has
+    /// already been rung for.
+    torpedoes: Vec<u64>,
+    alarmed: Vec<u64>,
+    /// The boss whose horn has sounded this voyage.
+    boss: Option<u64>,
+    /// The state each engine was last heard in.
+    engines: Vec<State>,
+    /// When the repair party next takes up a tool, and how many it has taken up.
+    mending: f32,
+    tools: u64,
+}
+
+/// A share from 0 to 1 that is the same for the same `seed`.
+fn chance(seed: u64) -> f32 {
+    (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40) as f32 / (1 << 24) as f32
+}
+
+/// Keep each voice on the base or aircraft it follows while that is still among those
+/// `wanted`, and give each free voice to the next one wanted without a voice.
+fn allot<T: Copy + PartialEq, const N: usize>(voices: &mut [Option<T>; N], wanted: &[T]) {
+    for voice in voices.iter_mut() {
+        if voice.is_some_and(|base| !wanted.contains(&base)) {
+            *voice = None;
+        }
+    }
+    for &base in wanted {
+        if voices.contains(&Some(base)) {
+            continue;
+        }
+        if let Some(free) = voices.iter_mut().find(|voice| voice.is_none()) {
+            *free = Some(base);
+        }
+    }
+}
+
+/// The roused bases nearest `at` that `keep` lets through, nearest first, at most `n`.
+fn nearest_bases(
+    battle: &Encounter,
+    at: Vec2,
+    n: usize,
+    keep: impl Fn(usize) -> bool,
+) -> Vec<usize> {
+    let mut bases: Vec<(usize, f32)> = (battle.ports().iter().enumerate())
+        .filter(|&(i, port)| port.roused() && keep(i))
+        .map(|(i, port)| (i, crate::mission_hud::anchor(port).distance_squared(at)))
+        .collect();
+    bases.sort_by(|a, b| a.1.total_cmp(&b.1));
+    bases.into_iter().take(n).map(|(i, _)| i).collect()
 }
 
 /// A piece of land or ice as sound meets it: a disc at the waterline, and the height
@@ -167,7 +278,6 @@ pub fn report(
     clock: Res<Time<Fixed>>,
     mut aloft: Local<Vec<(u64, Vec3)>>,
     alerts: Res<BaseAlerts>,
-    mut herald: Local<Vec3>,
     mut around: Local<Surroundings>,
 ) {
     // The listener stands on the bridge and faces wherever the sight is turned.
@@ -197,6 +307,12 @@ pub fn report(
     if voyage < around.seen {
         around.order = None;
         around.klaxon = Klaxon::default();
+        around.countdown = Countdown::default();
+        around.torpedoes.clear();
+        around.alarmed.clear();
+        around.boss = None;
+        around.engines.clear();
+        around.mending = 0.;
     }
     if around.order.is_some_and(|last| last != ordered) {
         board.cues.send(Cue::Emit {
@@ -225,6 +341,87 @@ pub fn report(
         klaxon.left -= 1;
         klaxon.next += KLAXON.1;
     }
+    // The last minute of a patrol's clock ticks on the bridge, one beat a second. A base
+    // wrecked puts time back on it, and the ticking fades away over the next beats and
+    // holds off while the clock runs down through the grace.
+    let left = run.remaining();
+    let countdown = &mut around.countdown;
+    if run.clock() > countdown.clock + 0.5 {
+        countdown.hush = Some(left - TICK_GRACE);
+    } else if run.clock() < countdown.clock - 0.5 {
+        // A new leg's fresh clock owes nothing to the last one's bases.
+        countdown.hush = None;
+    }
+    countdown.clock = run.clock();
+    let counting = run.screen() == Screen::Sailing
+        && run.stage != shipvivor_campaign::Stage::CrownDeep
+        && left > 0.
+        && left <= LAST_MINUTE.min(countdown.hush.unwrap_or(f32::INFINITY));
+    let target = if counting { 1. } else { 0. };
+    countdown.level += (target - countdown.level) * (clock.delta_secs() / TICK_FADE).min(1.);
+    let second = left.ceil() as i32;
+    if countdown.shown.is_some_and(|was| second < was) && second > 0 && countdown.level > TICK_FLOOR
+    {
+        let urgency = 1. - (left / LAST_MINUTE).clamp(0., 1.);
+        board.cues.send(Cue::Notice {
+            sound: Sound::Tick,
+            level: countdown.level * (FIRST_TICK + (1. - FIRST_TICK) * urgency),
+            serial: second.rem_euclid(2) as u64,
+        });
+    }
+    countdown.shown = Some(second);
+    // An engine is heard to take the blow that leaves it running rough, and to sputter
+    // out when it is knocked out. One mended comes back with no more than its running.
+    let states: Vec<State> = engines().map(|(_, state)| state).collect();
+    if around.engines.len() == states.len() {
+        for (was, now) in around.engines.iter().zip(&states) {
+            let sound = match (was, now) {
+                (State::Working, State::Damaged) => Sound::EngineHurt,
+                (State::Working | State::Damaged, State::Out) => Sound::EngineStall,
+                _ => continue,
+            };
+            board.cues.send(Cue::Emit {
+                sound,
+                position: bridge,
+                serial: voyage.to_bits().into(),
+            });
+        }
+    }
+    around.engines = states;
+    // The repair party is heard at work on deck over the section it was sent to:
+    // hammering, a torch and spanners by turns, with a breath between.
+    match run.ship.party().filter(|_| run.ship.afloat()) {
+        Some(task) if voyage >= around.mending => {
+            let module = match task {
+                Task::Module(module) => module,
+                Task::Fitting(berth) => berth.module,
+            };
+            let (fore, aft) = run.ship.design().span(module);
+            let seed = around.tools;
+            around.tools += 1;
+            let pick = chance(seed);
+            let mut taken = 0.;
+            let (sound, _, (soonest, latest)) = *TOOLS
+                .iter()
+                .find(|(_, often, _)| {
+                    taken += often;
+                    pick < taken
+                })
+                .unwrap_or(&TOOLS[0]);
+            let ahead = helm.forward();
+            let at = helm.position
+                + ahead * (Hull::CRUISER.bow - 0.5 * (fore + aft))
+                + ahead.perp() * ABEAM * (2. * chance(seed ^ 0xA5) - 1.);
+            board.cues.send(Cue::Emit {
+                sound,
+                position: Vec3::new(at.x, DECK, at.y),
+                serial: seed,
+            });
+            around.mending = voyage + soonest + (latest - soonest) * chance(seed ^ 0x5A);
+        }
+        Some(_) => {}
+        None => around.mending = voyage + SENT,
+    }
     for fx in battle.effects().iter().filter(|fx| fx.age == 0.) {
         let sound = match fx.kind {
             EffectKind::Muzzle(Battery::Main) => Sound::MainGun,
@@ -233,7 +430,9 @@ pub fn report(
             ) => Sound::SecondaryGun,
             EffectKind::Muzzle(Battery::Raider) => Sound::RaiderGun,
             EffectKind::Muzzle(Battery::Shore) => Sound::ShoreGun,
+            EffectKind::Muzzle(Battery::Heavy) => Sound::HeavyGun,
             EffectKind::Splash => Sound::Splash,
+            EffectKind::Column => Sound::Column,
             // A ram has no voice of its own yet and borrows the shell burst.
             EffectKind::Burst
             | EffectKind::Crunch
@@ -254,6 +453,10 @@ pub fn report(
             // A factory crumbles. The gantry takes the whole yard down with it.
             EffectKind::Demolition { dock: false } => Sound::Collapse,
             EffectKind::Demolition { dock: true } => Sound::Ruin,
+            EffectKind::Torpedoed => Sound::Torpedoed,
+            // A slab off an ice shelf comes apart like a glacier's front. Lesser ice cracks.
+            EffectKind::Shatter(radius) if radius >= 19 => Sound::Calving,
+            EffectKind::Shatter(_) => Sound::IceCrack,
         };
         board.cues.send(Cue::Emit {
             sound,
@@ -275,6 +478,35 @@ pub fn report(
             serial: fx.body.id,
         });
     }
+    // An enemy torpedo is heard leaving its tube, from where it was fired, and the
+    // bridge rings its alarm bell once for each whose track is closing on her.
+    let way = direction(helm.heading) * helm.speed;
+    let shape = run.hull_shape();
+    let reach = shape.bow.max(shape.stern) + TORPEDO_MARGIN;
+    let fish = battle.torpedoes().iter().filter(|t| t.hostile());
+    for t in fish {
+        let id = t.body.id;
+        if !around.torpedoes.contains(&id) {
+            around.torpedoes.push(id);
+            board.cues.send(Cue::Emit {
+                sound: Sound::TorpedoLaunch,
+                position: Vec3::new(t.body.pos.x, 1.5, t.body.pos.y),
+                serial: id,
+            });
+        }
+        let closing = t.closing(helm.position, way, reach);
+        if closing.is_some_and(|s| s <= TORPEDO_WARNING) && !around.alarmed.contains(&id) {
+            around.alarmed.push(id);
+            board.cues.send(Cue::Emit {
+                sound: Sound::TorpedoAlarm,
+                position: bridge,
+                serial: id,
+            });
+        }
+    }
+    let running: Vec<u64> = battle.torpedoes().iter().map(|t| t.body.id).collect();
+    around.torpedoes.retain(|id| running.contains(id));
+    around.alarmed.retain(|id| running.contains(id));
     // Whatever stands out of the sea throws a report back: the bases, the islands, the
     // mainland and any ice big enough. The mixer has room for a few, so it is told each
     // tick of those that will answer loudest, which are the big and the near. Where
@@ -304,20 +536,31 @@ pub fn report(
     }
     // A base sounds its siren while it has word of the ship or is being hit, and for
     // a while after. A ruined yard has no power, and its siren is left to run down.
-    let now = battle.at_sea();
-    for (slot, port) in battle.ports().iter().enumerate() {
-        let yard = port.yard_position();
+    let near = nearest_bases(&battle, helm.position, SIRENS, |_| true);
+    allot(&mut around.sirens, &near);
+    for slot in 0..SIRENS {
+        let alert = match around.sirens[slot] {
+            Some(base) => {
+                let port = &battle.ports()[base];
+                let yard = crate::mission_hud::anchor(port);
+                around.siren_at[slot] = Vec3::new(yard.x, MAST, yard.y);
+                // A base that is finished is heard to be: its siren comes down with
+                // the last of its works and its note drops away to nothing.
+                if port.wrecked() {
+                    Alert::Wrecked
+                } else if alerts.raised(base, &battle) {
+                    Alert::Raised
+                } else {
+                    Alert::Lowered
+                }
+            }
+            None => Alert::Lowered,
+        };
         board.cues.send(Cue::Alarm {
             slot,
             rotor: Rotor::Shore,
-            position: Vec3::new(yard.x, MAST, yard.y),
-            alert: match port.yard_state() {
-                // A base that is finished is heard to be: its siren comes down with
-                // the gantry and its note drops away to nothing.
-                YardState::Ruined => Alert::Wrecked,
-                _ if alerts.raised(slot, &battle) => Alert::Raised,
-                _ => Alert::Lowered,
-            },
+            position: around.siren_at[slot],
+            alert,
         });
     }
     // Every place makes its own sounds. A yard is at work until it is wrecked, and
@@ -359,19 +602,29 @@ pub fn report(
         position: Vec3::new(port.body.pos.x, BLUFF, port.body.pos.y),
         radius: ISLAND_RADIUS,
     });
-    let quiet = (0..3).map(|base| !alerts.raised(base, &battle));
+    let quiet = (0..battle.ports().len()).map(|base| !alerts.raised(base, &battle));
     let yards = battle
         .ports()
         .iter()
         .zip(quiet)
-        .filter_map(|(port, quiet)| {
-            let working = matches!(port.yard_state(), YardState::Working | YardState::Damaged);
-            let yard = port.yard_position();
-            (working && quiet).then_some(Place {
-                haunt: Haunt::Yard,
-                position: Vec3::new(yard.x, SLIP, yard.y),
-                radius: 0.,
-            })
+        .filter(|&(_, quiet)| quiet)
+        .flat_map(|(port, _)| {
+            // Each slip at work is heard on its own.
+            (0..port.docks().len())
+                .filter(|&i| {
+                    matches!(
+                        port.docks()[i].state(),
+                        YardState::Working | YardState::Damaged
+                    )
+                })
+                .map(|i| {
+                    let yard = port.dock_position(i);
+                    Place {
+                        haunt: Haunt::Yard,
+                        position: Vec3::new(yard.x, SLIP, yard.y),
+                        radius: 0.,
+                    }
+                })
         });
     let bergs = battle.icebergs().iter().filter(|berg| berg.radius >= FLOE);
     let bergs = bergs.map(|berg| Place {
@@ -389,11 +642,33 @@ pub fn report(
     // The fourth engine belongs to a shore-based attacker while it is aloft.
     let dt = clock.delta_secs();
     let attacker = battle.air_station().and_then(|base| base.aircraft.as_ref());
-    let positions = battle
-        .spotters()
-        .iter()
-        .map(|p| p.airborne().then(|| p.position_3d()))
-        .chain([attacker.map(|p| p.position_3d())]);
+    let flying = |i: usize| battle.spotters().get(i).is_some_and(|p| p.airborne());
+    let near = nearest_bases(&battle, helm.position, SPOTTERS, flying);
+    allot(&mut around.spotters, &near);
+    let spotter = |voice: Option<usize>| {
+        let plane = &battle.spotters()[voice?];
+        plane.airborne().then(|| plane.position_3d())
+    };
+    let mut harriers: Vec<(u64, f32)> = (battle.harriers().iter())
+        .map(|p| (p.body.id, p.body.pos.distance_squared(helm.position)))
+        .collect();
+    harriers.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let harriers: Vec<u64> = harriers
+        .into_iter()
+        .take(HARRIERS)
+        .map(|(id, _)| id)
+        .collect();
+    allot(&mut around.harriers, &harriers);
+    let harrier = |voice: Option<u64>| {
+        let plane = battle
+            .harriers()
+            .iter()
+            .find(|p| Some(p.body.id) == voice)?;
+        Some(plane.position_3d())
+    };
+    let positions = (around.spotters.map(spotter).into_iter())
+        .chain([attacker.map(|p| p.position_3d())])
+        .chain(around.harriers.map(harrier));
     for (slot, (now, before)) in positions.zip(&mut around.aircraft).enumerate() {
         let Some(position) = now.or(*before) else {
             continue;
@@ -408,23 +683,19 @@ pub fn report(
         });
         *before = now;
     }
-    // A flagship announces her sortie on a siren she carries with her. Sunk, it is
-    // left to run down where she was last seen.
-    let sailed = matches!(battle.flagship(), Some(Sortie::Sailed { at, .. }) if now - at < HERALD);
-    let flagship = battle.raiders().iter().find(|r| r.class.is_flagship());
-    if let Some(ship) = flagship {
-        *herald = Vec3::new(ship.body.pos.x, FUNNEL, ship.body.pos.y);
+    // A boss sounds her horn as she puts out, or as the leg opens if she is at sea
+    // already, as the Regent is. The horn goes with her, and a longer ship's is
+    // deeper. Sunk, her last blast is left to cross the water from where she was.
+    if let Some(ship) = battle.raiders().iter().find(|r| r.class.is_boss()) {
+        let hull = ship.class.profile().hull;
+        let blow = around.boss != Some(ship.body.id);
+        around.boss = Some(ship.body.id);
+        board.cues.send(Cue::Horn {
+            position: Vec3::new(ship.body.pos.x, HORN, ship.body.pos.y),
+            length: hull.bow + hull.stern,
+            blow,
+        });
     }
-    board.cues.send(Cue::Alarm {
-        slot: FLAGSHIP,
-        rotor: Rotor::Ship,
-        position: *herald,
-        alert: if sailed && flagship.is_some() {
-            Alert::Raised
-        } else {
-            Alert::Lowered
-        },
-    });
     // A shell's velocity is how far it came since the last tick. One fired this tick
     // is first heard on the next.
     let shells = battle.shots().iter().map(|shot| {
@@ -434,6 +705,8 @@ pub fn report(
             let weight = match shot.battery {
                 Battery::Main => shot.shell.scale(),
                 Battery::Shore => 1.2,
+                // A heavy shell's rush is deep and carries.
+                Battery::Heavy => 2.6,
                 Battery::Raider => 0.7,
                 Battery::Secondary | Battery::EnemySecondary | Battery::Aircraft => 0.4,
                 Battery::AntiAir => 0.25,

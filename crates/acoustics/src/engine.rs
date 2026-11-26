@@ -23,12 +23,14 @@
 //! lame, the revolutions sag and stumble, and fuel that went through unburnt lights in
 //! the exhaust trunk and goes off up the funnel. Recordings of engines doing this show
 //! bangs that stand 10 to 20 dB over the running engine, are over in a hundredth of a
-//! second, and come in twos and threes with seconds of nothing between.
+//! second, and come in twos and threes with seconds of nothing between. Whatever the
+//! hit knocked loose in the running gear knocks once a turn, a hard metallic rap that
+//! comes through the ship over the low boom of the firings.
 use crate::{
     RATE,
     filter::{Biquad, Rng, pole},
 };
-use std::f32::consts::PI;
+use std::f32::consts::{PI, TAU};
 
 const CYLINDERS: usize = 9;
 /// Two chambers to a cylinder.
@@ -98,6 +100,17 @@ const BANG: (f32, f32, f32, f32) = (7., 0.009, 0.5, 0.3);
 const VENT: (f32, f32, f32) = (250., 900., 90.);
 /// How hard it shakes the block.
 const JOLT: f32 = 3.;
+/// A damaged engine knocks as well: something worn loose in the running gear of the
+/// cylinders it has lost strikes once a turn, twice in quick succession as the load on
+/// it reverses. A recording of a knocking engine has the pair 16 ms apart once every
+/// turn of the crank, 11 dB over the rest of the engine above 700 Hz and ringing near
+/// 1.3 kHz. A ship's engine is bigger steel and rings lower. These are what rings, in
+/// hertz, how loud and the seconds it takes to die away.
+const KNOCK: [(f32, f32, f32); 3] = [(610., 1., 0.014), (1240., 0.8, 0.009), (1930., 0.45, 0.006)];
+/// The knock's level against a firing's, the seconds from the first blow to the
+/// second and how hard the second is, and how far one knock's pitch and weight may
+/// differ from the last.
+const RAP: (f32, f32, f32, f32) = (0.4, 0.016, 0.55, 0.06);
 
 pub(crate) struct Diesel {
     rng: Rng,
@@ -133,6 +146,15 @@ pub(crate) struct Diesel {
     bang: f32,
     dull: [f32; 2],
     vent: Biquad,
+    /// The chamber at whose firing the loose gear knocks, the samples until its second
+    /// blow and how hard that will be, and what is ringing: each tone's phase, level and
+    /// the share of it left a sample later. The knock keeps its own noise, so a sound
+    /// engine runs exactly as it did before there was any knock to hear.
+    knocker: usize,
+    echo: (f32, f32),
+    pitch: f32,
+    ringing: [(f32, f32, f32); 3],
+    rattle: Rng,
 }
 impl Diesel {
     /// Engines with different seeds are different engines of the same make.
@@ -187,8 +209,42 @@ impl Diesel {
             bang: 0.,
             dull: [0.; 2],
             vent: Biquad::high_pass(VENT.2, 0.7),
+            knocker: lost.iter().position(|&lost| lost).unwrap_or(0),
+            echo: (0., 0.),
+            pitch: 1.,
+            ringing: KNOCK.map(|(_, _, ring)| (0., 0., (-1. / (ring * RATE)).exp())),
+            rattle: Rng::new(seed ^ 0x6B_6E0C),
             rng,
         }
+    }
+
+    /// Strike the loose gear. Every tone it has rings up again from wherever it was,
+    /// and no two blows land quite alike.
+    fn rap(&mut self, weight: f32) {
+        self.pitch = 1. + RAP.3 * self.rattle.noise();
+        for (ring, (_, level, _)) in self.ringing.iter_mut().zip(KNOCK) {
+            ring.1 += weight * level * (1. + RAP.3 * self.rattle.noise());
+        }
+    }
+
+    /// The knock as it is heard this sample.
+    fn knock(&mut self) -> f32 {
+        if self.echo.0 > 0. {
+            self.echo.0 -= 1.;
+            if self.echo.0 <= 0. {
+                self.rap(self.echo.1);
+            }
+        }
+        let mut heard = 0.;
+        for (ring, (hz, _, _)) in self.ringing.iter_mut().zip(KNOCK) {
+            if ring.1 < 1e-6 {
+                continue;
+            }
+            ring.0 = (ring.0 + hz * self.pitch / RATE).fract();
+            heard += ring.1 * (TAU * ring.0).sin();
+            ring.1 *= ring.2;
+        }
+        heard
     }
 
     /// The next sample: what comes through the hull, and what comes from the funnel
@@ -224,6 +280,12 @@ impl Diesel {
             self.puff += blow * load.powf(FUNNEL.3);
             if fault > 0. {
                 self.backfire(rate, load, bangs);
+                // The loose gear is struck as the lost cylinder's crank comes over.
+                if self.chamber == self.knocker {
+                    let weight = RAP.0 * fault.min(1.) * load;
+                    self.rap(weight);
+                    self.echo = (RAP.1 * RATE, RAP.2 * weight);
+                }
             }
         }
         let mut heard = 0.;
@@ -237,6 +299,8 @@ impl Diesel {
         for pass in &mut self.passed {
             heard = pass.run(heard);
         }
+        // Struck steel carries through the ship where the firings' boom does not.
+        heard += self.knock();
         self.open[0] += self.poles[1] * (gas - self.open[0]);
         self.open[1] += self.poles[2] * (self.open[0] - self.open[1]);
         let mut aloft = self.mouth.run(self.open[1]);

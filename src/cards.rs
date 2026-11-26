@@ -6,10 +6,11 @@ use bevy::{
     ui::{RelativeCursorPosition, UiGlobalTransform},
     window::{CursorGrabMode, CursorOptions},
 };
-use shipvivor_campaign::{CALIBRES, Card, Fittings, limits};
+use shipvivor_campaign::{CALIBRES, Card, Fittings, LOADER_CUT, Rarity, Run, limits};
 use shipvivor_encounter::{Ammo, MainShell};
 use shipvivor_navigation::Helm;
-use shipvivor_shipyard::{Component, Design, Protection};
+use shipvivor_shipyard::{Component, Design, INFLOW, PUMP, Protection};
+use std::borrow::Cow;
 
 const KNOTS_PER_MPS: f32 = 1.94384;
 const WIDTH: f32 = 268.;
@@ -70,19 +71,47 @@ impl Change {
 }
 
 pub(crate) struct Stat {
-    pub(crate) label: &'static str,
-    /// Empty when the card adds something the ship did not have.
+    pub(crate) label: Cow<'static, str>,
+    /// Empty when the card adds something the ship did not have, or when the figure is
+    /// the change itself, such as the share a loader card takes off every reload.
     pub(crate) before: String,
     pub(crate) after: String,
     pub(crate) change: Change,
 }
-fn stat(label: &'static str, before: impl ToString, after: impl ToString, change: Change) -> Stat {
+fn stat(
+    label: impl Into<Cow<'static, str>>,
+    before: impl ToString,
+    after: impl ToString,
+    change: Change,
+) -> Stat {
     Stat {
-        label,
+        label: label.into(),
         before: before.to_string(),
         after: after.to_string(),
         change,
     }
+}
+/// A loader card's figures: the share it takes off every reload, then each gun it drills
+/// as its time now and after, labelled.
+fn quicker(guns: impl IntoIterator<Item = (Cow<'static, str>, f32, f32)>) -> Vec<Stat> {
+    let cut = stat(
+        "Reload",
+        "",
+        format!("-{:.0}%", 100. * LOADER_CUT),
+        Change::Gain,
+    );
+    let each = (guns.into_iter())
+        .map(|(label, now, next)| stat(label, seconds(now), seconds(next), Change::Gain));
+    std::iter::once(cut).chain(each).collect()
+}
+/// Every bore among the main turrets aboard, smallest first, each once.
+fn bores(design: &Design, f: Fittings) -> Vec<u16> {
+    let mut bores: Vec<u16> = (design.gun_stations().iter())
+        .map(|station| f.for_station(station).calibre())
+        .collect();
+    bores.sort_unstable();
+    bores.dedup();
+    bores
 }
 
 pub(crate) struct Face {
@@ -103,7 +132,6 @@ impl Face {
                     | Card::TwinSecondaries
                     | Card::TripleTurrets
                     | Card::QuadTurrets
-                    | Card::AntiAir
             )
     }
 }
@@ -124,6 +152,12 @@ fn share(part: f32) -> String {
 /// The widest round a sound plate turns aside.
 fn inches(calibre: f32) -> String {
     format!("{calibre:.0} in")
+}
+/// The least structure a module can keep and still be held dry by the crew's pumps alone,
+/// with these fittings: its leak grows with the cube of the structure lost.
+fn holds_dry(f: Fittings) -> String {
+    let pumping = PUMP * Design::BREAKWATER_REPAIR * f.pumping();
+    share(1. - (pumping / INFLOW).min(1.).cbrt())
 }
 /// Damage the first such fitting aboard takes before it fails, with these fittings.
 fn strength(design: &Design, f: Fittings, part: Component) -> String {
@@ -151,16 +185,19 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
     let (wing, wing_next) = (now.secondaries(), next.secondaries());
     let (flak, flak_next) = (now.anti_air(), next.anti_air());
     match card {
+        // Turrets of different bores load at their own pace, so each bore aboard has
+        // its own line.
         Card::Loader => Face {
             kind: Kind::Gunnery,
             name: "Quick Loaders",
             rank: (now.loader, None),
-            stats: vec![stat(
-                "Reload",
-                seconds(now.reload()),
-                seconds(next.reload()),
-                Gain,
-            )],
+            stats: quicker(bores(design, now).into_iter().map(|calibre| {
+                (
+                    Cow::Owned(format!("{calibre} in")),
+                    now.reload_for(calibre),
+                    next.reload_for(calibre),
+                )
+            })),
             flavour: "Drilled crews ram the next round home sooner.",
         },
         Card::Shells => Face {
@@ -256,7 +293,7 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
             } else {
                 "Quad Turrets"
             },
-            rank: (now.turrets.count() as u16 - 2, Some(2)),
+            rank: (now.turrets.count().saturating_sub(2) as u16, Some(2)),
             stats: vec![stat(
                 "Barrels",
                 now.turrets.count(),
@@ -286,7 +323,7 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
             name: "More Secondaries",
             rank: (now.wing_mounts, Some(2)),
             stats: vec![stat("Guns a side", wing.per_side, wing_next.per_side, Gain)],
-            flavour: "Another shielded gun each side, forward and then aft.",
+            flavour: "Another shielded gun each beam, by the bridge and then aft.",
         },
         Card::HeavySecondaries => Face {
             kind: Kind::Secondaries,
@@ -299,12 +336,7 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
             kind: Kind::Secondaries,
             name: "Secondary Loaders",
             rank: (now.wing_loaders, Some(3)),
-            stats: vec![stat(
-                "Reload",
-                seconds(wing.reload),
-                seconds(wing_next.reload),
-                Gain,
-            )],
+            stats: quicker([("Each gun".into(), wing.reload, wing_next.reload)]),
             flavour: "Ready-use lockers beside every gun.",
         },
         Card::SecondaryRange => Face {
@@ -369,23 +401,22 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
             ],
             flavour: "Splinter shields and stiffer seatings. Engine, guns and gear take more before they fail.",
         },
-        Card::AntiAir => Face {
-            kind: Kind::AntiAir,
-            name: "AA Guns",
-            rank: (now.anti_air, Some(1)),
+        Card::Pumps => Face {
+            kind: Kind::Machinery,
+            name: "Bilge Pumps",
+            rank: (now.pumps, Some(limits::PUMPS)),
             stats: vec![
-                stat("Guns", "", flak_next.mounts, New),
-                stat("Reach", "", metres(flak_next.range), New),
-                stat("Reload", "", seconds(flak_next.reload), New),
+                stat("Pumping", share(now.pumping()), share(next.pumping()), Gain),
+                stat("Holds dry to", holds_dry(now), holds_dry(next), Gain),
             ],
-            flavour: "Quick-firing guns that burst their rounds among aircraft.",
+            flavour: "Heavier pumps send the sea back over the side before a holed compartment floods.",
         },
         Card::MoreAntiAir => Face {
             kind: Kind::AntiAir,
             name: "More AA Guns",
             rank: (now.aa_mounts, Some(limits::AA_MOUNTS)),
             stats: vec![stat("Guns", flak.mounts, flak_next.mounts, Gain)],
-            flavour: "Another pair of guns, on the bridge wings and then between the funnels.",
+            flavour: "Another pair of guns, abaft the after funnel and then between the funnels.",
         },
         Card::HeavyAntiAir => Face {
             kind: Kind::AntiAir,
@@ -398,12 +429,7 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
             kind: Kind::AntiAir,
             name: "AA Loaders",
             rank: (now.aa_loaders, Some(limits::AA_LOADERS)),
-            stats: vec![stat(
-                "Reload",
-                seconds(flak.reload),
-                seconds(flak_next.reload),
-                Gain,
-            )],
+            stats: quicker([("Each mount".into(), flak.reload, flak_next.reload)]),
             flavour: "Clips passed up hand to hand keep the guns firing.",
         },
     }
@@ -466,8 +492,30 @@ fn text(
     .id()
 }
 
-/// Lay the offered cards in a row under `parent`.
-pub fn hand(cmd: &mut Commands, parent: Entity, now: Fittings, design: &Design, art: &Insignia) {
+/// The gems in a card's corner: one for a common card, two for an uncommon one and three,
+/// in gold, for a rare one.
+#[derive(Component)]
+pub struct Gem;
+impl Gem {
+    pub(crate) fn count(rarity: Rarity) -> usize {
+        match rarity {
+            Rarity::Common => 1,
+            Rarity::Uncommon => 2,
+            Rarity::Rare => 3,
+        }
+    }
+    fn color(rarity: Rarity) -> Color {
+        match rarity {
+            Rarity::Common => Color::srgb_u8(150, 168, 172),
+            Rarity::Uncommon => Color::srgb_u8(222, 234, 240),
+            Rarity::Rare => Color::srgb_u8(255, 200, 84),
+        }
+    }
+}
+
+/// Lay the hand on offer in a row under `parent`.
+pub fn hand(cmd: &mut Commands, parent: Entity, run: &Run, art: &Insignia) {
+    let (now, design) = (run.fittings, run.ship.design());
     let row = cmd
         .spawn((
             Hand::default(),
@@ -481,7 +529,7 @@ pub fn hand(cmd: &mut Commands, parent: Entity, now: Fittings, design: &Design, 
             ChildOf(parent),
         ))
         .id();
-    for (slot, card) in now.offers().into_iter().enumerate() {
+    for (slot, card) in run.offers().into_iter().enumerate() {
         spawn_card(cmd, row, slot, face(card, now, design), card, art);
     }
 }
@@ -614,6 +662,9 @@ fn spawn_card(
             ))
             .id();
         text(cmd, ribbon, "NEW", 11., Color::srgb_u8(30, 24, 8));
+    }
+    if let Some(rarity) = card.rarity() {
+        rarity_gems(cmd, window, rarity);
     }
 
     // Name and rank.
@@ -752,6 +803,41 @@ fn spawn_card(
     ));
 }
 
+/// How rare the card is, as gems in the art window's top left corner.
+fn rarity_gems(cmd: &mut Commands, window: Entity, rarity: Rarity) {
+    let row = cmd
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: px(9),
+                left: px(9),
+                column_gap: px(4),
+                ..default()
+            },
+            ChildOf(window),
+        ))
+        .id();
+    let color = Gem::color(rarity);
+    for _ in 0..Gem::count(rarity) {
+        let mut gem = cmd.spawn((
+            Gem,
+            Node {
+                width: px(10),
+                height: px(10),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::MAX,
+                ..default()
+            },
+            BackgroundColor(color),
+            BorderColor::all(mix(color, navy(), 0.55)),
+            ChildOf(row),
+        ));
+        if rarity == Rarity::Rare {
+            gem.insert(BoxShadow::new(color, px(0), px(0), px(1), px(5)));
+        }
+    }
+}
+
 /// Deal the hand in one card after another, then lift and brighten whichever is pointed at.
 pub fn animate(
     time: Res<Time>,
@@ -817,5 +903,57 @@ pub fn park_pointer(
         hand.parked = true;
         let edge = window.physical_size().as_vec2() - 1.;
         window.set_physical_cursor_position(Some(spot.clamp(Vec2::ZERO, edge).as_dvec2()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shipvivor_shipyard::Gunhouse;
+
+    #[test]
+    fn a_loader_card_shows_its_share_and_the_time_for_each_bore_aboard() {
+        let mut design = Design::breakwater();
+        let at = design.gun_stations()[0].berth.module;
+        let house = design.modules()[at].gunhouse;
+        design.rearm(at, Gunhouse { bore: 6, ..house }).unwrap();
+        let now = Fittings {
+            loader: 1,
+            ..Fittings::default()
+        };
+        let figures = |card| {
+            face(card, now, &design)
+                .stats
+                .iter()
+                .map(|s| (s.label.to_string(), s.before.clone(), s.after.clone()))
+                .collect::<Vec<_>>()
+        };
+        let next = now.with(Card::Loader);
+        let time = |f: Fittings, inches| seconds(f.reload_for(inches));
+        let row = |inches| {
+            (
+                format!("{inches} in"),
+                time(now, inches),
+                time(next, inches),
+            )
+        };
+        assert_eq!(
+            figures(Card::Loader),
+            [
+                ("Reload".into(), String::new(), "-15%".into()),
+                row(4),
+                row(6),
+            ]
+        );
+        // Each bore loads at its own pace, and every one gets the same share off.
+        assert!(now.reload_for(6) > now.reload_for(4));
+        for inches in [4, 6] {
+            let share = next.reload_for(inches) / now.reload_for(inches);
+            assert!((share - 0.85).abs() < 1e-4);
+        }
+        // The close-range loaders read the same way, for their one gun.
+        let wing = figures(Card::QuickSecondaries);
+        assert_eq!(wing[0].2, "-15%");
+        assert_eq!(wing[1].0, "Each gun");
     }
 }

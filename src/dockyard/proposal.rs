@@ -3,6 +3,7 @@
 //! whether the change helps, so the column reads without labels.
 use super::*;
 use cards::Change;
+use shipvivor_encounter::TurretLayout;
 use shipvivor_shipyard::GunStation;
 
 const KNOTS: f32 = 1.94384;
@@ -10,7 +11,7 @@ const KNOTS: f32 = 1.94384;
 /// What a figure is about: a pictogram, or a word where no pictogram fits.
 enum Mark {
     Icon(Handle<Image>),
-    Word(&'static str),
+    Word(std::borrow::Cow<'static, str>),
 }
 
 fn figure(
@@ -34,7 +35,7 @@ fn figure(
     );
     match mark {
         Mark::Icon(image) => icon(cmd, row, image, muted(), 16.),
-        Mark::Word(word) => text(cmd, row, word, 12., muted()),
+        Mark::Word(word) => text(cmd, row, word.into_owned(), 12., muted()),
     }
     if !before.is_empty() && before != after {
         text(cmd, row, before, 14., muted());
@@ -161,7 +162,7 @@ fn stat_art(label: &str, card: Card, art: &Insignia) -> Option<Handle<Image>> {
     );
     let flak = matches!(
         card,
-        Card::AntiAir | Card::MoreAntiAir | Card::HeavyAntiAir | Card::QuickAntiAir
+        Card::MoreAntiAir | Card::HeavyAntiAir | Card::QuickAntiAir
     );
     Some(match label {
         "Reload" if flak => art.fitting(Card::QuickAntiAir),
@@ -172,6 +173,8 @@ fn stat_art(label: &str, card: Card, art: &Insignia) -> Option<Handle<Image>> {
         // The largest round the plate turns aside.
         "Stops" => art.fitting(Card::Shells),
         "Engine" => art.fitting(Card::Turbines),
+        "Pumping" => art.fitting(Card::Pumps),
+        "Holds dry to" => art.hull.clone(),
         "Turret" => art.turret.clone(),
         "Range" => art.fitting(Card::SecondaryRange),
         "Reload" if secondary => art.fitting(Card::QuickSecondaries),
@@ -251,27 +254,35 @@ pub(super) fn details(
                 );
             }
         }
-        DockJob::Calibre(inches) => {
-            let old = current.round().calibre_inches() as u16;
-            let stations = design.gun_stations();
-            let paired_only = stations.iter().all(GunStation::paired);
-            if old == inches {
+        DockJob::Calibre { at, from, to } => {
+            let Some(station) = station_on(design, at) else {
+                return;
+            };
+            if from == to {
                 hint(cmd, spec, "Fitted");
                 return;
             }
+            let barrels = station.gunhouse.barrels;
             if !fits {
-                let twin = shipvivor_campaign::Fittings {
-                    turrets: shipvivor_encounter::TurretLayout::Twin,
-                    ..current
+                let at_beam = |beam: ShipBeam, barrels| {
+                    shipvivor_campaign::Fittings {
+                        turrets: barrels,
+                        ..current
+                    }
+                    .capacity_for(beam, station.paired())
+                        >= to
                 };
-                let why = if let Some(b) = catalog::required_beam(current, inches, paired_only) {
-                    format!("Needs {} beam, {:.1} m", b.name(), b.metres())
-                } else if let Some(b) = catalog::required_beam(twin, inches, paired_only) {
-                    format!("Needs twin turrets, {} beam", b.name())
-                } else if let Some(b) = catalog::required_beam(current, inches, false) {
-                    format!("Needs a centre turret, {} beam", b.name())
-                } else {
-                    "Needs twin centre turrets, Capital beam".into()
+                let beam = ShipBeam::ALL.into_iter().find(|&b| at_beam(b, barrels));
+                let why = match (beam, station.paired()) {
+                    (Some(b), _) => format!("Needs {} beam, {:.1} m", b.name(), b.metres()),
+                    _ if ShipBeam::ALL
+                        .into_iter()
+                        .any(|b| at_beam(b, TurretLayout::Single)) =>
+                    {
+                        "Needs fewer barrels".into()
+                    }
+                    (None, true) => "Too big for a wing gallery".into(),
+                    (None, false) => "Too big for this cradle".into(),
                 };
                 note(cmd, spec, art, why);
             }
@@ -280,19 +291,19 @@ pub(super) fn details(
                 spec,
                 art,
                 art.fitting(Card::Shells),
-                (f32::from(old), f32::from(inches)),
+                (f32::from(from), f32::from(to)),
                 "in",
                 0,
                 Some(true),
             );
-            if fits {
-                let planned = run.projected_fittings(job);
+            if let Some(after) = run.projected_design(job).and_then(|d| station_on(&d, at)) {
+                let (now, then) = (current.for_station(&station), current.for_station(&after));
                 delta(
                     cmd,
                     spec,
                     art,
                     art.fitting(Card::Loader),
-                    (current.reload(), planned.reload()),
+                    (now.reload(), then.reload()),
                     "s",
                     1,
                     Some(false),
@@ -303,26 +314,81 @@ pub(super) fn details(
                     spec,
                     art,
                     art.fitting(Card::TrainingGear),
-                    (current.traverse(), planned.traverse()),
+                    (now.traverse(), then.traverse()),
                     "deg/s",
                     0,
                     Some(true),
                 );
-                if let Some(wing) = stations.iter().find(|s| s.paired()) {
-                    figure(
-                        cmd,
-                        spec,
-                        art,
-                        Mark::Icon(art.wing_turrets.clone()),
-                        String::new(),
-                        format!(
-                            "{:.0} in",
-                            planned.for_station(wing).round().calibre_inches()
-                        ),
-                        paper(),
-                    );
-                }
             }
+        }
+        DockJob::Barrels { at, from, to } => {
+            let Some(station) = station_on(design, at) else {
+                return;
+            };
+            if !fits {
+                note(cmd, spec, art, "Too heavy for this beam and bore");
+            }
+            delta(
+                cmd,
+                spec,
+                art,
+                art.fitting(Card::TripleTurrets),
+                (from.count() as f32, to.count() as f32),
+                "",
+                0,
+                Some(true),
+            );
+            // The heaviest bore the cradle carries with these barrels.
+            let cradle = |barrels: TurretLayout| {
+                f32::from(
+                    shipvivor_campaign::Fittings {
+                        turrets: barrels,
+                        ..current
+                    }
+                    .capacity_for(run.beam_class(), station.paired()),
+                )
+            };
+            delta(
+                cmd,
+                spec,
+                art,
+                art.fitting(Card::Shells),
+                (cradle(from), cradle(to)),
+                "in",
+                0,
+                Some(true),
+            );
+        }
+        DockJob::Barbette { at, .. } => {
+            let Some(before) = station_on(design, at) else {
+                return;
+            };
+            if !fits {
+                note(cmd, spec, art, "Nothing beside it to fire over");
+                return;
+            }
+            let Some(after) = run.projected_design(job).and_then(|d| station_on(&d, at)) else {
+                return;
+            };
+            let travel = |gun: &GunStation| 2. * (gun.half_arc - gun.inner_mask).to_degrees();
+            delta(
+                cmd,
+                spec,
+                art,
+                art.raise.clone(),
+                (before.lift(), after.lift()),
+                "m",
+                1,
+                None,
+            );
+            arcs(
+                cmd,
+                spec,
+                art,
+                &[&after],
+                Some(travel(&before)),
+                travel(&after),
+            );
         }
         DockJob::Move { from, .. } | DockJob::Replace { at: from, .. } => {
             // A move is always between adjacent frames, so the old and new station correspond.
@@ -380,40 +446,10 @@ pub(super) fn details(
                 0,
                 Some(false),
             );
-            // On the last order the dock's own warning says the bay will sail empty.
-            if module == DockModule::Reserve && !run.spends_last_order(job) {
+            // Short of a turret's points, the dock's own warning says the bay will sail empty.
+            if module == DockModule::Reserve && !run.leaves_bay_empty(job) {
                 hint(cmd, spec, "Then select the new bay for a turret");
             }
-        }
-        DockJob::Fitting(Card::TripleTurrets | Card::QuadTurrets) | DockJob::TwinTurrets => {
-            if !fits {
-                note(cmd, spec, art, "Too heavy for this beam and bore");
-                return;
-            }
-            let after = run.projected_fittings(job);
-            delta(
-                cmd,
-                spec,
-                art,
-                art.fitting(Card::TripleTurrets),
-                (current.turrets.count() as f32, after.turrets.count() as f32),
-                "",
-                0,
-                Some(true),
-            );
-            delta(
-                cmd,
-                spec,
-                art,
-                art.fitting(Card::Shells),
-                (
-                    f32::from(current.capacity_for(run.beam_class(), false)),
-                    f32::from(after.capacity_for(run.beam_class(), false)),
-                ),
-                "in",
-                0,
-                Some(true),
-            );
         }
         // Thicker plate waits for a broader beam.
         DockJob::Fitting(_) if !fits => match run.refusal(job) {
@@ -437,9 +473,11 @@ pub(super) fn details(
         }
         DockJob::Fitting(card) => {
             for stat in cards::face(card, current, design).stats {
-                let mark =
-                    stat_art(stat.label, card, art).map_or(Mark::Word(stat.label), Mark::Icon);
-                let color = if stat.before.is_empty() {
+                let mark = stat_art(&stat.label, card, art)
+                    .map_or_else(|| Mark::Word(stat.label.clone()), Mark::Icon);
+                // A figure with nothing before it is new, unless it is the gain itself,
+                // such as the share a loader takes off every reload.
+                let color = if stat.before.is_empty() && !matches!(stat.change, Change::Gain) {
                     Change::New.color()
                 } else {
                     stat.change.color()
@@ -448,6 +486,14 @@ pub(super) fn details(
             }
         }
     }
+}
+
+/// The first main turret standing on module `at`.
+fn station_on(design: &shipvivor_shipyard::Design, at: usize) -> Option<GunStation> {
+    design
+        .gun_stations()
+        .into_iter()
+        .find(|g| g.berth.module == at)
 }
 
 /// What a section from the yard's stock brings aboard besides its length.
@@ -608,6 +654,7 @@ fn module_details(
             paper(),
         );
         let barrels = match battery.turrets.count() {
+            1 => art.turret.clone(),
             2 => art.twin.clone(),
             3 => art.fitting(Card::TripleTurrets),
             _ => art.fitting(Card::QuadTurrets),

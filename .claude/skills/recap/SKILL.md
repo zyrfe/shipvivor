@@ -22,6 +22,8 @@ ls -t "${CLAUDE_SKILL_DIR}/../../../work/runs"/*.log | head -n 8
 
 - A code in the arguments, in any case: read `<CODE>.log`. If none matches, list the
   recent codes with their `# started:` lines and ask which one they meant.
+- "build N": every run whose `# build:` line is N. That is the number at the foot of the
+  title screen, counted up by each release build.
 - "last N": the N newest.
 - Nothing: the newest run, plus every other run whose `# launched:` line matches it.
   Those were one sitting of the game. Say how many runs you found.
@@ -33,7 +35,8 @@ ls -t "${CLAUDE_SKILL_DIR}/../../../work/runs"/*.log | head -n 8
 
 Read each log whole. They run to a few hundred lines.
 
-- `#` header lines: the code, when the run started, when the game was launched, and the
+- `#` header lines: the code, when the run started, the build (`dev` for a debug build;
+  logs from before 2026-11-25 have no build line), when the game was launched, and the
   seed (`SHIPVIVOR_SEED=<seed> cargo run` sails the same waters again).
 - Every other line: wall clock (UTC), leg clock (m:ss sailed this leg, frozen in menus),
   an event tag, details.
@@ -41,9 +44,14 @@ Read each log whole. They run to a few hundred lines.
   hits taken by section, gains, enemy rounds fired, and the nearest enemy. A `quiet`
   pulse means nothing happened.
 - One-off events: `leg`, `ship`, `sunk`, `contact` (a cruiser or bigger put to sea),
-  `spotted`, `flagship`, `torpedo`, `collide`, `heavy` (one blow of 6% of the hull or
-  more), `gear`, `section`, `hull` (fell through 75/50/25/10%), `peril`, `base`,
-  `stores`, `star`, `extract`, `level`, `refit`, `pause`/`resume`, `capture`.
+  `spotted`, `harriers` (a formation of 2–5 took off), `steam` (the boss is raising
+  steam, 30 s before she sails), `flagship` (the boss sailed), `torpedo`, `collide`,
+  `heavy` (one blow of 6% of the hull or more), `gear`, `section`, `hull` (fell through
+  75/50/25/10%), `peril`, `base`, `stores`, `star`, `clock` (the clock ran out: the leg
+  goes on, a star down), `level`, `refit`, `pause`/`resume`, `capture`.
+- The `leg` line gives the clock to beat, the goals, the boss and the points a star
+  pays. A patrol ends only when every base is down and any boss that sailed is sunk,
+  or she sinks. Logs from before 2026-11-25 also show `extract` and "time ran out".
 - `leg-end` + `tally` close each leg. `run-end`, `legs` and `tally` close a won or lost
   run. `end` means it was given up or the game was closed. A log that ends with neither
   stops where the game did, so it probably crashed or was killed. Say so.

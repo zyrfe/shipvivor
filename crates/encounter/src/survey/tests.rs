@@ -77,19 +77,18 @@ fn a_wall_round_a_gate_cuts_it_off() {
 #[test]
 fn a_walled_harbour_can_neither_launch_nor_be_shelled() {
     let mut chart = charted(5);
-    let harbour = chart.harbours[2].pos;
+    // The heavy yard, with three factories.
+    let base = chart.harbours.len() - 1;
+    let harbour = chart.harbours[base].pos;
     // Beyond the slip's launching lane, so the slip is clear but leads nowhere.
     chart.islets.extend(wall(harbour, 175.));
     let found = defects(&chart);
     assert!(
-        found.contains(&Defect::BerthUnreachable { base: 2 }),
+        found.contains(&Defect::BerthUnreachable { base }),
         "{found:?}"
     );
-    assert!(found.contains(&Defect::YardHidden { base: 2 }), "{found:?}");
-    assert!(found.contains(&Defect::FactoryHidden {
-        base: 2,
-        factory: 2
-    }));
+    assert!(found.contains(&Defect::YardHidden { base }), "{found:?}");
+    assert!(found.contains(&Defect::FactoryHidden { base, factory: 2 }));
 }
 
 #[test]
@@ -97,7 +96,7 @@ fn a_wall_round_the_start_strands_the_ship() {
     let mut chart = charted(6);
     chart.islets.extend(wall(Vec2::ZERO, 90.));
     let found = defects(&chart);
-    for gate in 0..5 {
+    for gate in 0..chart.gates.len() {
         assert!(
             found.contains(&Defect::GateUnreachable { gate }),
             "{found:?}"
@@ -147,12 +146,22 @@ fn a_hairpin_course_fails() {
 #[test]
 fn a_passage_takes_its_bases_in_order_with_the_heavy_yard_last() {
     let mut chart = charted(9);
-    chart.harbours.swap(0, 2);
+    // The heavy yard and the first base change places, keeping their stages.
+    let last = chart.harbours.len() - 1;
+    let (first, heavy) = (chart.harbours[0], chart.harbours[last]);
+    (chart.harbours[0].pos, chart.harbours[0].heading) = (heavy.pos, heavy.heading);
+    (chart.harbours[last].pos, chart.harbours[last].heading) = (first.pos, first.heading);
     let found = defects(&chart);
     assert!(
         found
             .iter()
-            .any(|d| matches!(d, Defect::BasesOutOfOrder { a: 1, b: 2, .. })),
+            .any(|d| matches!(d, Defect::BasesOutOfOrder { a: 1, b, .. } if *b == last)),
+        "{found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .any(|d| matches!(d, Defect::BasesOutOfOrder { a: 0, b: 1, .. })),
         "{found:?}"
     );
     assert!(

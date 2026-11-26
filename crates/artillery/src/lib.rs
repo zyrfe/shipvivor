@@ -10,16 +10,21 @@ mod flight;
 pub use flight::ShellArc;
 
 /// The player's main turret fitting. Its muzzle offsets are in unscaled model units.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// The player's turrets are built single and take more barrels one at a time in the
+/// yard. Enemy mounts are twins.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TurretLayout {
     #[default]
+    Single,
     Twin,
     Triple,
     Quad,
 }
 impl TurretLayout {
+    pub const ALL: [Self; 4] = [Self::Single, Self::Twin, Self::Triple, Self::Quad];
     pub const fn count(self) -> usize {
         match self {
+            Self::Single => 1,
             Self::Twin => 2,
             Self::Triple => 3,
             Self::Quad => 4,
@@ -27,11 +32,20 @@ impl TurretLayout {
     }
     pub fn barrel_x(self, tube: usize) -> f32 {
         let spacing = match self {
+            Self::Single => 0.,
             Self::Twin => 0.88,
             Self::Triple => 0.70,
             Self::Quad => 0.60,
         };
         (tube as f32 - (self.count() - 1) as f32 * 0.5) * spacing
+    }
+    /// One barrel more, if the gunhouse can take it.
+    pub fn more(self) -> Option<Self> {
+        Self::ALL.get(self.count()).copied()
+    }
+    /// One barrel fewer, if it has more than one.
+    pub fn fewer(self) -> Option<Self> {
+        self.count().checked_sub(2).map(|i| Self::ALL[i])
     }
 }
 
@@ -50,7 +64,7 @@ pub fn training_rate(calibre_inches: f32, gear: u16) -> f32 {
 /// The crew-worked close-range battery as fitted.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Secondaries {
-    /// Guns on each beam.
+    /// Guns on each side: the stock pair on the bow and the beam, then more on the beam.
     pub per_side: usize,
     /// Damage a hit does.
     pub damage: u16,
@@ -62,22 +76,23 @@ pub struct Secondaries {
     pub barrels: usize,
 }
 impl Secondaries {
+    /// A gun each side amidships and another on the bow.
     pub const STOCK: Self = Self {
-        per_side: 1,
+        per_side: 2,
         damage: 1,
         reload: 0.82,
         range: 160.,
         barrels: 1,
     };
-    /// The beam has deck room for this many guns a side.
-    pub const MOST_PER_SIDE: usize = 3;
+    /// The deck has room for this many guns a side: the stock two and two more abeam.
+    pub const MOST_PER_SIDE: usize = 4;
 }
 
 /// The light anti-aircraft battery as fitted. Each mount fires a time-fused round that
 /// bursts where it leads an aircraft to be.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AntiAir {
-    /// Mounts aboard, in port and starboard pairs. None until the battery is fitted.
+    /// Mounts aboard, in port and starboard pairs.
     pub mounts: usize,
     /// Damage a burst does to an aircraft caught in it.
     pub damage: u16,
@@ -87,12 +102,17 @@ pub struct AntiAir {
     pub range: f32,
 }
 impl AntiAir {
-    /// The battery before any is fitted: its figures are what the first pair brings.
-    pub const NONE: Self = Self {
-        mounts: 0,
+    /// The pair Breakwater is built with, on her bridge wings.
+    pub const STOCK: Self = Self {
+        mounts: 2,
         damage: 1,
         reload: 1.1,
         range: 280.,
+    };
+    /// No guns at all, with the stock pair's figures.
+    pub const NONE: Self = Self {
+        mounts: 0,
+        ..Self::STOCK
     };
     /// The deck has room for three pairs.
     pub const MOST_MOUNTS: usize = 6;
@@ -113,6 +133,14 @@ impl ShellClass {
             Self::Standard => "Light",
             Self::Breaker => "Reinforced",
             Self::Heavy => "Capital",
+        }
+    }
+    /// Whether a round of this class striking square opens sound plate of `grade`.
+    pub fn opens(self, grade: ArmorGrade) -> bool {
+        match self {
+            Self::Standard => grade == ArmorGrade::Light,
+            Self::Breaker => grade != ArmorGrade::Capital,
+            Self::Heavy => true,
         }
     }
 }
@@ -185,6 +213,10 @@ impl ArmorPanel {
         }
     }
 
+    pub fn grade(&self) -> ArmorGrade {
+        self.grade
+    }
+
     pub fn is_breached(&self, cell: Cell) -> bool {
         self.breaches.contains_key(&cell)
     }
@@ -248,17 +280,10 @@ impl ArmorPanel {
             return Ok(Impact::PassedThrough);
         }
         // Authored prototype outcomes for contact with any remaining solid material.
-        match (angle, shell, self.grade) {
-            (ContactAngle::Glancing, _, _) => Ok(Impact::Bounced),
-            (
-                ContactAngle::Direct,
-                ShellClass::Standard,
-                ArmorGrade::Reinforced | ArmorGrade::Capital,
-            )
-            | (ContactAngle::Direct, ShellClass::Breaker, ArmorGrade::Capital) => {
-                Ok(Impact::Embedded)
-            }
-            (ContactAngle::Direct, _, _) => {
+        match angle {
+            ContactAngle::Glancing => Ok(Impact::Bounced),
+            ContactAngle::Direct if !shell.opens(self.grade) => Ok(Impact::Embedded),
+            ContactAngle::Direct => {
                 for &cell in footprint {
                     let opening = self.breaches.entry(cell).or_insert(bore);
                     *opening = (*opening).max(bore);

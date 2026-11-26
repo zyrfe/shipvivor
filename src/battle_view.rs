@@ -11,6 +11,7 @@ mod harbour_signals;
 mod mainland;
 #[path = "spotter_model.rs"]
 pub(crate) mod spotter_model;
+use crate::camera::{self, FollowCamera};
 use crate::ensign::Side;
 use crate::scene;
 use crate::state::{Campaign, Encounter, Mode, PlayerHelm};
@@ -20,7 +21,7 @@ use foreshore::Coast;
 pub(crate) use foreshore::shoals;
 use harbour_models::Harbour;
 pub(crate) use harbour_signals::{
-    animate as animate_harbour_signals, dye as dye_ensigns, fly_pennant,
+    animate as animate_harbour_signals, dye as dye_ensigns, fly_pennant, stream_funnel_smoke,
 };
 pub(crate) use mainland::MainlandPlugin;
 use shipvivor_encounter::{
@@ -33,6 +34,8 @@ enum Shape {
     Spotter,
     AttackPlane,
     MooredPlane,
+    /// A harrier lying at a base's mooring, by its berth there.
+    MooredHarrier(u8),
     Hangar(bool),
     Propeller,
     Coast(Coast),
@@ -51,8 +54,17 @@ enum Shape {
     ShoreGun(u8, u8),
     ShoreShell,
     Torpedo,
+    /// An enemy torpedo, red in the head.
+    EnemyTorpedo,
+    /// A stretch of the white bubble track an enemy torpedo leaves, nearest it first.
+    Track(u8),
+    /// A torpedo boat's bow wave either side and the wash under her stern, at speed.
+    Wash(u8),
     Ship(EnemyClass),
-    Gun(u8, EnemyClass),
+    /// The lip of one of a ship's funnels, which her smoke streams from.
+    Stack(EnemyClass, u8),
+    /// One of a ship's turrets, and the barrels in it.
+    Gun(u8, EnemyClass, u8),
     Socket(u8),
     GunFire(u8),
     Soot(u8),
@@ -61,6 +73,9 @@ enum Shape {
     ImpactFlash,
     Streak(u8),
     Scar(u8, bool),
+    /// A mark where a round struck a shore gunhouse and left it standing: the gun, the
+    /// mark, and whether the round holed the plate.
+    Pock(u8, u8, bool),
     Director,
     DentRing,
 
@@ -79,10 +94,18 @@ enum Shape {
     FoamRing,
     Splash,
     Debris(u8),
+    /// A lump of ice thrown up where a berg breaks.
+    Shard(u8),
     Fire,
 }
 #[derive(Component, Clone, Copy, Hash, PartialEq, Eq)]
 pub(crate) struct Actor(u64, Shape);
+
+/// The scene key for drydock `dock` of the port with body `id`: the first dock keeps the
+/// port's own, and the others are set apart in bits no serial number reaches.
+fn dock_key(id: u64, dock: usize) -> u64 {
+    id | ((dock as u64) << 48)
+}
 #[derive(Resource)]
 pub struct Kit {
     spotter: Handle<Mesh>,
@@ -133,8 +156,11 @@ pub struct Kit {
 }
 struct VesselMeshes {
     deckwork: Handle<Mesh>,
-    gun: Handle<Mesh>,
+    /// Her turret with one barrel, two, three and four.
+    guns: [Handle<Mesh>; 4],
     masthead: f32,
+    /// Each funnel's lip on her deckwork, and the width of its mouth.
+    funnels: Vec<(Vec3, f32)>,
 }
 impl Kit {
     pub fn masthead(&self, class: EnemyClass) -> f32 {
@@ -254,30 +280,24 @@ pub fn setup(
         lighters: [0, 1, 2].map(|progress| meshes.add(harbour_models::lighter(progress))),
         rigging: meshes.add(harbour_models::plate_rigging()),
         plate: meshes.add(harbour_models::suspended_plate()),
-        fleet: [
-            EnemyClass::Freighter,
-            EnemyClass::Patrol,
-            EnemyClass::Destroyer,
-            EnemyClass::Cruiser,
-            EnemyClass::Battleship,
-            EnemyClass::Parliament,
-            EnemyClass::Regent,
-        ]
-        .into_iter()
-        .map(|class| {
-            use bevy::camera::primitives::MeshAabb;
-            let deckwork = crate::fleet_models::superstructure(class);
-            let bounds = deckwork.get_aabb().expect("deckwork has vertices");
-            (
-                class,
-                VesselMeshes {
-                    masthead: bounds.max().y,
-                    deckwork: meshes.add(deckwork),
-                    gun: meshes.add(crate::fleet_models::gun(class)),
-                },
-            )
-        })
-        .collect(),
+        fleet: EnemyClass::ALL
+            .into_iter()
+            .map(|class| {
+                use bevy::camera::primitives::MeshAabb;
+                let deckwork = crate::fleet_models::superstructure(class);
+                let bounds = deckwork.get_aabb().expect("deckwork has vertices");
+                (
+                    class,
+                    VesselMeshes {
+                        masthead: bounds.max().y,
+                        deckwork: meshes.add(deckwork),
+                        guns: [1, 2, 3, 4]
+                            .map(|barrels| meshes.add(crate::fleet_models::gun(class, barrels))),
+                        funnels: crate::fleet_models::funnels(class),
+                    },
+                )
+            })
+            .collect(),
         cube: meshes.add(Cuboid::default()),
         shell: meshes.add(crate::ordnance::shell()),
         spray: meshes.add(crate::ordnance::spray()),
@@ -300,8 +320,87 @@ pub fn setup(
         foam: material(196, 240, 222, true),
     });
 }
+/// The air station's strafer is the attack plane's airframe at this share of its size,
+/// 5 m across. A harrier is drawn at the second share, a little over 3 m across.
+const STRAFER: f32 = 0.315;
+const HARRIER: f32 = 0.2;
+/// Moored, an airframe rides with its origin this many model metres above the water,
+/// which puts its floats just under.
+const AFLOAT: f32 = 2.94;
+/// Seconds at the end of a downed aircraft's effect over which its wreck goes under,
+/// and the model metres it settles by then, enough to take the tail down too.
+const SINKING: f32 = 1.8;
+const SUNK: f32 = 9.;
+/// Metres of the bubble track drawn behind an enemy torpedo, in stretches, and how wide
+/// it is at the torpedo and at its far end.
+const TRACK: (f32, u8) = (72., 4);
+const TRACK_WIDTH: (f32, f32) = (0.55, 1.5);
+
+/// The white track an enemy torpedo leaves along its run, widening as its bubbles rise
+/// and spread behind it. It is what gives the torpedo away at range.
+fn enemy_track(
+    fish: &shipvivor_encounter::Torpedo,
+    sea: &crate::seascape::Sea,
+    wanted: &mut HashMap<Actor, Transform>,
+) {
+    let (length, stretches) = TRACK;
+    let stretch = length / f32::from(stretches);
+    let back = -fish.body.forward();
+    for k in 0..stretches {
+        let near = f32::from(k) * stretch + 1.5;
+        let far = (near + stretch).min(fish.run());
+        if far <= near {
+            break;
+        }
+        let middle = fish.body.pos + back * (0.5 * (near + far));
+        let spread = (0.5 * (near + far) / length).min(1.);
+        let width = TRACK_WIDTH.0 + (TRACK_WIDTH.1 - TRACK_WIDTH.0) * spread;
+        let at = Body {
+            pos: middle,
+            ..fish.body
+        };
+        let xf = pose(&at, sea.height(middle) + 0.04).with_scale(Vec3::new(
+            width,
+            0.07,
+            0.5 * (far - near),
+        ));
+        wanted.insert(Actor(fish.body.id, Shape::Track(k)), xf);
+    }
+}
+
 fn pose(b: &Body, h: f32) -> Transform {
     Transform::from_xyz(b.pos.x, h, b.pos.y).with_rotation(Quat::from_rotation_y(-b.heading))
+}
+/// Shrink each aircraft flying close past the camera, and the propeller turning on its
+/// nose, so that it never blots out the view (see `camera::lens_clearance`).
+fn clear_lens(wanted: &mut HashMap<Actor, Transform>, lens: &Transform, projection: &Projection) {
+    let airframes: Vec<(Actor, Transform)> = (wanted.iter())
+        .filter(|(key, _)| {
+            matches!(
+                key.1,
+                Shape::Spotter | Shape::AttackPlane | Shape::MooredPlane | Shape::MooredHarrier(_)
+            )
+        })
+        .map(|(key, frame)| (*key, *frame))
+        .collect();
+    for (key, frame) in airframes {
+        let reach = spotter_model::REACH * frame.scale.x;
+        let clear = camera::lens_clearance(lens, projection, frame.translation, reach);
+        if clear >= 1. {
+            continue;
+        }
+        let mut shrink = |part: Actor| {
+            if let Some(xf) = wanted.get_mut(&part) {
+                xf.translation = frame.translation + (xf.translation - frame.translation) * clear;
+                xf.scale *= clear;
+            }
+        };
+        shrink(key);
+        // Moored airframes carry their propeller with them; one in the air has it apart.
+        if matches!(key.1, Shape::Spotter | Shape::AttackPlane) {
+            shrink(Actor(key.0, Shape::Propeller));
+        }
+    }
 }
 fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
     let root = cmd.spawn((key, xf, Visibility::default())).id();
@@ -317,9 +416,9 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
     let v = Vec3::new;
     match key.1 {
         Shape::Spotter => part(&kit.spotter, &kit.gunmetal, Vec3::ZERO, Vec3::ONE),
-        Shape::AttackPlane | Shape::MooredPlane => {
+        Shape::AttackPlane | Shape::MooredPlane | Shape::MooredHarrier(_) => {
             part(&kit.attack_plane, &kit.gunmetal, Vec3::ZERO, Vec3::ONE);
-            if key.1 == Shape::MooredPlane {
+            if key.1 != Shape::AttackPlane {
                 part(&kit.propeller, &kit.gunmetal, spotter_model::HUB, Vec3::ONE);
             }
         }
@@ -363,6 +462,10 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
                 .spawn_flag(cmd, root, Side::Enemy, Transform::from_xyz(0., 2.4, 0.));
         }
         Shape::Exhaust(_) => kit.signals.spawn_smoke(cmd, root),
+        Shape::Stack(class, stack) => {
+            let (_, mouth) = kit.fleet[&class].funnels[usize::from(stack)];
+            kit.signals.spawn_funnel_smoke(cmd, root, mouth);
+        }
         Shape::Conveyor => part(&kit.conveyor, &kit.construction, Vec3::ZERO, Vec3::ONE),
         Shape::Factory(harbour, _, live) => part(
             &kit.factories[&(harbour, live)],
@@ -392,15 +495,20 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
             Vec3::ONE,
         ),
         Shape::SecondaryMount(_) => part(
-            &kit.fleet[&EnemyClass::Patrol].gun,
+            &kit.fleet[&EnemyClass::Patrol].guns[0],
             &kit.gunmetal,
             Vec3::ZERO,
             Vec3::ONE,
         ),
         Shape::Tow(_) => part(&kit.cube, &kit.quay, Vec3::ZERO, Vec3::ONE),
-        Shape::Torpedo => {
+        Shape::Torpedo | Shape::EnemyTorpedo => {
+            let head = if key.1 == Shape::Torpedo {
+                &kit.gold
+            } else {
+                &kit.red
+            };
             part(&kit.ball, &kit.dark, v(0., 0., 0.), v(0.29, 0.28, 1.68));
-            part(&kit.ball, &kit.gold, v(0., 0., -1.23), v(0.27, 0.24, 0.52));
+            part(&kit.ball, head, v(0., 0., -1.23), v(0.27, 0.24, 0.52));
             part(&kit.ball, &kit.foam, v(0., 0., 4.), v(0.35, 0.12, 3.7));
             for side in [-1., 1.] {
                 part(
@@ -431,15 +539,16 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
                 kit.signals.spawn_flag(cmd, root, Side::Enemy, at);
             }
         }
-        Shape::Gun(_, class) => {
-            part(&kit.fleet[&class].gun, &kit.gunmetal, Vec3::ZERO, Vec3::ONE);
+        Shape::Gun(_, class, barrels) => {
+            let gun = &kit.fleet[&class].guns[usize::from(barrels.clamp(1, 4) - 1)];
+            part(gun, &kit.gunmetal, Vec3::ZERO, Vec3::ONE);
             if class.is_flagship() {
                 part(&kit.drum, &kit.gold, v(0., 1.36, 0.), v(1.18, 0.11, 1.18));
             }
         }
         Shape::Socket(_) => part(&kit.drum, &kit.dark, Vec3::ZERO, Vec3::ONE),
         Shape::Primer(_) => part(&kit.ball, &kit.foam, Vec3::ZERO, v(0.5, 0.35, 0.5)),
-        Shape::Scar(_, open) => part(
+        Shape::Scar(_, open) | Shape::Pock(_, _, open) => part(
             &kit.scars[usize::from(open)],
             &kit.terrain,
             Vec3::ZERO,
@@ -513,6 +622,7 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
             );
         }
         Shape::FoamRing => part(&kit.ring, &kit.foam, Vec3::ZERO, Vec3::ONE),
+        Shape::Track(_) | Shape::Wash(_) => part(&kit.ball, &kit.foam, Vec3::ZERO, Vec3::ONE),
         Shape::Fire | Shape::GunFire(_) => {
             part(&kit.ball, &kit.flame, Vec3::ZERO, v(1.2, 2.4, 1.4));
             part(&kit.ball, &kit.gold, v(-0.6, 0., -0.45), v(0.7, 1.3, 1.));
@@ -523,6 +633,7 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
             part(&kit.plume, &kit.foam, v(0., 0.54, 0.), v(0.26, 1.08, 0.28));
         }
         Shape::Debris(_) => part(&kit.cube, &kit.dark, Vec3::ZERO, v(0.8, 0.7, 1.3)),
+        Shape::Shard(_) => part(&kit.cube, &kit.foam, Vec3::ZERO, v(1., 0.75, 1.25)),
     }
 }
 pub fn sync(
@@ -533,6 +644,7 @@ pub fn sync(
     helm: Res<PlayerHelm>,
     sea: Res<crate::seascape::Sea>,
     mut actors: Query<(Entity, &Actor, &mut Transform)>,
+    lens: Option<Single<(&Transform, &Projection), (With<FollowCamera>, Without<Actor>)>>,
 ) {
     let mut wanted = HashMap::new();
     if !matches!(run.mode, Mode::Title | Mode::Trial) {
@@ -549,7 +661,7 @@ pub fn sync(
             );
         }
         if let Some(plane) = battle.air_station().and_then(|base| base.aircraft.as_ref()) {
-            let mut airframe = pose(&plane.body, plane.altitude).with_scale(Vec3::splat(0.63));
+            let mut airframe = pose(&plane.body, plane.altitude).with_scale(Vec3::splat(STRAFER));
             airframe.rotate_local_z(plane.bank);
             wanted.insert(Actor(plane.body.id, Shape::AttackPlane), airframe);
             let spin = Transform::from_translation(spotter_model::HUB)
@@ -567,9 +679,31 @@ pub fn sync(
                 };
                 wanted.insert(
                     Actor(port.body.id, Shape::MooredPlane),
-                    pose(&mooring, 1.85 + sea.height(mooring.pos)).with_scale(Vec3::splat(0.63)),
+                    pose(&mooring, AFLOAT * STRAFER + sea.height(mooring.pos))
+                        .with_scale(Vec3::splat(STRAFER)),
                 );
             }
+        }
+        // A harrier is the attack plane drawn small, and its propeller turns faster.
+        for plane in battle.harriers() {
+            let mut airframe = pose(&plane.body, plane.altitude).with_scale(Vec3::splat(HARRIER));
+            airframe.rotate_local_z(plane.bank);
+            wanted.insert(Actor(plane.body.id, Shape::AttackPlane), airframe);
+            let spin = Transform::from_translation(spotter_model::HUB)
+                .with_rotation(Quat::from_rotation_z(battle.at_sea() * 47.));
+            wanted.insert(
+                Actor(plane.body.id, Shape::Propeller),
+                airframe.mul_transform(spin),
+            );
+        }
+        // Each base's harriers lie at its mooring until they take off, wherever her hull
+        // has shoved them.
+        for plane in battle.moored_harriers() {
+            let afloat = AFLOAT * HARRIER + sea.height(plane.body.pos);
+            wanted.insert(
+                Actor(plane.body.id, Shape::MooredHarrier(plane.slot as u8)),
+                pose(&plane.body, afloat).with_scale(Vec3::splat(HARRIER)),
+            );
         }
         for (base_index, (port, plane)) in battle.ports().iter().zip(battle.spotters()).enumerate()
         {
@@ -588,58 +722,76 @@ pub fn sync(
                     airframe.mul_transform(spin),
                 );
             }
-            let yard = Body {
-                pos: port.yard_position(),
-                ..port.body
-            };
-            let state = port.yard_state();
             let harbour = Harbour::for_factories(port.factories().len());
-            let yard_foot = pose(&yard, 3.2);
-            wanted.insert(Actor(port.body.id, Shape::Yard(harbour, state)), yard_foot);
-            if state != YardState::Ruined {
-                let hoist = yard_foot.transform_point(harbour_models::flag_hoist(state));
-                wanted.insert(
-                    Actor(port.body.id, Shape::YardFlag),
-                    Transform::from_translation(hoist),
-                );
-                let (order, cost) = port.build_order();
-                let progress = (u16::from(port.stock) * 3 / u16::from(cost)).min(2) as u8;
-                if harbour == Harbour::Foundry {
-                    let center = yard_foot.transform_point(Vec3::new(0., 0., -4.)).xz();
-                    let heave = sea.swell.height(center) * 0.36;
-                    let lighter = Transform::from_translation(center.extend(heave).xzy())
-                        .with_rotation(yard_foot.rotation);
-                    wanted.insert(Actor(port.body.id, Shape::Lighter(progress)), lighter);
-                    if state == YardState::Working && port.live_factories() > 0 {
-                        let mut crosshead = yard_foot;
-                        crosshead.translation =
-                            yard_foot.transform_point(Vec3::new(0., 14.25, -3.8));
-                        let drop = 6.6 + (run.elapsed * 0.64).sin();
-                        wanted.insert(
-                            Actor(port.body.id, Shape::PlateRigging),
-                            crosshead.with_scale(Vec3::new(1., drop, 1.)),
-                        );
-                        crosshead.translation.y -= drop;
-                        wanted.insert(Actor(port.body.id, Shape::SuspendedPlate), crosshead);
-                    }
-                } else {
-                    let scale = match order {
-                        EnemyClass::Patrol => Vec3::new(0.68, 0.85, 0.63),
-                        EnemyClass::Destroyer => Vec3::new(0.78, 0.95, 0.81),
-                        EnemyClass::Cruiser => Vec3::new(0.94, 1.1, 0.96),
-                        _ => Vec3::new(1.20, 1.35, 1.12),
-                    };
+            for (index, dock) in port.docks().iter().enumerate() {
+                let key = dock_key(port.body.id, index);
+                let yard = Body {
+                    pos: port.dock_position(index),
+                    ..port.body
+                };
+                let state = dock.state();
+                let yard_foot = pose(&yard, 3.2);
+                wanted.insert(Actor(key, Shape::Yard(harbour, state)), yard_foot);
+                if state != YardState::Ruined {
+                    let hoist = yard_foot.transform_point(harbour_models::flag_hoist(state));
                     wanted.insert(
-                        Actor(port.body.id, Shape::Cradle(progress)),
-                        pose(&yard, 3.84).with_scale(scale),
+                        Actor(key, Shape::YardFlag),
+                        Transform::from_translation(hoist),
                     );
+                    let (order, _) = dock.order();
+                    let progress = ((dock.progress() * 3.) as u8).min(2);
+                    if harbour == Harbour::Foundry {
+                        let center = yard_foot.transform_point(Vec3::new(0., 0., -4.)).xz();
+                        let heave = sea.swell.height(center) * 0.36;
+                        let lighter = Transform::from_translation(center.extend(heave).xzy())
+                            .with_rotation(yard_foot.rotation);
+                        wanted.insert(Actor(key, Shape::Lighter(progress)), lighter);
+                        if state == YardState::Working && port.live_factories() > 0 {
+                            let mut crosshead = yard_foot;
+                            crosshead.translation =
+                                yard_foot.transform_point(Vec3::new(0., 14.25, -3.8));
+                            let drop = 6.6 + (run.elapsed * 0.64 + index as f32 * 2.1).sin();
+                            wanted.insert(
+                                Actor(key, Shape::PlateRigging),
+                                crosshead.with_scale(Vec3::new(1., drop, 1.)),
+                            );
+                            crosshead.translation.y -= drop;
+                            wanted.insert(Actor(key, Shape::SuspendedPlate), crosshead);
+                        }
+                    } else {
+                        let scale = match order {
+                            EnemyClass::Patrol => Vec3::new(0.68, 0.85, 0.63),
+                            EnemyClass::Destroyer => Vec3::new(0.78, 0.95, 0.81),
+                            EnemyClass::Cruiser => Vec3::new(0.94, 1.1, 0.96),
+                            _ => Vec3::new(1.20, 1.35, 1.12),
+                        };
+                        wanted.insert(
+                            Actor(key, Shape::Cradle(progress)),
+                            pose(&yard, 3.84).with_scale(scale),
+                        );
+                    }
+                }
+                if matches!(state, YardState::Damaged | YardState::Burning) {
+                    let t = (run.elapsed * 0.58 + index as f32 * 0.37).fract();
+                    let mut xf = pose(&yard, dock.top() + t * 6.);
+                    xf.translation.x += t * t * 3.;
+                    wanted.insert(
+                        Actor(key, Shape::Smoke),
+                        xf.with_scale(Vec3::splat(0.6 + 1.8 * (t * std::f32::consts::PI).sin())),
+                    );
+                    if state == YardState::Burning {
+                        wanted.insert(
+                            Actor(key, Shape::GunFire(0)),
+                            pose(&yard, 6.6).with_scale(Vec3::splat(2.1)),
+                        );
+                    }
                 }
             }
             if harbour == Harbour::TwinMills && port.live_factories() == 2 {
                 let (a, b) = (port.factory_position(0), port.factory_position(1));
                 let center = a.midpoint(b).extend(3.2).xzy();
                 let bridge = Transform::from_translation(center)
-                    .with_rotation(yard_foot.rotation)
+                    .with_rotation(pose(&port.body, 3.2).rotation)
                     .with_scale(Vec3::new(1., 1., a.distance(b)));
                 wanted.insert(Actor(port.body.id, Shape::Conveyor), bridge);
             }
@@ -649,7 +801,7 @@ pub fn sync(
                     ..port.body
                 };
                 let i = index as u8;
-                let live = factory.live() && state != YardState::Ruined;
+                let live = factory.live();
                 let foot = pose(&mill, 3.2);
                 if index == 0
                     && battle
@@ -668,21 +820,6 @@ pub fn sync(
                     );
                 }
             }
-            if matches!(state, YardState::Damaged | YardState::Burning) {
-                let t = (run.elapsed * 0.58).fract();
-                let mut xf = pose(&yard, port.yard_top() + t * 6.);
-                xf.translation.x += t * t * 3.;
-                wanted.insert(
-                    Actor(port.body.id, Shape::Smoke),
-                    xf.with_scale(Vec3::splat(0.6 + 1.8 * (t * std::f32::consts::PI).sin())),
-                );
-                if state == YardState::Burning {
-                    wanted.insert(
-                        Actor(port.body.id, Shape::GunFire(0)),
-                        pose(&yard, 6.6).with_scale(Vec3::splat(2.1)),
-                    );
-                }
-            }
             wanted.insert(
                 Actor(port.body.id, Shape::Coast(Coast::Yard(harbour))),
                 pose(&port.body, 0.),
@@ -695,25 +832,93 @@ pub fn sync(
                     ..port.body
                 };
                 let i = index as u8;
+                // A heavy battery's gunhouse is drawn larger, on a wider apron.
+                let (apron, scale) = (gun.radius() / 5., gun.mount_scale());
                 wanted.insert(
                     Actor(port.body.id, Shape::GunPlatform(i)),
-                    pose(&platform, 0.),
+                    pose(&platform, 0.).with_scale(Vec3::new(apron, 1., apron)),
                 );
                 let mount = Body {
                     heading: gun.heading,
                     ..platform
                 };
                 let tubes = if gun.live() { gun.barrels } else { 0 };
-                wanted.insert(
-                    Actor(port.body.id, Shape::ShoreGun(i, tubes)),
-                    pose(&mount, 4.),
-                );
+                let house = pose(&mount, 4.).with_scale(Vec3::splat(scale));
+                wanted.insert(Actor(port.body.id, Shape::ShoreGun(i, tubes)), house);
+                // Each round that struck the gunhouse and left it standing shows where
+                // it hit, the heavier the wider, so a damaged gun reads as one.
+                for (k, pock) in gun.pocks().iter().enumerate().filter(|_| gun.live()) {
+                    let toward = Vec3::new(pock.at.x, pock.at.y - 4., -pock.at.z) / scale;
+                    // Rounds aimed at the middle of the shield strike about it, and
+                    // clear of the mantlet that stands out from it round the barrels.
+                    let spread = (k as f32 * 2.39).sin();
+                    let swing = spread.signum() * (0.22 + 0.33 * spread.abs());
+                    let toward = Quat::from_rotation_y(swing) * toward
+                        + Vec3::Y * 0.55 * (k as f32 * 1.71).cos();
+                    let (at, facing) = harbour_models::gunhouse_face(gun.barrels, toward);
+                    // A main-battery round holes the plate; a light gun's only dents it.
+                    let open = pock.calibre >= 3.5;
+                    let size = (0.22 + 0.03 * pock.calibre) / scale;
+                    let mark = Transform::from_translation(at + facing * 0.04)
+                        .with_rotation(
+                            Quat::from_rotation_arc(Vec3::Z, facing)
+                                * Quat::from_rotation_z(k as f32 * 2.3),
+                        )
+                        .with_scale(Vec3::splat(size));
+                    wanted.insert(
+                        Actor(port.body.id, Shape::Pock(i, k as u8, open)),
+                        house.mul_transform(mark),
+                    );
+                }
             }
         }
         for r in battle.raiders() {
             let p = r.class.profile();
             wanted.insert(Actor(r.body.id, Shape::Ship(r.class)), pose(&r.body, 0.));
             let ship = pose(&r.body, 0.);
+            // Smoke streams from every funnel of a ship with steam up, and trails back
+            // along her track to show which way she is going. Disabled, she burns
+            // instead (below).
+            if !r.is_disabled() {
+                for (stack, &(lip, _)) in kit.fleet[&r.class].funnels.iter().enumerate() {
+                    wanted.insert(
+                        Actor(r.body.id, Shape::Stack(r.class, stack as u8)),
+                        Transform::from_translation(ship.transform_point(lip)),
+                    );
+                }
+            }
+            // A torpedo boat at speed throws a bow wave either side and leaves a white
+            // wash astern, so her dash reads at range.
+            let pace = (r.motion().length() / p.speed()).min(1.);
+            if r.class == EnemyClass::TorpedoBoat && pace > 0.25 {
+                let bow = -p.hull.bow + 1.2;
+                let wash = [
+                    (
+                        Vec3::new(-0.95, 0.1, bow + 1.6),
+                        0.4,
+                        Vec3::new(0.45, 0.55, 2.),
+                    ),
+                    (
+                        Vec3::new(0.95, 0.1, bow + 1.6),
+                        -0.4,
+                        Vec3::new(0.45, 0.55, 2.),
+                    ),
+                    (
+                        Vec3::new(0., 0.05, p.hull.stern + 4.),
+                        0.,
+                        Vec3::new(1.4, 0.14, 5.),
+                    ),
+                ];
+                for (i, (at, splay, size)) in wash.into_iter().enumerate() {
+                    let part = Transform::from_translation(at)
+                        .with_rotation(Quat::from_rotation_y(splay))
+                        .with_scale(size * pace);
+                    wanted.insert(
+                        Actor(r.body.id, Shape::Wash(i as u8)),
+                        ship.mul_transform(part),
+                    );
+                }
+            }
             for (i, scar) in r.scars().iter().enumerate() {
                 let open = armor_fx::opened(scar.impact);
                 let radius = scar.scale * if open { 1.34 } else { 0.90 };
@@ -770,7 +975,7 @@ pub fn sync(
                 wanted.insert(Actor(r.body.id, Shape::Socket(i)), socket);
                 if gun.live() {
                     wanted.insert(
-                        Actor(r.body.id, Shape::Gun(i, r.class)),
+                        Actor(r.body.id, Shape::Gun(i, r.class, r.barrels())),
                         pose(&bearing, base.y).with_scale(Vec3::splat(p.gun_scale)),
                     );
                     if gun.charging() && !r.is_disabled() {
@@ -833,10 +1038,18 @@ pub fn sync(
             }
         }
         for fish in battle.torpedoes() {
+            let shape = if fish.hostile() {
+                Shape::EnemyTorpedo
+            } else {
+                Shape::Torpedo
+            };
             wanted.insert(
-                Actor(fish.body.id, Shape::Torpedo),
+                Actor(fish.body.id, shape),
                 pose(&fish.body, sea.height(fish.body.pos) + 0.12),
             );
+            if fish.hostile() {
+                enemy_track(fish, &sea, &mut wanted);
+            }
         }
         for s in battle.shots() {
             let shape = match s.battery {
@@ -844,7 +1057,7 @@ pub fn sync(
                 Battery::Secondary => Shape::CloseShot,
                 Battery::AntiAir => Shape::Tracer,
                 Battery::Raider | Battery::EnemySecondary | Battery::Aircraft => Shape::EnemyShot,
-                Battery::Shore => Shape::ShoreShell,
+                Battery::Shore | Battery::Heavy => Shape::ShoreShell,
             };
             let size = if shape == Shape::Tracer {
                 1.
@@ -867,7 +1080,8 @@ pub fn sync(
                     xf.rotate_local_z(age * 4.7);
                     xf.rotate_local_x(age * 2.9);
                     xf.scale = Vec3::splat(class.profile().gun_scale * (1. - t * t));
-                    wanted.insert(Actor(e.body.id, Shape::Gun(0, class)), xf);
+                    let barrels = class.profile().barrels;
+                    wanted.insert(Actor(e.body.id, Shape::Gun(0, class, barrels)), xf);
                 }
                 EffectKind::Armor {
                     outcome,
@@ -942,7 +1156,8 @@ pub fn sync(
                     // Nose dropping and rolling as she falls, burning, trailing black smoke.
                     let (shape, scale) = match frame {
                         Airframe::Spotter => (Shape::Spotter, spotter_model::ALOFT),
-                        Airframe::Attack => (Shape::AttackPlane, 0.63),
+                        Airframe::Attack => (Shape::AttackPlane, STRAFER),
+                        Airframe::Harrier => (Shape::AttackPlane, HARRIER),
                     };
                     let mut airframe = pose(&e.body, e.height).with_scale(Vec3::splat(scale));
                     let roll = if e.body.id % 2 == 0 { 1. } else { -1. };
@@ -965,7 +1180,24 @@ pub fn sync(
                         wanted.insert(Actor(e.body.id, Shape::FlakPuff(i)), puff);
                     }
                 }
-                EffectKind::Downed(_) => {}
+                EffectKind::Downed(frame) => {
+                    // Down on the water, the wreck lies over on a broken float, then
+                    // settles by the nose and goes under.
+                    let (shape, scale) = match frame {
+                        Airframe::Spotter => (Shape::Spotter, spotter_model::ALOFT),
+                        Airframe::Attack => (Shape::AttackPlane, STRAFER),
+                        Airframe::Harrier => (Shape::AttackPlane, HARRIER),
+                    };
+                    let under = (1. - (e.kind.lifetime() - age) / SINKING).clamp(0., 1.);
+                    let mut wreck = pose(&e.body, (AFLOAT - SUNK * under * under) * scale)
+                        .with_scale(Vec3::splat(scale));
+                    let roll = if e.body.id % 2 == 0 { 1. } else { -1. };
+                    wreck.rotate_local_z(roll * 0.42);
+                    wreck.rotate_local_x(-(0.15 + 0.5 * under));
+                    wanted.insert(Actor(e.body.id, shape), wreck);
+                }
+                // The shore guns' flashes and smoke are drawn by `gunsmoke`.
+                EffectKind::Muzzle(Battery::Shore | Battery::Heavy) => {}
                 EffectKind::Muzzle(_) => {
                     let t = age / e.kind.lifetime();
                     let mut xf = pose(&e.body, e.height);
@@ -974,6 +1206,37 @@ pub fn sync(
                     let mut vapor = pose(&e.body, e.height + t);
                     vapor.scale = Vec3::splat(0.5 + t * 1.35);
                     wanted.insert(Actor(e.body.id, Shape::Smoke), vapor);
+                }
+                // A heavy shell's column climbs fast to some 25 metres, three or four
+                // times a splash, hangs, and falls back wide, so the fall of shot reads
+                // from far off.
+                EffectKind::Column => {
+                    let t = age / e.kind.lifetime();
+                    let lift = (std::f32::consts::PI * t.powf(0.45)).sin().max(0.);
+                    let mut xf = pose(&e.body, 0.05);
+                    xf.scale = Vec3::new(2.4 + 5. * t, 0.3 + 24. * lift, 2.4 + 5. * t);
+                    wanted.insert(Actor(e.body.id, Shape::Splash), xf);
+                    let mut ring = pose(&e.body, 0.06);
+                    ring.scale = Vec3::new(2. + t * 12., 0.9 * (1. - t), 2. + t * 12.);
+                    wanted.insert(Actor(e.body.id, Shape::FoamRing), ring);
+                }
+                EffectKind::Torpedoed => {
+                    // A wide column of white water thrown up over her side, higher than
+                    // her masts, with a little dark smoke from the warhead in it.
+                    let t = age / e.kind.lifetime();
+                    let lift = (std::f32::consts::PI * t.powf(0.5)).sin().max(0.);
+                    let mut column = pose(&e.body, 0.05);
+                    column.scale = Vec3::new(3.6 + 4. * t, 0.4 + 19. * lift, 3.6 + 4. * t);
+                    wanted.insert(Actor(e.body.id, Shape::Splash), column);
+                    let mut ring = pose(&e.body, 0.06);
+                    ring.scale = Vec3::new(3. + t * 13., 1.2 * (1. - t), 3. + t * 13.);
+                    wanted.insert(Actor(e.body.id, Shape::FoamRing), ring);
+                    if age < 0.9 {
+                        let mut smoke = pose(&e.body, 2. + age * 6.);
+                        smoke.scale =
+                            Vec3::splat(0.4 + 2.6 * (std::f32::consts::PI * age / 0.9).sin());
+                        wanted.insert(Actor(e.body.id, Shape::Smoke), smoke);
+                    }
                 }
                 EffectKind::Splash => {
                     let t = age / e.kind.lifetime();
@@ -984,6 +1247,36 @@ pub fn sync(
                     let mut ring = pose(&e.body, 0.06);
                     ring.scale = Vec3::new(1. + t * 5., 0.9 * (1. - t), 1. + t * 5.);
                     wanted.insert(Actor(e.body.id, Shape::FoamRing), ring);
+                }
+                EffectKind::Shatter(radius) => {
+                    // White water and brash burst out of the broken ice, as wide as it
+                    // was, and lumps of it are flung up and fall back into the sea.
+                    let r = f32::from(radius.max(1));
+                    let t = age / e.kind.lifetime();
+                    let lift = (std::f32::consts::PI * t.powf(0.5)).sin().max(0.);
+                    let mut spray = pose(&e.body, 0.05);
+                    let wide = 0.45 * r + 1.6 * r * t.sqrt();
+                    spray.scale = Vec3::new(wide, 0.3 + (1.2 + 0.3 * r) * lift, wide);
+                    wanted.insert(Actor(e.body.id, Shape::Splash), spray);
+                    let mut ring = pose(&e.body, 0.06);
+                    ring.scale =
+                        Vec3::new(r * (0.9 + 1.6 * t), 1.1 * (1. - t), r * (0.9 + 1.6 * t));
+                    wanted.insert(Actor(e.body.id, Shape::FoamRing), ring);
+                    let (up, out) = (4. + 0.3 * r, 2.5 + 0.35 * r);
+                    for i in 0..6_u8 {
+                        let a = f32::from(i) * 1.05 + e.body.heading;
+                        let rise = 0.4 * r + up * age - 4.9 * age * age;
+                        if rise < 0. {
+                            continue;
+                        }
+                        let mut shard = pose(&e.body, rise);
+                        let reach = 0.5 * r + out * age;
+                        shard.translation += Vec3::new(a.cos(), 0., a.sin()) * reach;
+                        shard.rotate_local_x(age * (3. + f32::from(i)));
+                        shard.rotate_local_z(age * 2.3);
+                        shard.scale = Vec3::splat((0.12 + 0.02 * f32::from(i % 3)) * r);
+                        wanted.insert(Actor(e.body.id, Shape::Shard(i)), shard);
+                    }
                 }
                 EffectKind::Demolition { dock } => {
                     let size = if dock { 1.65 } else { 1. };
@@ -1053,7 +1346,14 @@ pub fn sync(
                     let hull = &class.profile().hull;
                     afloat.insert(e.body.id, sea.lift(e.body.pos, e.body.heading, hull));
                 }
-                EffectKind::Splash | EffectKind::Crunch => {
+                EffectKind::Splash
+                | EffectKind::Column
+                | EffectKind::Crunch
+                | EffectKind::Torpedoed
+                | EffectKind::Shatter(_) => {
+                    afloat.insert(e.body.id, level(e.body.pos));
+                }
+                EffectKind::Downed(_) if e.height == 0. => {
                     afloat.insert(e.body.id, level(e.body.pos));
                 }
                 _ => {}
@@ -1064,6 +1364,9 @@ pub fn sync(
                 *xf = lift.mul_transform(*xf);
             }
         }
+    }
+    if let Some(lens) = lens {
+        clear_lens(&mut wanted, lens.0, lens.1);
     }
     for (entity, key, mut xf) in &mut actors {
         if let Some(pose) = wanted.remove(key) {
