@@ -8,7 +8,7 @@ use bevy::{
     asset::{RenderAssetUsages, load_internal_asset, uuid_handle},
     camera::visibility::NoFrustumCulling,
     image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor},
-    light::NotShadowCaster,
+    light::{CascadeShadowConfig, CascadeShadowConfigBuilder, NotShadowCaster},
     mesh::{Indices, PrimitiveTopology},
     prelude::*,
     reflect::TypePath,
@@ -17,6 +17,9 @@ use bevy::{
 };
 use shipvivor_encounter::{EffectKind, Hull};
 use shipvivor_sea::{CELL, CHOP, FOAM_SIDE, Keel, SIDE, Swell, TRAINS, Wake};
+
+mod wakes;
+use wakes::{Steaming, Tracks, Wakes};
 
 const SHADER: Handle<Shader> = uuid_handle!("55e88192-7610-44f4-a48d-3c64e8dc3912");
 
@@ -64,6 +67,8 @@ impl Weather {
 pub struct Sea {
     pub swell: Swell,
     pub wake: Wake,
+    /// The enemy hulls' tracks, drawn as wakes far beyond the patch.
+    tracks: Tracks,
     weather: Weather,
     seconds: f64,
     /// The wake has moved since its textures were written.
@@ -104,6 +109,7 @@ impl FromWorld for Sea {
             chart: Vec4::ZERO,
             swell: Swell::new(weather.sea, weather.wind),
             wake: Wake::default(),
+            tracks: Tracks::default(),
             weather,
             seconds: 0.,
             stirred: false,
@@ -165,6 +171,7 @@ struct Waters {
     bow_flow: Vec4,
     chart: Vec4,
     sky: u32,
+    wakes: Wakes,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
@@ -187,6 +194,10 @@ impl Material for Seascape {
     }
     fn enable_prepass() -> bool {
         false
+    }
+    /// The sea is drawn after everything solid, so it can mirror the picture of them.
+    fn reads_view_transmission_texture(&self) -> bool {
+        true
     }
     fn vertex_shader() -> ShaderRef {
         SHADER.into()
@@ -367,6 +378,19 @@ pub fn churn(
                 _ => {}
             }
         }
+        let afloat = battle.raiders().iter().map(|raider| {
+            let profile = raider.class.profile();
+            let way = raider.motion().length();
+            Steaming {
+                id: raider.body.id,
+                pos: raider.body.pos,
+                heading: raider.body.heading,
+                hull: profile.hull,
+                way,
+                pace: way / profile.speed(),
+            }
+        });
+        sea.tracks.step(clock.delta_secs(), afloat);
     }
     sea.wake.step(clock.delta_secs(), helm.position, &keels);
     sea.stirred = true;
@@ -390,6 +414,7 @@ pub fn embark(
         sea.chart = Vec4::ZERO;
     }
     sea.wake.clear();
+    sea.tracks.clear();
     sea.stirred = true;
     let weather = match run.mode {
         Mode::Title => Weather::TITLE,
@@ -401,12 +426,22 @@ pub fn embark(
     }
 }
 
+/// How far from the eye shadows are cast, and the share the nearest cascade takes. Ships
+/// lie on the water hundreds of metres off, and the ship's own hull is about 45 m away.
+const SHADOW_CASCADES: CascadeShadowConfigBuilder = CascadeShadowConfigBuilder {
+    num_cascades: 4,
+    minimum_distance: 0.1,
+    maximum_distance: 1100.,
+    first_cascade_far_bound: 60.,
+    overlap_proportion: 0.2,
+};
+
 /// Cloud takes the sun off the ships and the distance as it does off the water.
 pub fn light(
     sea: Res<Sea>,
     run: Res<Campaign>,
     mut lit: Local<Option<(Weather, bool)>>,
-    mut sun: Single<(&mut DirectionalLight, &mut Transform)>,
+    mut sun: Single<(&mut DirectionalLight, &mut Transform, &mut CascadeShadowConfig)>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut fog: Single<&mut DistanceFog>,
 ) {
@@ -424,7 +459,8 @@ pub fn light(
             clear[2].lerp(dull[2], cloud),
         )
     };
-    let (sun, pose) = &mut *sun;
+    let (sun, pose, cascades) = &mut *sun;
+    **cascades = SHADOW_CASCADES.build();
     if docked {
         **pose = Transform::from_xyz(-32., 44., -24.).looking_at(Vec3::ZERO, Vec3::Y);
         sun.illuminance = 18000.;
@@ -492,6 +528,12 @@ pub fn roll(
         bow_flow: stem.extend(hull.radius).extend(speed),
         chart: sea.chart,
         sky: 0,
+        // The wakes lie wherever the battle view draws the hulls that made them.
+        wakes: if matches!(run.mode, Mode::Title | Mode::Trial) {
+            Wakes::default()
+        } else {
+            sea.tracks.draw(helm.position)
+        },
     };
     // Writing a material also rebinds the patch textures written above.
     for (_, surface) in surfaces.iter_mut() {

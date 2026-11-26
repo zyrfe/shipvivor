@@ -437,6 +437,7 @@ pub fn report(
             EffectKind::Burst
             | EffectKind::Crunch
             | EffectKind::MountLost(_)
+            | EffectKind::StrakeLost(..)
             | EffectKind::Flak => Sound::Burst,
             // A stricken aircraft is heard when it meets the water.
             EffectKind::Downed(_) => continue,

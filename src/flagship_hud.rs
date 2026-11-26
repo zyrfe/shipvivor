@@ -318,8 +318,15 @@ pub fn update(
     let state = if ship.protected() && ship.helm_lost() > 0. {
         // Her bridge is gone: how long she holds her course before someone cons her.
         format!("no helm {:.0} s", ship.helm_lost().ceil())
-    } else if ship.protected() {
+    } else if ship.screened() {
         format!("{}/{} turrets", ship.live_guns(), ship.guns().len())
+    } else if ship.protected() {
+        // Too few turrets stand to screen her hull, and it takes full damage.
+        format!(
+            "{}/{} turrets, hull open",
+            ship.live_guns(),
+            ship.guns().len()
+        )
     } else if ship.class.is_flagship() {
         "hull exposed".to_string()
     } else {

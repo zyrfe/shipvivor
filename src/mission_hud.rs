@@ -502,8 +502,8 @@ pub fn update(
                         format!("{} / {}", boss.live_guns(), boss.guns().len()),
                         brass(),
                     )
-                } else if boss.protected() {
-                    ("SEALED".into(), dim())
+                } else if boss.screened() {
+                    ("SCREENED".into(), dim())
                 } else {
                     ("EXPOSED".into(), coral())
                 }

@@ -4,6 +4,22 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 /// Metres one barbette step lifts a turret above the deck.
 pub const BARBETTE: f32 = 1.05;
+/// How far either way of her beam a double turret trains: round its own side and a
+/// little past the bow and the stern.
+const DOUBLE_ARC: f32 = 95.;
+
+/// How a main turret stands on its section.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Mounting {
+    /// On the centreline, training over either beam.
+    #[default]
+    Centre,
+    /// One of a light pair in a wing gallery, training over its own beam.
+    Wing,
+    /// One of two full-size turrets abreast on a capital beam, training over its own
+    /// side and round to the bow and the stern.
+    Double,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GunStation {
@@ -19,11 +35,13 @@ pub struct GunStation {
     pub inner_mask: f32,
     /// How the turret is built: its barrels, its bore and its barbette.
     pub gunhouse: Gunhouse,
+    pub mounting: Mounting,
 }
 
 impl GunStation {
+    /// One of a light wing pair, whose cradles are smaller than a centreline turret's.
     pub fn paired(&self) -> bool {
-        self.abeam != 0.
+        self.mounting == Mounting::Wing
     }
 
     pub fn bears(&self, bearing: f32) -> bool {
@@ -49,6 +67,7 @@ impl Design {
                 .fit
                 .iter()
                 .any(|kind| matches!(kind, Component::Director | Component::Engine))
+                // A wing gallery leaves the centreline clear. A double pair fills it.
                 || (module.frame != Frame::BatteryGallery
                     && module.fit.contains(&Component::MainGun)
                     && module.gunhouse.tier >= tier)
@@ -67,17 +86,28 @@ impl Design {
                     .find(|&i| blocks(i, tier))
                     .map(|i| i - at);
                 let forward = shadow(astern) >= shadow(ahead);
-                let paired = self.modules()[at].frame == Frame::BatteryGallery;
+                let mounting = match self.modules()[at].frame {
+                    Frame::BatteryGallery => Mounting::Wing,
+                    Frame::DoubleBattery => Mounting::Double,
+                    _ => Mounting::Centre,
+                };
                 // Centreline cradles sit slightly abaft the frame centre, wing cradles abreast.
-                let fore = 16. - gun.aft - if paired { 0. } else { 1.2 };
-                let (home, half_arc, inner_mask) = if paired {
-                    (gun.abeam.signum() * FRAC_PI_2, 72_f32.to_radians(), 0.)
-                } else {
-                    (
+                let fore = 16.
+                    - gun.aft
+                    - if mounting == Mounting::Centre {
+                        1.2
+                    } else {
+                        0.
+                    };
+                let beam = gun.abeam.signum() * FRAC_PI_2;
+                let (home, half_arc, inner_mask) = match mounting {
+                    Mounting::Wing => (beam, 72_f32.to_radians(), 0.),
+                    Mounting::Double => (beam, DOUBLE_ARC.to_radians(), 0.),
+                    Mounting::Centre => (
                         if forward { 0. } else { PI },
                         PI - shadow(ahead).max(shadow(astern)),
                         shadow(ahead).min(shadow(astern)),
-                    )
+                    ),
                 };
                 GunStation {
                     berth: gun.berth,
@@ -87,6 +117,7 @@ impl Design {
                     half_arc,
                     inner_mask,
                     gunhouse,
+                    mounting,
                 }
             })
             .collect()

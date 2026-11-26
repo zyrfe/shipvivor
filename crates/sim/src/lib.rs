@@ -11,5 +11,5 @@ pub mod voyage;
 #[cfg(test)]
 mod tests;
 
-pub use sector::{Charted, HARD_PASSAGE_HEAD_START, Sector, Weather};
+pub use sector::{Charted, Kind, Sector, TOUGH_HEAD_START, TOUGH_RAID_PACE, Weather};
 pub use voyage::{engage, fit_player, helm_at_start, hull_shape, open_battle, settle, steer};

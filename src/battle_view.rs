@@ -65,6 +65,8 @@ enum Shape {
     Stack(EnemyClass, u8),
     /// One of a ship's turrets, and the barrels in it.
     Gun(u8, EnemyClass, u8),
+    /// One of a capital ship's side strakes, by its index among hers.
+    Strake(EnemyClass, u8),
     Socket(u8),
     GunFire(u8),
     Soot(u8),
@@ -158,6 +160,9 @@ struct VesselMeshes {
     deckwork: Handle<Mesh>,
     /// Her turret with one barrel, two, three and four.
     guns: [Handle<Mesh>; 4],
+    /// Her side strakes, in the order the encounter counts them. A class that hangs
+    /// none has none.
+    strakes: Vec<Handle<Mesh>>,
     masthead: f32,
     /// Each funnel's lip on her deckwork, and the width of its mouth.
     funnels: Vec<(Vec3, f32)>,
@@ -293,6 +298,10 @@ pub fn setup(
                         deckwork: meshes.add(deckwork),
                         guns: [1, 2, 3, 4]
                             .map(|barrels| meshes.add(crate::fleet_models::gun(class, barrels))),
+                        strakes: (0..2 * shipvivor_encounter::STRAKES_A_SIDE)
+                            .filter(|_| class.plated())
+                            .map(|i| meshes.add(crate::fleet_models::strake(class, i)))
+                            .collect(),
                         funnels: crate::fleet_models::funnels(class),
                     },
                 )
@@ -546,6 +555,12 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
                 part(&kit.drum, &kit.gold, v(0., 1.36, 0.), v(1.18, 0.11, 1.18));
             }
         }
+        Shape::Strake(class, i) => part(
+            &kit.fleet[&class].strakes[usize::from(i)],
+            &kit.gunmetal,
+            Vec3::ZERO,
+            Vec3::ONE,
+        ),
         Shape::Socket(_) => part(&kit.drum, &kit.dark, Vec3::ZERO, Vec3::ONE),
         Shape::Primer(_) => part(&kit.ball, &kit.foam, Vec3::ZERO, v(0.5, 0.35, 0.5)),
         Shape::Scar(_, open) | Shape::Pock(_, _, open) => part(
@@ -942,6 +957,15 @@ pub fn sync(
                     wanted.insert(Actor(r.body.id, Shape::Director), pose(&r.body, height));
                 }
             }
+            // Her deck-edge armour, less any strake shot off her.
+            let (foot, rise) = shipvivor_encounter::STRAKE_RISE;
+            for (i, strake) in r.strakes().iter().enumerate().filter(|(_, s)| s.on()) {
+                let middle = Vec3::new(strake.abeam, (foot + 0.5 * rise) * p.deck, strake.aft);
+                wanted.insert(
+                    Actor(r.body.id, Shape::Strake(r.class, i as u8)),
+                    ship.mul_transform(Transform::from_translation(middle)),
+                );
+            }
             for (i, gun) in r.secondaries.iter().enumerate() {
                 let base = gun.station(&r.body, p);
                 let mount = Body {
@@ -1082,6 +1106,17 @@ pub fn sync(
                     xf.scale = Vec3::splat(class.profile().gun_scale * (1. - t * t));
                     let barrels = class.profile().barrels;
                     wanted.insert(Actor(e.body.id, Shape::Gun(0, class, barrels)), xf);
+                }
+                EffectKind::StrakeLost(class, i) => {
+                    // The plate is thrown up and out from her side, tumbling, and drops
+                    // into the sea.
+                    let outward = class.strake_station(usize::from(i)).0.signum();
+                    let mut xf = pose(&e.body, e.height + 5.5 * age - 6.5 * age * age);
+                    let side = e.body.forward().perp() * outward * age * 4.5;
+                    xf.translation += Vec3::new(side.x, 0., side.y);
+                    xf.rotate_local_z(outward * age * 3.1);
+                    xf.rotate_local_x(age * 1.7);
+                    wanted.insert(Actor(e.body.id, Shape::Strake(class, i)), xf);
                 }
                 EffectKind::Armor {
                     outcome,

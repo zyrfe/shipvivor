@@ -236,6 +236,7 @@ impl Battle {
                 ship.last_sighting = Some(player);
             }
         }
+        self.signal_squadrons(player);
         // A heavy battery has her through its own rangefinder, which sees as far as its
         // guns reach, or by its base's word. A floatplane reporting her, or another base's
         // lookout, spots the fall of its shot for it.
@@ -423,7 +424,7 @@ mod tests {
 
     #[test]
     fn squadrons_grow_up_the_channel_and_a_collapse_scrambles_the_next_at_her() {
-        use crate::{Aim, Hull, MainShell, Orders, SQUADRON_TIERS};
+        use crate::{Aim, Hull, MainShell, Orders};
         use EnemyClass::*;
         let squadron = |b: &Battle, base: usize| -> Vec<EnemyClass> {
             (b.raiders.iter())
@@ -431,17 +432,32 @@ mod tests {
                 .map(|r| r.class)
                 .collect()
         };
+        let count = |classes: &[EnemyClass], class| classes.iter().filter(|&&c| c == class).count();
         // Heavier up the channel, and heavier again deeper into the run. Each lies in
-        // its harbour from the start: none is added afterwards.
-        let light = staged_sector().with_squadrons(0);
+        // its harbour from the start: none is added afterwards. The first round's heavy
+        // yard keeps a cruiser and her two destroyers.
+        let light = staged_sector().with_squadrons(1);
         assert_eq!(squadron(&light, 1), [Patrol, Patrol, Destroyer]);
         assert_eq!(squadron(&light, 2), [Destroyer, Destroyer, Cruiser]);
-        let heavy = staged_sector().with_squadrons(SQUADRON_TIERS + 4);
-        assert_eq!(squadron(&heavy, 0), [Destroyer]);
-        assert_eq!(squadron(&heavy, 1), [Destroyer, Cruiser, Cruiser]);
-        assert_eq!(squadron(&heavy, 2), [Cruiser, Battleship, Battleship]);
+        // The last rounds' heavy yards keep a battle fleet, every ship of it at anchor.
+        let heavy = staged_sector().with_squadrons(8);
+        for base in 0..3 {
+            assert_eq!(squadron(&heavy, base), heavy.squadron(base), "base {base}");
+        }
+        let fleet = squadron(&heavy, 2);
+        assert_eq!(count(&fleet, Battleship), 3);
+        assert!(fleet.len() >= 10);
+        for round in 1..8 {
+            let (now, next) = (
+                staged_sector().with_squadrons(round),
+                staged_sector().with_squadrons(round + 1),
+            );
+            for base in 0..3 {
+                assert!(now.squadron(base).len() <= next.squadron(base).len());
+            }
+        }
 
-        let mut b = staged_sector().with_squadrons(0);
+        let mut b = staged_sector().with_squadrons(1);
         let away = Vec2::new(2500., 3000.);
         let orders = Orders {
             player: away,
@@ -471,15 +487,19 @@ mod tests {
         assert_eq!(scrambled.len(), 3);
         let range = |b: &Battle, id: u64| b.ship(id).unwrap().body.pos.distance(away);
         let start: Vec<f32> = scrambled.iter().map(|&id| range(&b, id)).collect();
-        // Once they have weighed, swung round and worked up to speed, they close her.
+        // Once they have weighed, swung round and worked up to speed, they close her
+        // together, the escorts keeping their stations on the destroyer that leads them.
         for _ in 0..400 {
             b.step(0.1, &orders);
         }
-        for (&id, start) in scrambled.iter().zip(start) {
+        for &id in &scrambled {
             let ship = b.ship(id).unwrap();
             assert!(ship.moored_at().is_none() && ship.last_sighting == Some(away));
-            assert!(range(&b, id) < start - 60., "{:?} held back", ship.class);
+            assert!(ship.in_squadron(), "{:?} sails alone", ship.class);
         }
+        let mean = |ranges: &[f32]| ranges.iter().sum::<f32>() / ranges.len() as f32;
+        let now: Vec<f32> = scrambled.iter().map(|&id| range(&b, id)).collect();
+        assert!(mean(&now) < mean(&start) - 60., "the squadron held back");
         // The alarm stands down after a minute, and the squadron hunts on from its fix.
         for _ in 0..(SCRAMBLE_ALERT * 10.) as usize {
             b.step(0.1, &orders);

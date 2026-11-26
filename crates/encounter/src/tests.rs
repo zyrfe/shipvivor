@@ -690,6 +690,100 @@ fn a_held_trigger_walks_the_battery_one_barrel_at_a_time() {
     assert!((again[0].1 - first[0].1).length() < 1e-3);
 }
 
+/// Hold the trigger for `steps`, and give the steps on which each barrel fired, by its
+/// muzzle.
+fn hold_fire(b: &mut Battle, orders: &Orders, steps: usize) -> Vec<(Vec2, Vec<usize>)> {
+    let mut barrels: Vec<(Vec2, Vec<usize>)> = vec![];
+    for step in 0..steps {
+        b.step(1. / 60., orders);
+        for muzzle in fired(b) {
+            match barrels.iter_mut().find(|(m, _)| m.distance(muzzle) < 1e-3) {
+                Some((_, shots)) => shots.push(step),
+                None => barrels.push((muzzle, vec![step])),
+            }
+        }
+    }
+    barrels
+}
+
+/// The longest wait between two rounds from one barrel, in steps.
+fn longest_wait(shots: &[usize]) -> usize {
+    shots
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .max()
+        .unwrap_or(usize::MAX)
+}
+
+#[test]
+fn a_held_trigger_quickens_so_a_fast_battery_fires_every_barrel_each_time_it_loads() {
+    let (mut b, mut orders) = broadside();
+    // Four barrels loading in 0.6 s: a ripple apart, the trigger would come back to each
+    // only every 1.2 s.
+    orders.reload = 0.6;
+    orders.aim = Aim::Sight(BEAM_TARGET);
+    let barrels = hold_fire(&mut b, &orders, 300);
+    assert_eq!(barrels.len(), 4);
+    for (_, shots) in &barrels {
+        // 36 steps to load, and a step for the clock.
+        assert!(longest_wait(shots) <= 37, "{shots:?}");
+    }
+    // The battery still ripples rather than firing in salvoes.
+    let mut all: Vec<_> = barrels
+        .iter()
+        .flat_map(|(_, s)| s.iter().copied())
+        .collect();
+    all.sort();
+    assert!(all.windows(2).all(|w| w[1] - w[0] >= 8), "{all:?}");
+}
+
+#[test]
+fn a_held_trigger_fast_enough_for_its_small_guns_still_reaches_the_big_ones() {
+    let mut b = battle();
+    b.raiders.clear();
+    b.next_wave = 1000.;
+    let design = shipvivor_shipyard::Design::breakwater();
+    let bow = design.gun_stations()[0];
+    let he = |inches: u16| MainShell {
+        bore: inches - 4,
+        ..MainShell::STOCK
+    };
+    // A twelve-inch turret forward and a four-inch aft. The four-inch loads in 0.3 s, a
+    // ripple, so it always had a barrel ready and the twelve-inch never got the trigger.
+    b.fit_design(&design, |station| {
+        (
+            if *station == bow { he(12) } else { he(4) },
+            TurretLayout::Twin,
+        )
+    });
+    let mut orders = Orders {
+        player: Vec2::ZERO,
+        heading: 0.,
+        speed: 0.,
+        hull: Hull::CRUISER,
+        aim: Aim::Track(BEAM_TARGET),
+        reload: 0.3,
+        shell: he(4),
+    };
+    for _ in 0..900 {
+        b.step(1. / 60., &orders);
+    }
+    for station in Station::ALL {
+        assert_eq!(b.main_mount(station).status(), MountStatus::Ready);
+    }
+    orders.aim = Aim::Sight(BEAM_TARGET);
+    let barrels = hold_fire(&mut b, &orders, 600);
+    assert_eq!(barrels.len(), 4);
+    let big = b.main_mount(Station::Bow).reload(&orders);
+    for (_, shots) in &barrels {
+        // A barrel waits no more than its reload and a ripple for the trigger.
+        assert!(
+            (longest_wait(shots) as f32) < (big + RIPPLE) * 60.,
+            "{shots:?}"
+        );
+    }
+}
+
 #[test]
 fn a_click_fires_one_barrel_and_a_second_click_fires_the_rest() {
     let (mut b, orders) = broadside();
@@ -1222,12 +1316,15 @@ fn each_gold_mount_takes_independent_swept_hits_before_the_hull_opens() {
     };
     let stern = (pos - facing * 105.).extend(3.).xzy();
     let keel = (pos - facing * 32.).extend(1.4).xzy();
-    hit(&mut b, stern, keel, 100);
-    assert_eq!(b.raiders[0].hull(), stock);
-    assert_eq!(b.salvo_report(), Some(Impact::Bounced));
+    // Her turrets screen her hull: a heavy round there does a quarter of its damage.
+    hit(&mut b, stern, keel, 8);
+    let dented = b.raiders[0].hull();
+    let lost = stock - dented;
+    assert!((lost - 8. * super::fleet::SCREENED).abs() < 1e-3, "{lost}");
+    assert_eq!(b.salvo_report(), Some(Impact::Penetrated));
     assert_eq!(b.raiders[0].live_guns(), 10);
 
-    for index in [4, 1, 8, 0, 2, 9, 5, 7, 3, 6] {
+    for (killed, index) in [4, 1, 8, 0, 2, 9, 5, 7, 3, 6].into_iter().enumerate() {
         let ship = &b.raiders[0];
         let base = ship.guns()[index].base(&ship.body, p);
         let aim = base + Vec3::Y * p.gun_scale;
@@ -1253,7 +1350,14 @@ fn each_gold_mount_takes_independent_swept_hits_before_the_hull_opens() {
         hit(&mut b, eye, aim, 2);
         assert_eq!(b.raiders[0].live_guns(), before - 1, "station {index}");
         assert!(!b.raiders[0].guns[index].live());
-        assert_eq!(b.raiders[0].hull(), stock);
+        assert_eq!(b.raiders[0].hull(), dented);
+        // Eight turrets in ten still screen her hull. With the third down it's open.
+        assert_eq!(
+            b.raiders[0].screened(),
+            killed < 2,
+            "{} turrets",
+            before - 1
+        );
     }
     assert_eq!(
         b.effects
@@ -1291,6 +1395,7 @@ fn dismantling_the_near_broadside_removes_its_fire_and_preserves_the_opposite_ba
     b.raiders.clear();
     let class = EnemyClass::Parliament;
     b.spawn(class, Vec2::ZERO, Vec2::NEG_Y);
+    // Rounds from her turrets and from her secondaries over forty seconds.
     let fire_for = |b: &mut Battle, side: f32| {
         b.shots.clear();
         b.effects.clear();
@@ -1305,17 +1410,23 @@ fn dismantling_the_near_broadside_removes_its_fire_and_preserves_the_opposite_ba
                 &mut b.serial,
             );
         }
-        b.shots.len()
+        let count = |battery| b.shots.iter().filter(|s| s.battery == battery).count();
+        (count(Battery::Raider), count(Battery::EnemySecondary))
     };
-    assert!(fire_for(&mut b, 1.) >= 30);
+    let (main, secondary) = fire_for(&mut b, 1.);
+    assert!(main >= 30 && secondary >= 30, "{main} {secondary}");
     let ship = &mut b.raiders[0];
     for index in 0..ship.guns.len() {
         if ship.guns[index].base(&ship.body, class.profile()).x >= 0. {
             ship.hit_gun(index, 7);
         }
     }
-    assert_eq!(fire_for(&mut b, 1.), 0);
-    assert!(fire_for(&mut b, -1.) >= 12);
+    // The near broadside's turrets are silent. Her secondaries there have crews of
+    // their own and fight on.
+    let (main, secondary) = fire_for(&mut b, 1.);
+    assert_eq!(main, 0);
+    assert!(secondary >= 30, "{secondary}");
+    assert!(fire_for(&mut b, -1.).0 >= 12);
 }
 
 #[test]
@@ -1517,7 +1628,9 @@ fn stock_salvos_leave_dents_and_can_silence_the_battleship_director() {
             .unwrap()
     };
     let belt = center.extend(1.4).xzy();
-    for _ in 0..12 {
+    // Stock HE only dents her capital belt, though each round wears the strake there
+    // (see `stock_rounds_her_belt_holds_shake_a_strake_loose_and_bare_the_hull`).
+    for _ in 0..3 {
         assert_eq!(
             shoot(&mut b, MainShell::STOCK, belt, Vec2::X),
             Impact::Embedded
@@ -1579,6 +1692,175 @@ fn stock_salvos_leave_dents_and_can_silence_the_battleship_director() {
 }
 
 #[test]
+fn stock_rounds_her_belt_holds_shake_a_strake_loose_and_bare_the_hull() {
+    let center = Vec2::new(-75., -125.);
+    let target = center.extend(1.4).xzy();
+    let fresh = || {
+        let mut b = battle();
+        b.raiders.clear();
+        b.spawn(EnemyClass::Battleship, center, center + Vec2::NEG_Y);
+        b
+    };
+    // What became of one stock round from 82 m off on the side `from`.
+    let shoot = |b: &mut Battle, from: Vec3| {
+        b.effects.clear();
+        let shell = MainShell::STOCK;
+        projectile::FlightPath::main(target + from * 82., target, shell)
+            .unwrap()
+            .launch(
+                &mut b.shots,
+                &mut b.effects,
+                &mut b.serial,
+                Battery::Main,
+                shell.breach_force(),
+            );
+        b.advance_shots(0.5, Vec2::ZERO, &mut Events::default());
+        b.effects
+            .iter()
+            .find_map(|e| match e.kind {
+                EffectKind::Armor { outcome, .. } => Some(outcome),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let loose = |b: &Battle| b.raiders[0].strakes().iter().filter(|s| !s.on()).count();
+    let mut b = fresh();
+    let intact = b.raiders[0].hull();
+    assert_eq!(b.raiders[0].strakes().len(), 2 * STRAKES_A_SIDE);
+    // Her capital belt holds stock HE, but every round wears the strake it strikes,
+    // and the sixth shakes it loose.
+    for round in 1..=6 {
+        assert_eq!(shoot(&mut b, Vec3::X), Impact::Embedded, "round {round}");
+        assert_eq!(b.raiders[0].hull(), intact);
+        assert_eq!(loose(&b), usize::from(round == 6), "round {round}");
+    }
+    assert!(
+        b.effects
+            .iter()
+            .any(|e| matches!(e.kind, EffectKind::StrakeLost(EnemyClass::Battleship, _)))
+    );
+    // The hull behind it lies bare to the same guns.
+    assert_eq!(shoot(&mut b, Vec3::X), Impact::Penetrated);
+    assert!(b.raiders[0].hull() < intact);
+    // The strake on her other side still holds.
+    assert_eq!(shoot(&mut b, Vec3::NEG_X), Impact::Embedded);
+    assert_eq!(loose(&b), 1);
+
+    // Light guns' rounds don't shift a strake.
+    let mut b = fresh();
+    for _ in 0..30 {
+        let (shots, effects, serial) = (&mut b.shots, &mut b.effects, &mut b.serial);
+        fire(
+            shots,
+            effects,
+            serial,
+            target + Vec3::X * 82.,
+            target,
+            Battery::Secondary,
+            3,
+        );
+        b.advance_shots(0.5, Vec2::ZERO, &mut Events::default());
+    }
+    let struck = b.effects.iter().filter(|e| {
+        matches!(
+            e.kind,
+            EffectKind::Armor {
+                battery: Battery::Secondary,
+                ..
+            }
+        )
+    });
+    assert!(struck.count() > 0);
+    assert_eq!(loose(&b), 0);
+}
+
+#[test]
+fn a_flagships_turrets_screen_her_hull_until_a_fifth_of_them_fall() {
+    use super::fleet::SCREENED;
+    let fresh = || {
+        let mut b = battle();
+        b.raiders.clear();
+        b.spawn(
+            EnemyClass::Parliament,
+            Vec2::new(-230., 75.),
+            Vec2::new(-230., 0.),
+        );
+        b
+    };
+    // Hull lost to a blow of 4 on her side amidships.
+    let lost = |b: &mut Battle, bare: bool| {
+        let r = &mut b.raiders[0];
+        let before = r.hull();
+        let at = r.body.pos + r.body.forward().perp() * 5.;
+        if bare {
+            r.hit_bare_hull(at, 4);
+        } else {
+            r.hit_hull(at, 4);
+        }
+        before - r.hull()
+    };
+    let mut b = fresh();
+    assert!(b.raiders[0].screened());
+    let screened = lost(&mut b, false);
+    assert!((screened - 4. * SCREENED).abs() < 1e-3, "{screened}");
+    let bare = lost(&mut fresh(), true);
+    assert!((bare - 4.).abs() < 1e-3, "{bare}");
+    // With three of her ten turrets down the rest no longer screen her, though she
+    // fights on.
+    let mut b = fresh();
+    for gun in 0..3 {
+        b.raiders[0].hit_gun(gun, 7);
+        assert_eq!(b.raiders[0].screened(), gun < 2, "{gun}");
+    }
+    assert!(b.raiders[0].protected());
+    let open = lost(&mut b, false);
+    assert!((open - 4.).abs() < 1e-3, "{open}");
+}
+
+#[test]
+fn a_strake_shot_off_a_flagships_side_lets_rounds_in_past_her_turret_screen() {
+    use super::fleet::SCREENED;
+    let center = Vec2::new(-75., -125.);
+    let target = center.extend(1.4).xzy();
+    // A six-inch HE round, 4 damage.
+    let shell = MainShell {
+        bore: 2,
+        ..MainShell::STOCK
+    };
+    // Hull lost to one round from abeam, with the strake there shot off first or not.
+    let lost = |strip: bool| {
+        let mut b = battle();
+        b.raiders.clear();
+        b.spawn(EnemyClass::Parliament, center, center + Vec2::NEG_Y);
+        let r = &mut b.raiders[0];
+        let side = r.body.forward().perp().extend(0.).xzy();
+        if strip {
+            let skin = target + side * r.class.profile().hull.radius;
+            let he = (Ammo::He, shipvivor_artillery::ShellClass::Standard);
+            let struck = r.strike_hull(skin, -side, he, 0, false, 18.);
+            assert!(struck.loosed.is_some());
+        }
+        assert!(r.screened());
+        let intact = r.hull();
+        projectile::FlightPath::main(target + side * 82., target, shell)
+            .unwrap()
+            .launch(
+                &mut b.shots,
+                &mut b.effects,
+                &mut b.serial,
+                Battery::Main,
+                shell.breach_force(),
+            );
+        b.advance_shots(0.5, Vec2::ZERO, &mut Events::default());
+        intact - b.raiders[0].hull()
+    };
+    let screened = lost(false);
+    assert!((screened - 4. * SCREENED).abs() < 1e-3, "{screened}");
+    let bare = lost(true);
+    assert!((bare - 4.).abs() < 1e-3, "{bare}");
+}
+
+#[test]
 fn he_held_by_plate_the_same_guns_ap_would_open_calls_for_ap() {
     // One round from 82 m abeam at a fresh ship of `class`. True if it called for AP.
     let calls = |class: EnemyClass, shell: MainShell, turret: bool| {
@@ -1635,16 +1917,19 @@ fn varying_approach_to_the_same_plate_changes_the_result() {
     let hit = point.extend(1.).xzy();
     let ap = (Ammo::Ap, shipvivor_artillery::ShellClass::Breaker);
     let he = (Ammo::He, shipvivor_artillery::ShellClass::Standard);
-    assert_eq!(r.strike_hull(hit, tangent, ap, 0, false).0, Impact::Bounced);
+    assert_eq!(
+        r.strike_hull(hit, tangent, ap, 0, false, 0.).impact,
+        Impact::Bounced
+    );
     // The same light plate: AP square on goes clean through, and HE bursts even glancing.
     let mut fresh = battle();
     let twin = &mut fresh.raiders[1];
     assert_eq!(
-        twin.strike_hull(hit, -side, ap, 0, false).0,
+        twin.strike_hull(hit, -side, ap, 0, false, 0.).impact,
         Impact::Overpenetrated
     );
     assert_eq!(
-        r.strike_hull(hit, tangent, he, 0, false).0,
+        r.strike_hull(hit, tangent, he, 0, false, 0.).impact,
         Impact::Penetrated
     );
 }

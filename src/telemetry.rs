@@ -478,6 +478,8 @@ struct Waters {
     /// Ships with their bridge shot away and nobody yet at the helm.
     helmless: HashSet<u64>,
     harriers: HashSet<u64>,
+    /// Ships of the squadrons in line of battle.
+    lines: HashSet<u64>,
 }
 impl Waters {
     fn of(battle: &Encounter) -> Self {
@@ -512,6 +514,10 @@ impl Waters {
                 .iter()
                 .filter(|r| r.helm_lost() > 0.)
                 .map(|r| r.body.id)
+                .collect(),
+            lines: (battle.squadrons())
+                .filter(|(_, deployed)| *deployed)
+                .flat_map(|(ships, _)| ships.iter().copied())
                 .collect(),
         }
     }
@@ -625,16 +631,21 @@ impl RunLog {
                 "goals {} sunk, {} stores, a drydock{boss}; {} points a star and as many for beating the clock, which gains {:.0} s a base",
                 mission.kills,
                 mission.crates,
-                run.stage.star_points(),
+                run.star_points(),
                 shipvivor_campaign::BASE_TIME
             )
         };
         self.write(
             "leg",
             format!(
-                "{} {}: {} min to beat, {goals}; hull {}%, level {}",
+                "{} {}{}: {} min to beat, {goals}; hull {}%, level {}",
                 self.leg,
                 mission.name,
+                if run.stage.is_opening() || run.stage == Stage::CrownDeep {
+                    String::new()
+                } else {
+                    format!(" ({})", run.grade.name().to_lowercase())
+                },
                 mission.minutes,
                 run.hull_percent(),
                 run.level
@@ -849,6 +860,40 @@ impl RunLog {
             } else if lost == 0. && was && r.afloat() {
                 self.write("flagship", "under command again");
             }
+        }
+        // A squadron fans out into its line of battle.
+        for (ships, deployed) in battle.squadrons() {
+            if !deployed || ships.iter().any(|id| self.waters.lines.contains(id)) {
+                continue;
+            }
+            let mut names: Vec<(String, usize)> = Vec::new();
+            let mut nearest: Option<Vec2> = None;
+            for r in ships.iter().filter_map(|&id| battle.ship(id)) {
+                let name = r.weight().name(&format!("{:?}", r.class));
+                match names.iter_mut().find(|(n, _)| *n == name) {
+                    Some((_, count)) => *count += 1,
+                    None => names.push((name, 1)),
+                }
+                let off = |at: Vec2| at.distance(helm.position);
+                if nearest.is_none_or(|at| off(at) > off(r.body.pos)) {
+                    nearest = Some(r.body.pos);
+                }
+            }
+            let Some(nearest) = nearest else {
+                continue;
+            };
+            let fleet = (names.iter().rev())
+                .map(|(name, count)| match count {
+                    1 => name.clone(),
+                    _ => format!("{count} {name}"),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let place = whereabouts(helm, nearest);
+            self.write(
+                "line",
+                format!("a squadron of {fleet} formed line of battle, nearest {place}"),
+            );
         }
     }
 
@@ -1121,7 +1166,7 @@ impl RunLog {
             } else {
                 format!(
                     "she sails on until her bases are down, and the clock's {} points go unless a base wins time back",
-                    run.stage.star_points()
+                    run.star_points()
                 )
             };
             self.write("clock", format!("the clock ran out: {fate}"));
@@ -1396,6 +1441,12 @@ fn describe_fittings(run: &Campaign) -> String {
         (f.aa_mounts, "more AA"),
         (f.aa_shells, "heavy flak"),
         (f.aa_loaders, "AA loaders"),
+        (f.pumps, "pumps"),
+        (f.wing_turrets, "secondary turrets"),
+        (f.launchers, "more launchers"),
+        (f.missiles, "more missiles"),
+        (f.planes, "more planes"),
+        (f.bombs, "more bombs"),
     ] {
         if rank > 0 {
             parts.push(format!("{name} {rank}"));

@@ -18,6 +18,8 @@ pub(super) fn slot_name(design: &Design, at: usize) -> &'static str {
         "Floatplane"
     } else if parts.contains(&MissileRack) {
         DockModule::Missiles.name()
+    } else if design.modules()[at].frame == shipvivor_shipyard::Frame::DoubleBattery {
+        DeckModule::DoubleBattery.name()
     } else {
         match parts.iter().filter(|&&part| part == MainGun).count() {
             0 => DeckModule::Reserve.name(),
@@ -108,6 +110,7 @@ pub(super) fn tile_art(job: DockJob, run: &Campaign, art: &Insignia) -> Handle<I
             DeckModule::CentreBattery if empty(at) => art.centre_turret.clone(),
             DeckModule::CentreBattery => art.turret.clone(),
             DeckModule::WingBattery => art.wing_turrets.clone(),
+            DeckModule::DoubleBattery => art.double_turrets.clone(),
             DeckModule::Reserve => art.remove.clone(),
         },
         DockJob::Move { from, to } if to < from => art.fore.clone(),
@@ -130,6 +133,7 @@ pub(super) fn order_caption(job: DockJob, run: &Campaign) -> String {
         DockJob::Replace { with, .. } => match with {
             DeckModule::CentreBattery => "Turret",
             DeckModule::WingBattery => "Wings",
+            DeckModule::DoubleBattery => "Double",
             DeckModule::Reserve => "Remove",
         }
         .into(),
@@ -150,9 +154,10 @@ pub(super) fn caption(job: DockJob, run: &Campaign) -> &'static str {
     match job {
         DockJob::Replace { at, with } => match exchange_name(run, at, with) {
             "Add centre turret" => "Turret",
-            "Add wing turrets" => "Wings",
+            "Add wing turrets" | "Wing turrets" => "Wings",
             "Split into wing turrets" => "Split",
             "Merge into centre turret" => "Merge",
+            _ if with == DeckModule::DoubleBattery => "Double",
             _ => "Remove",
         },
         DockJob::Move { from, to } if to < from => "Fwd",
@@ -188,6 +193,11 @@ pub(super) fn caption(job: DockJob, run: &Campaign) -> &'static str {
             HeavyAntiAir => "Flak",
             QuickAntiAir => "Reload",
             Pumps => "Pumps",
+            MoreLaunchers => "Launch",
+            MoreMissiles => "Salvo",
+            MorePlanes => "Planes",
+            MoreBombs => "Bombs",
+            SecondaryTurrets => "Turrets",
         },
     }
 }

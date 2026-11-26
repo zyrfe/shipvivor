@@ -62,6 +62,14 @@ impl ShipBeam {
             Self::Capital => 14,
         }
     }
+    /// The most main turrets a hull this broad carries. A capital beam has room for
+    /// double turrets abreast, and the stability for two more turrets in all.
+    pub const fn most_turrets(self) -> usize {
+        match self {
+            Self::Escort | Self::Cruiser => crate::MAX_GUN_STATIONS,
+            Self::Capital => 6,
+        }
+    }
     /// The most ranks of armor plate a hull this broad can carry. Each step of beam
     /// gives her the stability for two more ranks of heavier side plate.
     pub const fn most_armor(self) -> u16 {

@@ -2,7 +2,7 @@
 use crate::bot::{Bot, Intent, THREAT_RANGE, Temperament, combatants_within};
 use crate::sector::Sector;
 use crate::voyage::{engage, fit_player, helm_at_start, open_battle, settle, steer};
-use shipvivor_campaign::{LegEnd, Phase, Run, Stage};
+use shipvivor_campaign::{Grade, LegEnd, Phase, Run, Stage};
 use shipvivor_encounter::{Battery, EffectKind, Rewards};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -83,6 +83,8 @@ impl Outcome {
 #[derive(Clone, Copy, Debug)]
 pub struct Setup {
     pub stage: Stage,
+    /// How hard the passage into the sea runs. An anchorage ignores it.
+    pub grade: Grade,
     pub seed: u64,
     pub temperament: Temperament,
 }
@@ -157,8 +159,9 @@ impl Report {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "# simulated {} seed {} {}: {} after {}, {} stars, {} sunk, {}/{} yards, lowest hull {}%",
+            "# simulated {} ({}) seed {} {}: {} after {}, {} stars, {} sunk, {}/{} yards, lowest hull {}%",
             s.stage.mission().name,
+            s.grade.name().to_lowercase(),
             s.seed,
             s.temperament.name(),
             self.outcome.name(),
@@ -249,13 +252,14 @@ pub fn sail_for(setup: Setup, limit: f32) -> Report {
     let started = std::time::Instant::now();
     let mut run = Run::default();
     run.stage = setup.stage;
+    run.grade = setup.grade;
     if setup.stage.is_opening() {
         run.origin = setup.stage;
     } else {
         run.course.push(setup.stage);
     }
     run.seed = setup.seed;
-    let sector = Sector::of(setup.stage);
+    let sector = Sector::of(setup.stage, setup.grade);
     let chart = sector.chart(setup.seed);
     let mut battle = open_battle(&sector, &chart, &run, Rewards::Direct, true);
     let mut helm = helm_at_start(&chart, &battle, true);

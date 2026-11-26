@@ -279,7 +279,7 @@ mod tests {
                         AirRaid::Strafe => !battle.shots.is_empty(),
                     };
                     battle.advance_shots(dt, player, &mut hits);
-                    battle.fly_floatplane(dt, player, 0., &mut hits);
+                    battle.fly_floatplanes(dt, player, 0., &mut hits);
                 }
                 assert!(seen && weapon_released);
                 assert_eq!(hits.damage > 0, !dodge, "{raid:?}, dodge {dodge}: {hits:?}");

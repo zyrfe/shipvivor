@@ -97,8 +97,8 @@ fn hint(cmd: &mut Commands, parent: Entity, words: impl Into<String>) {
     text(cmd, parent, words, 12., cyan());
 }
 
-/// Main turrets aboard as a row of pips, out of the most the ship can carry.
-pub(super) fn pips(cmd: &mut Commands, parent: Entity, filled: &[(usize, Color)]) {
+/// Main turrets aboard as a row of pips, out of the `most` the ship can carry.
+pub(super) fn pips(cmd: &mut Commands, parent: Entity, filled: &[(usize, Color)], most: usize) {
     let row = node(
         cmd,
         parent,
@@ -112,7 +112,7 @@ pub(super) fn pips(cmd: &mut Commands, parent: Entity, filled: &[(usize, Color)]
     let mut colours = filled
         .iter()
         .flat_map(|&(count, color)| std::iter::repeat_n(color, count));
-    for _ in 0..shipvivor_campaign::MAX_GUN_STATIONS {
+    for _ in 0..most {
         let color = colours.next();
         cmd.spawn((
             Node {
@@ -128,7 +128,13 @@ pub(super) fn pips(cmd: &mut Commands, parent: Entity, filled: &[(usize, Color)]
     }
 }
 
-fn turret_change(cmd: &mut Commands, parent: Entity, art: &Insignia, before: usize, after: usize) {
+fn turret_change(
+    cmd: &mut Commands,
+    parent: Entity,
+    art: &Insignia,
+    (before, after): (usize, usize),
+    most: usize,
+) {
     let row = node(
         cmd,
         parent,
@@ -140,14 +146,14 @@ fn turret_change(cmd: &mut Commands, parent: Entity, art: &Insignia, before: usi
         Color::NONE,
     );
     icon(cmd, row, art.turret.clone(), muted(), 16.);
-    pips(cmd, row, &[(before, muted())]);
+    pips(cmd, row, &[(before, muted())], most);
     icon(cmd, row, art.arrow.clone(), muted(), 10.);
     let color = if after > before {
         Change::Gain.color()
     } else {
         Change::Cost.color()
     };
-    pips(cmd, row, &[(after, color)]);
+    pips(cmd, row, &[(after, color)], most);
 }
 
 /// The pictogram for one of a fitting card's figures, where there is one.
@@ -410,7 +416,8 @@ pub(super) fn details(
             let before_guns = design.gun_stations().len();
             let after_guns = after.gun_stations().len();
             if after_guns != before_guns {
-                turret_change(cmd, spec, art, before_guns, after_guns);
+                let most = run.beam_class().most_turrets();
+                turret_change(cmd, spec, art, (before_guns, after_guns), most);
             }
             let (before, after) = (design.sheet(), after.sheet());
             delta(
@@ -619,7 +626,8 @@ fn module_details(
     let original = design.gun_stations();
     let proposed_guns = proposed.gun_stations();
     if proposed_guns.len() != original.len() {
-        turret_change(cmd, spec, art, original.len(), proposed_guns.len());
+        let most = run.beam_class().most_turrets();
+        turret_change(cmd, spec, art, (original.len(), proposed_guns.len()), most);
     }
     let local: Vec<_> = proposed_guns
         .iter()

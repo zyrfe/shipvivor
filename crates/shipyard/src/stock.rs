@@ -217,8 +217,9 @@ impl Design {
     }
 
     /// The flagship: ten turrets of 7 points each, in pairs across the hull with one
-    /// at each end, and a thin hull behind them. A turret stands four stock rounds,
-    /// as the Regent's do.
+    /// at each end, and a light hull behind them. A turret stands four stock rounds,
+    /// as the Regent's do. Her turrets screen her hull while most of them stand, so
+    /// a module stands a heavy round once it's open, and four times that screened.
     pub fn flagship() -> Self {
         let pair = || Module::new(Wide, [MainGun, MainGun]);
         enemy(
@@ -234,7 +235,7 @@ impl Design {
                 Module::new(Stern, [MainGun]),
             ],
             81.,
-            (Wide, 3.),
+            (Wide, 6.),
             7.,
             0.,
         )

@@ -7,7 +7,7 @@
 //! the blueprint, and it gets its own back once it is built.
 use crate::{
     dockyard::BERTH,
-    scene::{AaPosition, DeckFitting, SectionModel, Ship, Turret, WingPosition},
+    scene::{AaPosition, DeckFitting, RangeTower, SectionModel, Ship, Turret, WingPosition},
     state::{Campaign, Screen},
 };
 use bevy::{
@@ -72,6 +72,8 @@ pub struct Changes {
     wings_from: Option<usize>,
     /// The first light AA mount the plan adds.
     aa_from: Option<usize>,
+    /// The rangefinder tower is raised.
+    tower: bool,
 }
 impl Changes {
     /// The parts of the planned ship that the plan adds or refits.
@@ -93,8 +95,18 @@ impl Changes {
                 })
                 .collect()
         };
+        let (now, then) = (run.fittings, plan.built_fittings());
+        // Gear refitted on every rack, or on the plane section, is drawn there.
+        let (craft, craft_then) = (now.strike_craft(), then.strike_craft());
+        let racks = craft.launchers != craft_then.launchers || craft.salvo != craft_then.salvo;
+        let planes = craft.planes != craft_then.planes || craft.bombs != craft_then.bombs;
+        let regeared = |at: usize| {
+            let fit = &design.modules()[at].fit;
+            (racks && fit.contains(&shipvivor_shipyard::Component::MissileRack))
+                || (planes && fit.contains(&shipvivor_shipyard::Component::Catapult))
+        };
         let sections: Vec<usize> = modules
-            .filter(|&at| plan.is_new(at) || plan.is_refitted(at))
+            .filter(|&at| plan.is_new(at) || plan.is_refitted(at) || regeared(at))
             .collect();
         let turrets = design
             .gun_stations()
@@ -103,13 +115,13 @@ impl Changes {
             .filter(|(_, g)| sections.contains(&g.berth.module))
             .map(|(i, _)| i)
             .collect();
-        let (now, then) = (run.fittings, plan.built_fittings());
         let (wings, wings_then) = (now.secondaries(), then.secondaries());
-        let wings_from = if wings.barrels != wings_then.barrels {
-            Some(0)
-        } else {
-            (wings.per_side > wings_then.per_side).then_some(2 * wings_then.per_side)
-        };
+        let wings_from =
+            if wings.barrels != wings_then.barrels || wings.turrets != wings_then.turrets {
+                Some(0)
+            } else {
+                (wings.per_side > wings_then.per_side).then_some(2 * wings_then.per_side)
+            };
         let aa = then.anti_air().mounts;
         let aa_from = (now.anti_air().mounts > aa).then_some(aa);
         Self {
@@ -118,6 +130,7 @@ impl Changes {
             turrets,
             wings_from,
             aa_from,
+            tower: now.wing_range > then.wing_range,
         }
     }
 }
@@ -168,7 +181,8 @@ pub fn draft(
     hull_gear: Query<(Entity, &DeckFitting)>,
     turrets: Query<(Entity, &Turret)>,
     sections: Query<(Entity, &SectionModel)>,
-    wings: Query<(Entity, &WingPosition)>,
+    // Wing guns, and the rangefinder tower, which has no place of its own.
+    wings: Query<(Entity, Option<&WingPosition>), Or<(With<WingPosition>, With<RangeTower>)>>,
     tubs: Query<(Entity, &AaPosition)>,
     children: Query<&Children>,
     painted: Query<&MeshMaterial3d<StandardMaterial>>,
@@ -232,7 +246,11 @@ pub fn draft(
         }
     }
     for (root, wing) in &wings {
-        if changes.wings_from.is_some_and(|from| wing.index() >= from) {
+        let drafted = match wing {
+            Some(wing) => changes.wings_from.is_some_and(|from| wing.index() >= from),
+            None => changes.tower,
+        };
+        if drafted {
             whole(root, &mut cover);
         }
     }

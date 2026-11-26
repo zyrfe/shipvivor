@@ -1,14 +1,17 @@
-//! Breakwater's own strike craft: the floatplane a catapult launches to bomb raiders
+//! Breakwater's own strike craft: the floatplanes her catapults launch to bomb raiders
 //! near the ship, and the racks of homing missiles that fire on their own.
 //!
 //! Both are fitted from the design and fight only while their compartment's gear is
-//! in service. The renderer reads the plane, its bombs and the missiles from here.
+//! in service. The yard can put up to three catapults on the plane section and three
+//! launchers on each rack, all sharing their section's gear, and give each plane a
+//! stick of bombs and each launcher a bigger salvo. The renderer reads the planes, their
+//! bombs and the missiles from here.
 use super::{Battle, Body, Effect, EffectKind, Events, ISLAND_RADIUS, bearing, body, coast, entry};
 use glam::{Vec2, Vec3};
 use shipvivor_compass::direction;
 use shipvivor_shipyard::{
     BOMB_DAMAGE, Berth, Component, Design, FLOATPLANE_REACH, MISSILE_DAMAGE, MISSILE_RANGE,
-    MISSILE_RELOAD, MISSILE_SALVO, SORTIE_SECONDS, Ship,
+    MISSILE_RELOAD, SORTIE_SECONDS, Ship, StrikeCraft,
 };
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
@@ -28,8 +31,12 @@ pub const CATAPULT_DECK: f32 = 2.75;
 const RECOVERY: f32 = 12.;
 /// A bomb falls under this acceleration, a little faster than a shell's arc reads.
 const BOMB_GRAVITY: f32 = 14.;
-/// Seconds aboard before the first launch of a voyage.
+/// Seconds aboard before the first launch of a voyage, and between the first launches
+/// of the planes of one section, so they go up one after another.
 const FIRST_LAUNCH: f32 = 2.5;
+const LAUNCH_STAGGER: f32 = 2.;
+/// Seconds between the bombs of one stick: about seven metres apart at the plane's speed.
+const STICK_INTERVAL: f32 = 0.16;
 
 /// Missiles fly at this speed, turn this fast and skim the sea at this height.
 const MISSILE_SPEED: f32 = 95.;
@@ -58,7 +65,30 @@ pub enum Flight {
     Return,
 }
 
-/// The ship's floatplane.
+/// Where each catapult on a plane section stands, in metres forward of the section's
+/// middle and to starboard, for as many as the section carries. Two stand abreast,
+/// staggered so their wings clear, and a third on the centreline goes ahead of them.
+pub fn catapult_layout(planes: usize) -> &'static [(f32, f32)] {
+    match planes {
+        0 => &[],
+        1 => &[(0., 0.)],
+        2 => &[(0.55, -1.45), (-0.55, 1.45)],
+        _ => &[(-0.75, -1.6), (0.9, 0.), (-0.75, 1.6)],
+    }
+}
+/// Where each launcher on a missile rack stands, in metres forward of the section's
+/// middle and to starboard. Two stand abreast, and a third on the centreline ahead,
+/// each far enough from the others that their boxes clear on any bearing.
+pub fn launcher_layout(launchers: usize) -> &'static [(f32, f32)] {
+    match launchers {
+        0 => &[],
+        1 => &[(0., 0.)],
+        2 => &[(0., -1.4), (0., 1.4)],
+        _ => &[(-1.15, -1.35), (-1.15, 1.35), (1.15, 0.)],
+    }
+}
+
+/// One of the ship's floatplanes.
 #[derive(Clone, Debug)]
 pub struct Floatplane {
     pub position: Vec2,
@@ -66,8 +96,10 @@ pub struct Floatplane {
     pub altitude: f32,
     pub bank: f32,
     pub flight: Flight,
-    /// It carries a bomb.
-    pub armed: bool,
+    /// Bombs it carries.
+    pub bombs: usize,
+    /// It has begun dropping its stick, and the seconds before the next bomb goes.
+    stick: Option<f32>,
     catapult: Berth,
     /// The catapult's place on deck: metres forward of the ship's position, then to starboard.
     station: (f32, f32),
@@ -76,6 +108,31 @@ pub struct Floatplane {
     phase: f32,
 }
 impl Floatplane {
+    /// A plane on its catapult, launched after `rearm` seconds with `bombs` aboard.
+    fn on_catapult(catapult: Berth, station: (f32, f32), rearm: f32, bombs: usize) -> Self {
+        Self {
+            position: Vec2::ZERO,
+            heading: 0.,
+            altitude: CATAPULT_DECK,
+            bank: 0.,
+            flight: Flight::Aboard { rearm },
+            bombs,
+            stick: None,
+            catapult,
+            station,
+            in_service: true,
+            phase: 0.,
+        }
+    }
+    /// It carries a bomb still to drop.
+    pub fn armed(&self) -> bool {
+        self.bombs > 0
+    }
+    /// The catapult's place on deck: metres forward of the ship's position, then to
+    /// starboard.
+    pub fn station(&self) -> (f32, f32) {
+        self.station
+    }
     pub fn aboard(&self) -> bool {
         matches!(self.flight, Flight::Aboard { .. })
     }
@@ -150,6 +207,10 @@ impl Launcher {
     pub fn in_service(&self) -> bool {
         self.in_service
     }
+    /// Metres forward of the ship's position, then to starboard.
+    pub fn station(&self) -> (f32, f32) {
+        self.station
+    }
 }
 
 /// A missile in flight.
@@ -183,8 +244,16 @@ fn stations(design: &Design, component: Component) -> Vec<(Berth, (f32, f32))> {
 }
 
 impl Battle {
-    pub fn floatplane(&self) -> Option<&Floatplane> {
-        self.floatplane.as_ref()
+    pub fn floatplanes(&self) -> &[Floatplane] {
+        &self.floatplanes
+    }
+    /// How the strike craft are fitted out.
+    pub fn strike_craft(&self) -> StrikeCraft {
+        self.strike
+    }
+    /// Fit the strike craft out so. It takes hold at the next [`Battle::fit_design`].
+    pub fn fit_strike(&mut self, craft: StrikeCraft) {
+        self.strike = craft;
     }
     pub fn bombs(&self) -> &[Bomb] {
         &self.bombs
@@ -196,32 +265,40 @@ impl Battle {
         &self.missiles
     }
 
-    /// Ship the catapult and missile racks a design carries. A plane or rack still
-    /// in the same place keeps its state; one in a new place starts fresh.
+    /// Ship the catapults and missile racks a design carries, as many to a section as
+    /// the strike craft are fitted with. A plane or launcher still in the same place
+    /// keeps its state; one in a new place starts fresh.
     pub(super) fn fit_strike_craft(&mut self, design: &Design) {
-        self.floatplane =
-            stations(design, Component::Catapult)
-                .first()
-                .map(|&(catapult, station)| match self.floatplane.take() {
-                    Some(plane) if plane.station == station => Floatplane { catapult, ..plane },
-                    _ => Floatplane {
-                        position: Vec2::ZERO,
-                        heading: 0.,
-                        altitude: CATAPULT_DECK,
-                        bank: 0.,
-                        flight: Flight::Aboard {
-                            rearm: FIRST_LAUNCH,
-                        },
-                        armed: true,
-                        catapult,
-                        station,
-                        in_service: true,
-                        phase: 0.,
+        let craft = self.strike;
+        // Each piece of gear stands at its place on its section.
+        let spread = |component, layout: &'static [(f32, f32)]| {
+            stations(design, component)
+                .into_iter()
+                .flat_map(move |(berth, (fore, abeam))| {
+                    layout
+                        .iter()
+                        .map(move |&(f, a)| (berth, (fore + f, abeam + a)))
+                })
+        };
+        let old = std::mem::take(&mut self.floatplanes);
+        self.floatplanes = spread(Component::Catapult, catapult_layout(craft.planes))
+            .take(craft.planes)
+            .enumerate()
+            .map(|(i, (catapult, station))| {
+                old.iter().find(|p| p.station == station).map_or_else(
+                    || {
+                        let rearm = FIRST_LAUNCH + LAUNCH_STAGGER * i as f32;
+                        Floatplane::on_catapult(catapult, station, rearm, craft.bombs)
                     },
-                });
+                    |p| Floatplane {
+                        catapult,
+                        ..p.clone()
+                    },
+                )
+            })
+            .collect();
         let old = std::mem::take(&mut self.launchers);
-        self.launchers = stations(design, Component::MissileRack)
-            .into_iter()
+        self.launchers = spread(Component::MissileRack, launcher_layout(craft.launchers))
             .map(|(berth, station)| {
                 old.iter().find(|l| l.station == station).map_or_else(
                     || Launcher {
@@ -240,7 +317,7 @@ impl Battle {
     }
 
     pub(super) fn strike_craft_service(&mut self, ship: &Ship) {
-        if let Some(plane) = &mut self.floatplane {
+        for plane in &mut self.floatplanes {
             plane.in_service = ship.ready(plane.catapult);
         }
         for launcher in &mut self.launchers {
@@ -248,22 +325,24 @@ impl Battle {
         }
     }
 
-    /// The nearest afloat raider within `reach` of `from` that the sea leads to.
-    fn quarry(&self, from: Vec2, reach: f32) -> Option<u64> {
-        self.raiders
+    /// The afloat raiders within `reach` of `from` that the sea leads to, nearest first.
+    fn quarries(&self, from: Vec2, reach: f32) -> Vec<u64> {
+        let mut near: Vec<_> = self
+            .raiders
             .iter()
             .filter(|r| r.afloat() && r.body.pos.distance_squared(from) <= reach * reach)
             .filter(|r| coast::open_water(from, r.body.pos, &self.ports, &self.landmarks))
-            .min_by(|a, b| {
-                a.body
-                    .pos
-                    .distance_squared(from)
-                    .total_cmp(&b.body.pos.distance_squared(from))
-            })
-            .map(|r| r.body.id)
+            .map(|r| (r.body.pos.distance_squared(from), r.body.id))
+            .collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        near.into_iter().map(|(_, id)| id).collect()
+    }
+    /// The nearest afloat raider within `reach` of `from` that the sea leads to.
+    fn quarry(&self, from: Vec2, reach: f32) -> Option<u64> {
+        self.quarries(from, reach).first().copied()
     }
 
-    pub(super) fn fly_floatplane(
+    pub(super) fn fly_floatplanes(
         &mut self,
         dt: f32,
         player: Vec2,
@@ -271,10 +350,36 @@ impl Battle {
         events: &mut Events,
     ) {
         self.drop_bombs(dt, player, events);
-        let quarry = self.quarry(player, FLOATPLANE_REACH);
-        let Some(plane) = &mut self.floatplane else {
-            return;
-        };
+        let quarries = self.quarries(player, FLOATPLANE_REACH);
+        let load = self.strike.bombs;
+        let mut planes = std::mem::take(&mut self.floatplanes);
+        for i in 0..planes.len() {
+            // Each plane goes for the nearest raider no other plane is already after.
+            let taken = |id: u64| {
+                planes
+                    .iter()
+                    .enumerate()
+                    .any(|(j, p)| j != i && p.flight == Flight::Attack { target: id })
+            };
+            let quarry = quarries
+                .iter()
+                .copied()
+                .find(|&id| !taken(id))
+                .or(quarries.first().copied());
+            self.fly_floatplane(&mut planes[i], dt, player, heading, quarry, load);
+        }
+        self.floatplanes = planes;
+    }
+
+    fn fly_floatplane(
+        &mut self,
+        plane: &mut Floatplane,
+        dt: f32,
+        player: Vec2,
+        heading: f32,
+        quarry: Option<u64>,
+        load: usize,
+    ) {
         let catapult = on_deck(player, heading, plane.station);
         match plane.flight {
             Flight::Aboard { rearm } => {
@@ -289,15 +394,16 @@ impl Battle {
                 plane.flight = if rearm > 0. {
                     Flight::Aboard { rearm }
                 } else {
-                    plane.armed = true;
+                    plane.bombs = load;
+                    plane.stick = None;
                     plane.phase = bearing(direction(heading)) - FRAC_PI_2;
                     Flight::Patrol
                 };
             }
             Flight::Patrol => {
-                if !plane.armed && plane.in_service {
+                if !plane.armed() && plane.in_service {
                     plane.flight = Flight::Return;
-                } else if let (true, Some(target)) = (plane.armed, quarry) {
+                } else if let (true, Some(target)) = (plane.armed(), quarry) {
                     plane.flight = Flight::Attack { target };
                 }
                 plane.phase = (plane.phase + dt * PLANE_SPEED / CIRCUIT).rem_euclid(TAU);
@@ -306,6 +412,23 @@ impl Battle {
                 let goal = player + Vec2::new(ahead.cos(), ahead.sin()) * CIRCUIT;
                 plane.steer(dt, goal);
                 plane.climb_toward(dt, CRUISE_ALTITUDE);
+            }
+            // Once the stick has begun the plane holds its run until the last bomb goes.
+            Flight::Attack { .. } if plane.stick.is_some() => {
+                let straight = plane.position + direction(plane.heading) * 100.;
+                plane.steer(dt, straight);
+                let wait = plane.stick.unwrap_or(0.) - dt;
+                if wait > 0. {
+                    plane.stick = Some(wait);
+                    return;
+                }
+                self.bombs.push(Bomb::new(plane.position_3d(), false));
+                plane.bombs = plane.bombs.saturating_sub(1);
+                plane.stick = Some(wait + STICK_INTERVAL);
+                if plane.bombs == 0 {
+                    plane.stick = None;
+                    plane.flight = Flight::Return;
+                }
             }
             Flight::Attack { target } => {
                 let Some(raider) = self
@@ -317,7 +440,8 @@ impl Battle {
                     plane.flight = Flight::Patrol;
                     return;
                 };
-                // The bomb drops straight down, so aim where the raider will be when it lands.
+                // The bombs drop straight down, so aim where the raider will be when they
+                // land, and open the stick early so that its middle falls on her.
                 let fall = (2. * plane.altitude / BOMB_GRAVITY).sqrt();
                 let aim = raider.body.pos + raider.way * fall;
                 plane.steer(dt, aim);
@@ -327,10 +451,15 @@ impl Battle {
                 let along = offset.dot(ahead);
                 let across = offset.dot(ahead.perp()).abs();
                 let low = plane.altitude <= ATTACK_ALTITUDE + 4.;
-                if low && along < 1. && along > -2. && across < 2. {
+                let lead = PLANE_SPEED * STICK_INTERVAL * plane.bombs.saturating_sub(1) as f32 / 2.;
+                if low && along < 1. + lead && along > -2. + lead && across < 2. {
                     self.bombs.push(Bomb::new(plane.position_3d(), false));
-                    plane.armed = false;
-                    plane.flight = Flight::Return;
+                    plane.bombs = plane.bombs.saturating_sub(1);
+                    if plane.bombs == 0 {
+                        plane.flight = Flight::Return;
+                    } else {
+                        plane.stick = Some(STICK_INTERVAL);
+                    }
                 }
             }
             Flight::Return => {
@@ -412,6 +541,7 @@ impl Battle {
 
     pub(super) fn fire_missiles(&mut self, dt: f32, player: Vec2, heading: f32) {
         let quarry = self.quarry(player, MISSILE_RANGE);
+        let salvo = self.strike.salvo;
         for i in 0..self.launchers.len() {
             let launcher = &mut self.launchers[i];
             launcher.reload = (launcher.reload - dt).max(0.);
@@ -441,7 +571,7 @@ impl Battle {
                 continue;
             };
             if !firing && launcher.reload == 0. && error.abs() < LAUNCHER_LAID {
-                launcher.salvo = (MISSILE_SALVO, 0.);
+                launcher.salvo = (salvo, 0.);
                 launcher.reload = MISSILE_RELOAD;
             }
             let (left, wait) = launcher.salvo;
@@ -537,7 +667,7 @@ impl Battle {
 mod tests {
     use super::*;
     use crate::{EnemyClass, MainShell, TurretLayout};
-    use shipvivor_shipyard::{Frame, Module};
+    use shipvivor_shipyard::{Frame, MISSILE_SALVO, Module};
 
     const TICK: f32 = 1. / 60.;
     /// Well clear of the harbours and islands of the test route.
@@ -555,6 +685,11 @@ mod tests {
     }
 
     fn battle(ship: &Ship) -> Battle {
+        fitted(ship, StrikeCraft::STOCK)
+    }
+
+    /// A battle with her strike craft fitted out as `craft`.
+    fn fitted(ship: &Ship, craft: StrikeCraft) -> Battle {
         let mut b = Battle::for_route(
             14.,
             [
@@ -568,6 +703,7 @@ mod tests {
         );
         b.raiders.clear();
         b.landmarks.clear();
+        b.fit_strike(craft);
         b.fit_design(ship.design(), |_| (MainShell::STOCK, TurretLayout::Twin));
         b.update_mount_service(ship);
         b
@@ -577,7 +713,7 @@ mod tests {
     fn fly(b: &mut Battle, seconds: f32) -> Events {
         let mut events = Events::default();
         for _ in 0..(seconds / TICK) as usize {
-            b.fly_floatplane(TICK, OPEN, 0., &mut events);
+            b.fly_floatplanes(TICK, OPEN, 0., &mut events);
         }
         events
     }
@@ -594,9 +730,9 @@ mod tests {
     #[test]
     fn a_ship_without_the_gear_carries_neither_plane_nor_rack() {
         let b = battle(&armed(&[]));
-        assert!(b.floatplane().is_none() && b.launchers().is_empty());
+        assert!(b.floatplanes().first().is_none() && b.launchers().is_empty());
         let b = battle(&armed(&[Component::Catapult, Component::MissileRack]));
-        assert!(b.floatplane().is_some_and(Floatplane::aboard));
+        assert!(b.floatplanes().first().is_some_and(Floatplane::aboard));
         assert_eq!(b.launchers().len(), 1);
     }
 
@@ -606,7 +742,7 @@ mod tests {
         let mut b = battle(&ship);
         // With nothing to bomb, it is launched and flies the circuit.
         fly(&mut b, 8.);
-        let plane = b.floatplane().unwrap();
+        let plane = b.floatplanes().first().unwrap();
         assert_eq!(plane.flight, Flight::Patrol);
         assert!(plane.altitude > 20. && plane.position.distance(OPEN) < CIRCUIT + 60.);
 
@@ -616,7 +752,7 @@ mod tests {
         let mut landed = false;
         for _ in 0..60 {
             hits += fly(&mut b, 1.).hits;
-            landed |= b.floatplane().unwrap().aboard();
+            landed |= b.floatplanes().first().unwrap().aboard();
             if hits > 0 && landed {
                 break;
             }
@@ -624,11 +760,11 @@ mod tests {
         assert_eq!(hits, 1);
         assert!(b.raiders[0].hull() < hull);
         assert!(landed, "the plane comes back aboard to rearm");
-        let plane = b.floatplane().unwrap();
-        assert!(!plane.armed || plane.aboard());
+        let plane = b.floatplanes().first().unwrap();
+        assert!(!plane.armed() || plane.aboard());
         // It goes out again once armed.
         fly(&mut b, SORTIE_SECONDS + 1.);
-        assert!(!b.floatplane().unwrap().aboard());
+        assert!(!b.floatplanes().first().unwrap().aboard());
     }
 
     #[test]
@@ -642,7 +778,7 @@ mod tests {
         let events = fly(&mut b, 30.);
         assert_eq!(events.hits, 0);
         assert!(b.bombs().is_empty());
-        assert_eq!(b.floatplane().unwrap().flight, Flight::Patrol);
+        assert_eq!(b.floatplanes().first().unwrap().flight, Flight::Patrol);
     }
 
     #[test]
@@ -653,18 +789,18 @@ mod tests {
         assert!(!ship.ready(berth));
         let mut b = battle(&ship);
         fly(&mut b, 10.);
-        assert!(b.floatplane().unwrap().aboard());
+        assert!(b.floatplanes().first().unwrap().aboard());
 
         // Aloft when the catapult is lost, it circles without landing.
         let mut ship = armed(&[Component::Catapult]);
         let mut b = battle(&ship);
         fly(&mut b, 6.);
-        assert!(!b.floatplane().unwrap().aboard());
+        assert!(!b.floatplanes().first().unwrap().aboard());
         ship.strike_fitting(berth, 1000.);
         b.update_mount_service(&ship);
-        b.floatplane.as_mut().unwrap().armed = false;
+        b.floatplanes[0].bombs = 0;
         fly(&mut b, 20.);
-        assert_eq!(b.floatplane().unwrap().flight, Flight::Patrol);
+        assert_eq!(b.floatplanes().first().unwrap().flight, Flight::Patrol);
     }
 
     #[test]
@@ -724,5 +860,110 @@ mod tests {
         shoot(&mut b, 20.);
         assert!(b.missiles().is_empty());
         assert!(b.effects.iter().any(|fx| fx.kind == EffectKind::Splash));
+    }
+
+    #[test]
+    fn more_planes_go_up_one_after_another_and_hunt_different_raiders() {
+        let ship = armed(&[Component::Catapult]);
+        let craft = StrikeCraft {
+            planes: 3,
+            ..StrikeCraft::STOCK
+        };
+        let mut b = fitted(&ship, craft);
+        let planes = b.floatplanes();
+        assert_eq!(planes.len(), 3);
+        // Each has a catapult of its own on the section, all sharing its gear.
+        let stations: Vec<_> = planes.iter().map(Floatplane::station).collect();
+        assert!(stations[0] != stations[1] && stations[1] != stations[2]);
+        assert!(planes.iter().all(|p| p.catapult == planes[0].catapult));
+        // The first is launched before the others.
+        fly(&mut b, FIRST_LAUNCH + 0.2);
+        let aloft = |b: &Battle| b.floatplanes().iter().filter(|p| !p.aboard()).count();
+        assert_eq!(aloft(&b), 1);
+        fly(&mut b, 2. * LAUNCH_STAGGER);
+        assert_eq!(aloft(&b), 3);
+
+        b.spawn(EnemyClass::Freighter, OPEN + Vec2::new(380., -120.), OPEN);
+        b.spawn(EnemyClass::Freighter, OPEN + Vec2::new(-300., 260.), OPEN);
+        fly(&mut b, 0.5);
+        let targets: Vec<_> = b
+            .floatplanes()
+            .iter()
+            .filter_map(|p| match p.flight {
+                Flight::Attack { target } => Some(target),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(targets.len(), 3);
+        assert!(targets.contains(&b.raiders[0].body.id) && targets.contains(&b.raiders[1].body.id));
+        // A wrecked catapult grounds every plane on the section.
+        let mut ship = ship;
+        ship.strike_fitting(b.floatplanes()[0].catapult, 1000.);
+        b.update_mount_service(&ship);
+        assert!(b.floatplanes().iter().all(|p| !p.in_service()));
+    }
+
+    #[test]
+    fn a_plane_with_more_bombs_drops_them_in_a_stick_on_one_pass() {
+        let ship = armed(&[Component::Catapult]);
+        let craft = StrikeCraft {
+            bombs: 3,
+            ..StrikeCraft::STOCK
+        };
+        let mut b = fitted(&ship, craft);
+        fly(&mut b, FIRST_LAUNCH + 0.2);
+        assert_eq!(b.floatplanes()[0].bombs, 3);
+        b.spawn(EnemyClass::Battleship, OPEN + Vec2::new(380., -120.), OPEN);
+        let hull = b.raiders[0].hull();
+        let mut hits = 0;
+        let mut most_falling = 0;
+        for _ in 0..(40. / TICK) as usize {
+            hits += fly(&mut b, TICK).hits;
+            most_falling = most_falling.max(b.bombs().len());
+            if b.floatplanes()[0].flight == Flight::Return && b.bombs().is_empty() {
+                break;
+            }
+        }
+        // All three are falling at once, and the plane turns for home with none left.
+        assert_eq!(most_falling, 3);
+        assert_eq!(b.floatplanes()[0].bombs, 0);
+        assert_eq!(b.floatplanes()[0].flight, Flight::Return);
+        assert!(hits >= 1 && b.raiders[0].hull() < hull);
+        let fell = b
+            .effects
+            .iter()
+            .filter(|fx| matches!(fx.kind, EffectKind::Burst | EffectKind::Splash))
+            .count();
+        assert_eq!(fell, 3);
+    }
+
+    #[test]
+    fn more_launchers_stand_on_the_rack_and_fire_bigger_salvos() {
+        let ship = armed(&[Component::MissileRack]);
+        let craft = StrikeCraft {
+            launchers: 3,
+            salvo: 4,
+            ..StrikeCraft::STOCK
+        };
+        let mut b = fitted(&ship, craft);
+        assert_eq!(b.launchers().len(), 3);
+        let stations: Vec<_> = b.launchers().iter().map(Launcher::station).collect();
+        assert!(
+            stations[0] != stations[1] && stations[1] != stations[2] && stations[0] != stations[2]
+        );
+        assert_eq!(stations.len(), launcher_layout(3).len());
+        b.spawn(EnemyClass::Battleship, OPEN + Vec2::new(520., 260.), OPEN);
+        // Every launcher ripples off its four within a few seconds.
+        let early = shoot(&mut b, 3.5);
+        assert_eq!(usize::from(early.hits) + b.missiles().len(), 3 * 4);
+        // Nine hits are enough to sink her, and what is still flying runs on past her.
+        let hits = early.hits + shoot(&mut b, 8.).hits;
+        assert!(hits >= 9);
+        assert!(!b.raiders[0].afloat() || hits == 12);
+        // Refitted back to stock, the rack keeps the launcher in the middle of the section.
+        b.fit_strike(StrikeCraft::STOCK);
+        b.fit_design(ship.design(), |_| (MainShell::STOCK, TurretLayout::Twin));
+        assert_eq!(b.launchers().len(), 1);
+        assert_eq!(MISSILE_SALVO, StrikeCraft::STOCK.salvo);
     }
 }

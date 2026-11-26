@@ -154,9 +154,68 @@ impl WingPosition {
     }
 }
 
-/// A wing gun barrel shown when the fitted mounts carry this many barrels.
+/// A wing gun barrel shown when the fitted mounts carry this many barrels, on a
+/// shielded mount or in a gunhouse.
 #[derive(Component)]
-pub struct WingBarrel(usize);
+pub struct WingBarrel {
+    barrels: usize,
+    turret: bool,
+}
+/// The shielded mount of a wing gun, or the four-inch gunhouse it is rebuilt as.
+#[derive(Component)]
+pub struct WingHouse {
+    turret: bool,
+}
+
+/// The size the wing guns' gunhouses are drawn at, against a main turret's at the same
+/// bore, and how far inboard of its station each on the forecastle stands.
+const WING_TURRET_SCALE: f32 = 0.75;
+const WING_TURRET_INSET: f32 = 0.8;
+
+/// The rangefinder tower raised on the bridge roof: a tier for each rangefinder
+/// fitted, and the spotting top that rides on the highest.
+#[derive(Component)]
+pub struct RangeTower;
+#[derive(Component)]
+pub struct TowerTier(u16);
+#[derive(Component)]
+pub struct SpottingTop;
+/// Height of the bridge roof the tower stands on, and of the top of each tier.
+const BRIDGE_ROOF: f32 = 4.57;
+const TIER_TOPS: [f32; 2] = [5.55, 6.85];
+
+/// The tower stands as many tiers high as rangefinders are fitted, with the spotting
+/// top on the highest.
+pub fn place_tower(
+    run: Res<Campaign>,
+    mut towers: Query<&mut Visibility, With<RangeTower>>,
+    mut tiers: Query<(&TowerTier, &mut Visibility), Without<RangeTower>>,
+    mut tops: Query<&mut Transform, With<SpottingTop>>,
+) {
+    let ranks = run
+        .display_fittings()
+        .wing_range
+        .min(TIER_TOPS.len() as u16);
+    let raised = if ranks > 0 {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut shown in &mut towers {
+        shown.set_if_neq(raised);
+    }
+    for (tier, mut shown) in &mut tiers {
+        shown.set_if_neq(if tier.0 <= ranks {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
+    }
+    let top = TIER_TOPS[usize::from(ranks.max(1)) - 1];
+    for mut pose in &mut tops {
+        pose.translation.y = top;
+    }
+}
 
 #[derive(Component)]
 pub struct GunTubes {
@@ -222,14 +281,38 @@ pub fn place_wing_guns(
     run: Res<Campaign>,
     battle: Res<Encounter>,
     mut guns: Query<(&WingPosition, &mut Transform, &mut Visibility)>,
-    mut barrels: Query<(&WingBarrel, &mut Visibility), Without<WingPosition>>,
+    mut barrels: Query<(&WingBarrel, &mut Visibility), (Without<WingPosition>, Without<WingHouse>)>,
+    mut houses: Query<(&WingHouse, &mut Visibility), (Without<WingPosition>, Without<WingBarrel>)>,
 ) {
     let yard = matches!(run.screen(), crate::state::Screen::Drydock(_));
     let secondaries = run.display_fittings().secondaries();
     let deck = yard.then(|| DeckOffsets::for_design(&run.display_design()));
+    let fitted = if yard {
+        secondaries
+    } else {
+        battle.secondaries()
+    };
+    for (house, mut shown) in &mut houses {
+        shown.set_if_neq(if house.turret == fitted.turrets {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
+    }
+    // A gunhouse is broader than a shielded mount, so on the forecastle, where the hull
+    // narrows, it is drawn a little inboard of the gun's station.
+    let inset = |index: usize, x: f32| {
+        let forecastle = shipvivor_encounter::WingGun::station(index).1 > 5.;
+        if fitted.turrets && forecastle {
+            x - x.signum() * WING_TURRET_INSET
+        } else {
+            x
+        }
+    };
     for (gun, mut pose, mut shown) in &mut guns {
         if let Some(deck) = deck {
             let (x, fore) = deck.wing_position(gun.0);
+            let x = inset(gun.0, x);
             *shown = if gun.0 < secondaries.per_side * 2 {
                 Visibility::Inherited
             } else {
@@ -241,26 +324,23 @@ pub fn place_wing_guns(
             pose.rotation = Quat::from_rotation_y(-home);
             continue;
         }
-        let Some(fitted) = battle.wing_guns().get(gun.0) else {
+        let Some(mount) = battle.wing_guns().get(gun.0) else {
             shown.set_if_neq(Visibility::Hidden);
             continue;
         };
         shown.set_if_neq(Visibility::Inherited);
-        pose.translation.z = -fitted.deck_fore();
-        pose.translation.x = fitted.deck_x();
-        pose.rotation = Quat::from_rotation_y(-fitted.deck_bearing());
+        pose.translation.z = -mount.deck_fore();
+        pose.translation.x = inset(gun.0, mount.deck_x());
+        pose.rotation = Quat::from_rotation_y(-mount.deck_bearing());
     }
-    let fitted = if yard {
-        secondaries.barrels
-    } else {
-        battle.secondaries().barrels
-    };
     for (barrel, mut shown) in &mut barrels {
-        shown.set_if_neq(if barrel.0 == fitted {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        });
+        shown.set_if_neq(
+            if barrel.barrels == fitted.barrels && barrel.turret == fitted.turrets {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            },
+        );
     }
 }
 
@@ -577,6 +657,119 @@ pub fn setup(
             1.8,
         );
     }
+    // The rangefinder tower: a stepped tier on the bridge roof for each rangefinder, and
+    // the spotting top on the highest, its rangefinder arms out to either side.
+    let tower = commands
+        .spawn((
+            RangeTower,
+            DeckFitting {
+                anchor: Anchor::Bridge,
+                x: 0.,
+                z: 0.,
+            },
+            Transform::default(),
+            Visibility::Hidden,
+            ChildOf(ship),
+        ))
+        .id();
+    let bridge_z = -3.1;
+    let mut floor = BRIDGE_ROOF;
+    for (rank, (top, width)) in TIER_TOPS.into_iter().zip([1.9, 1.45]).enumerate() {
+        let tier = commands
+            .spawn((
+                TowerTier(rank as u16 + 1),
+                Transform::default(),
+                Visibility::Hidden,
+                ChildOf(tower),
+            ))
+            .id();
+        let height = top - floor;
+        for (mesh, paint, at, size) in [
+            (
+                &cube,
+                &steel,
+                Vec3::new(0., floor + 0.5 * height, bridge_z),
+                Vec3::new(width, height, width),
+            ),
+            // A platform rail round the top of the tier.
+            (
+                &cube,
+                &ivory,
+                Vec3::new(0., top - 0.06, bridge_z),
+                Vec3::new(width + 0.3, 0.12, width + 0.3),
+            ),
+            // Its scuttles, forward.
+            (
+                &cube,
+                &iron,
+                Vec3::new(0., floor + 0.62 * height, bridge_z - 0.5 * width - 0.01),
+                Vec3::new(0.7 * width, 0.16, 0.04),
+            ),
+        ] {
+            commands.spawn((
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(paint.clone()),
+                Transform::from_translation(at).with_scale(size),
+                ChildOf(tier),
+            ));
+        }
+        floor = top;
+    }
+    let top = commands
+        .spawn((
+            SpottingTop,
+            Transform::from_xyz(0., TIER_TOPS[0], bridge_z),
+            Visibility::Inherited,
+            ChildOf(tower),
+        ))
+        .id();
+    for (mesh, paint, at, size) in [
+        (
+            &drum,
+            &pale,
+            Vec3::new(0., 0.34, 0.),
+            Vec3::new(1.35, 0.68, 1.35),
+        ),
+        (
+            &drum,
+            &iron,
+            Vec3::new(0., 0.72, 0.),
+            Vec3::new(1.45, 0.08, 1.45),
+        ),
+        // The vision slit, forward.
+        (
+            &cube,
+            &iron,
+            Vec3::new(0., 0.42, -0.62),
+            Vec3::new(0.8, 0.14, 0.1),
+        ),
+        // The rangefinder arms, athwartships.
+        (
+            &cube,
+            &iron,
+            Vec3::new(0., 0.46, 0.15),
+            Vec3::new(2.7, 0.2, 0.26),
+        ),
+        (
+            &drum,
+            &brass,
+            Vec3::new(-1.37, 0.46, 0.15),
+            Vec3::new(0.26, 0.08, 0.26),
+        ),
+        (
+            &drum,
+            &brass,
+            Vec3::new(1.37, 0.46, 0.15),
+            Vec3::new(0.26, 0.08, 0.26),
+        ),
+    ] {
+        commands.spawn((
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(paint.clone()),
+            Transform::from_translation(at).with_scale(size),
+            ChildOf(top),
+        ));
+    }
     commands.spawn((
         Masthead,
         DeckFitting {
@@ -814,6 +1007,14 @@ pub fn setup(
                 ChildOf(ship),
             ))
             .id();
+        let shield = commands
+            .spawn((
+                WingHouse { turret: false },
+                Transform::default(),
+                Visibility::Inherited,
+                ChildOf(wing),
+            ))
+            .id();
         for (mesh, mat, at, scale, tip) in [
             (&drum, &iron, Vec3::ZERO, Vec3::new(0.93, 0.36, 0.93), 0.),
             (
@@ -830,13 +1031,16 @@ pub fn setup(
                 Transform::from_translation(at)
                     .with_rotation(Quat::from_rotation_x(tip))
                     .with_scale(scale),
-                ChildOf(wing),
+                ChildOf(shield),
             ));
         }
         // One barrel on a single mount, or a pair side by side once twinned.
         for (fitted, x) in [(1, 0.), (2, -0.18), (2, 0.18)] {
             commands.spawn((
-                WingBarrel(fitted),
+                WingBarrel {
+                    barrels: fitted,
+                    turret: false,
+                },
                 Mesh3d(drum.clone()),
                 MeshMaterial3d(steel.clone()),
                 Transform::from_xyz(x, 0.36, -0.87)
@@ -849,6 +1053,63 @@ pub fn setup(
                 },
                 ChildOf(wing),
             ));
+        }
+        // Rebuilt as a four-inch gunhouse, the main battery's first turret drawn a size
+        // smaller to fit the deck edge, its ring let into the deck.
+        let scale = shipvivor_encounter::MainShell::STOCK.mount_scale() * WING_TURRET_SCALE;
+        let gunhouse = commands
+            .spawn((
+                WingHouse { turret: true },
+                Transform::from_xyz(0., -0.09, 0.).with_scale(Vec3::splat(scale)),
+                Visibility::Hidden,
+                ChildOf(wing),
+            ))
+            .id();
+        for (mesh, paint, position, size) in [
+            (&drum, &iron, Vec3::ZERO, Vec3::new(2.7, 0.42, 2.7)),
+            (&house, &gunmetal, Vec3::ZERO, Vec3::ONE),
+            (
+                &cube,
+                &iron,
+                Vec3::new(0., 0.78, -1.10),
+                Vec3::new(1.74, 0.52, 0.30),
+            ),
+        ] {
+            commands.spawn((
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(paint.clone()),
+                Transform::from_translation(position).with_scale(size),
+                ChildOf(gunhouse),
+            ));
+        }
+        for (fitted, layout) in [(1, TurretLayout::Single), (2, TurretLayout::Twin)] {
+            for tube in 0..fitted {
+                let tubes = commands
+                    .spawn((
+                        WingBarrel {
+                            barrels: fitted,
+                            turret: true,
+                        },
+                        Transform::from_xyz(layout.barrel_x(tube), 0.63, 0.),
+                        Visibility::Hidden,
+                        ChildOf(gunhouse),
+                    ))
+                    .id();
+                for (depth, width, length, mat) in [
+                    (-1.72, 0.43, 1.58, &steel),
+                    (-2.95, 0.29, 2.15, &iron),
+                    (-3.99, 0.34, 0.18, &pale),
+                ] {
+                    commands.spawn((
+                        Mesh3d(drum.clone()),
+                        MeshMaterial3d(mat.clone()),
+                        Transform::from_xyz(0., 0., depth)
+                            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
+                            .with_scale(Vec3::new(width, length, width)),
+                        ChildOf(tubes),
+                    ));
+                }
+            }
         }
     }
     for i in 0..AntiAir::MOST_MOUNTS {

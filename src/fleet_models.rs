@@ -214,39 +214,8 @@ pub fn superstructure(class: EnemyClass) -> Mesh {
             IRON,
         );
     }
-    if matches!(class, Battleship | Commodore | Parliament | Regent) {
-        // Exposed deck-edge armour with light caps and repeated red identification stripes.
-        for side in [-1., 1.] {
-            for bay in -3_i8..=3 {
-                let t = f32::from(bay) / 4.;
-                let x = side * p.hull.radius * (0.93 - 0.20 * t.abs());
-                let z = t * p.hull.stern;
-                let base = v(x, d * 0.4, z);
-                let length = p.hull.stern * 0.21;
-                m.tier(base, v(0.48 * s, d * 0.67, length), 0.96, IRON, PALE);
-                let rail = base + v(side * 0.20 * s, d * 0.48, 0.);
-                m.tier(rail, v(0.14 * s, 0.08 * s, length), 1., PALE, PALE);
-                for dz in [-0.24, 0.24] {
-                    m.tier(
-                        rail + v(side * 0.08 * s, -0.3 * s, length * dz),
-                        v(0.10 * s, 0.20 * s, 0.32 * s),
-                        0.85,
-                        GLASS,
-                        PALE,
-                    );
-                }
-                if bay % 2 == 0 {
-                    m.tier(
-                        base + v(side * 0.24 * s, 0., 0.),
-                        v(0.14 * s, d * 0.76, 0.6 * s),
-                        1.,
-                        RED,
-                        PALE,
-                    );
-                }
-            }
-        }
-    }
+    // A capital ship's deck-edge armour hangs in strakes of its own (see `strake`),
+    // which can be shot off her.
     if class.is_flagship() {
         // A high signal gantry carries the forked standard over the three stacks.
         // Glazed galleries under the fork give the flagship a bridge visible above its batteries.
@@ -317,6 +286,44 @@ pub fn superstructure(class: EnemyClass) -> Mesh {
         }
         m.tier(v(0., d, 11.8), v(0.35, 6.6, 0.35), 1., GOLD, GOLD);
         m.tier(v(0., d + 6.3, 9.4), v(0.36, 0.32, 5.1), 1., GOLD, GOLD);
+    }
+    m.0.finish()
+}
+
+/// One of the strakes of exposed deck-edge armour along a battleship's or a flagship's
+/// side, by its index as [`EnemyClass::strake_station`] counts them: a dark plate with
+/// a light cap, two ports, and on every other strake a red identification stripe. It
+/// is built about its middle, so that one shot loose tumbles about it.
+pub fn strake(class: EnemyClass, index: usize) -> Mesh {
+    let mut m = Metal::default();
+    let p = class.profile();
+    let v = Vec3::new;
+    let (d, s) = (p.deck, p.gun_scale);
+    let (abeam, _, length) = class.strake_station(index);
+    let side = abeam.signum();
+    let (_, rise) = shipvivor_encounter::STRAKE_RISE;
+    let base = v(0., -0.5 * d * rise, 0.);
+    m.tier(base, v(0.48 * s, d * rise, length), 0.96, IRON, PALE);
+    let rail = base + v(side * 0.20 * s, d * 0.48, 0.);
+    m.tier(rail, v(0.14 * s, 0.08 * s, length), 1., PALE, PALE);
+    for dz in [-0.24, 0.24] {
+        m.tier(
+            rail + v(side * 0.08 * s, -0.3 * s, length * dz),
+            v(0.10 * s, 0.20 * s, 0.32 * s),
+            0.85,
+            GLASS,
+            PALE,
+        );
+    }
+    // The middle strake of each side wears one, and every other one from it.
+    if !(index % shipvivor_encounter::STRAKES_A_SIDE).is_multiple_of(2) {
+        m.tier(
+            base + v(side * 0.24 * s, 0., 0.),
+            v(0.14 * s, d * 0.76, 0.6 * s),
+            1.,
+            RED,
+            PALE,
+        );
     }
     m.0.finish()
 }

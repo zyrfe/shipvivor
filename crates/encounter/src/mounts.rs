@@ -30,11 +30,21 @@ pub enum Station {
     Stern,
     Third,
     Fourth,
+    Fifth,
+    Sixth,
 }
 impl Station {
     /// The two stations on a stock Breakwater.
     pub const ALL: [Self; 2] = [Self::Bow, Self::Stern];
-    pub const SLOTS: [Self; 4] = [Self::Bow, Self::Stern, Self::Third, Self::Fourth];
+    /// Every main turret a hull can carry, as many as a capital beam takes.
+    pub const SLOTS: [Self; 6] = [
+        Self::Bow,
+        Self::Stern,
+        Self::Third,
+        Self::Fourth,
+        Self::Fifth,
+        Self::Sixth,
+    ];
     pub fn index(self) -> usize {
         self as usize
     }
@@ -235,6 +245,12 @@ impl MainMount {
     /// Inches of bore this turret fires, as it was last laid.
     pub fn calibre(&self) -> f32 {
         self.shell.calibre_inches()
+    }
+    /// Seconds each of this turret's barrels takes to load. The ordered reload is for the
+    /// ship's own bore. A turret of another bore loads on the same curve, with the same
+    /// drill.
+    pub(super) fn reload(&self, orders: &Orders) -> f32 {
+        orders.reload * self.round(orders.shell).load_seconds() / orders.shell.load_seconds()
     }
     /// Radians per second this gunhouse trains at full power. A heavier bore trains
     /// more slowly, and training gear wins it back.
@@ -645,7 +661,10 @@ mod tests {
             ..stock[0]
         };
         let ship = [stock[0], stock[1], wing(2.5), wing(-2.5)];
-        let numbers: Vec<_> = Station::SLOTS.iter().map(|s| s.number(&ship)).collect();
+        let numbers: Vec<_> = Station::SLOTS[..ship.len()]
+            .iter()
+            .map(|s| s.number(&ship))
+            .collect();
         assert_eq!(numbers, [1, 4, 3, 2]);
     }
 

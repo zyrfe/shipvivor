@@ -82,19 +82,21 @@ fn gates_and_their_bearings_only_appear_in_the_helm_trial() {
 
 #[test]
 fn the_passage_chart_and_enemy_air_cover_follow_the_passages_actually_sailed() {
-    use shipvivor_campaign::{ANCHORAGES, Objectives, PATROLS, SEAS, Stage};
+    use shipvivor_campaign::{GRADES, Objectives, PATROLS, Stage, anchorages, charted};
     let keys = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3];
-    // Each run keeps to one lane from its anchorage on: open water, the sheltered sounds,
-    // or the hard passages under enemy air cover.
-    for (lane, (anchorage, key)) in ANCHORAGES.iter().zip(keys).enumerate() {
+    let offered = anchorages(TEST_SEED);
+    // Each run keeps to one place on the chart from its anchorage on: the moderate
+    // passages at the top, or the first or the second of the tough passages under enemy
+    // air cover, through whichever seas the run seed charts.
+    for (lane, (&anchorage, key)) in offered.iter().zip(keys).enumerate() {
         let mut app = headless_game();
         let w = app.world_mut();
         press(w, KeyCode::Enter);
         assert_eq!(w.resource::<Campaign>().screen(), Screen::Departure);
         let mut pins = w.query_filtered::<(&ui::Action, &mut bevy::ui::RelativeCursorPosition), With<ui::passage_chart::ChartName>>();
-        assert_eq!(pins.iter(w).count(), ANCHORAGES.len());
+        assert_eq!(pins.iter(w).count(), offered.len());
         for (action, mut cursor) in pins.iter_mut(w) {
-            cursor.cursor_over = *action == ui::Action::Depart(anchorage.stage);
+            cursor.cursor_over = *action == ui::Action::Depart(anchorage);
         }
         w.resource_mut::<ButtonInput<MouseButton>>()
             .press(MouseButton::Left);
@@ -102,9 +104,9 @@ fn the_passage_chart_and_enemy_air_cover_follow_the_passages_actually_sailed() {
         w.resource_mut::<ButtonInput<MouseButton>>().reset_all();
         w.run_schedule(Update);
         assert_eq!(w.resource::<Campaign>().screen(), Screen::Sailing);
-        assert_eq!(w.resource::<Campaign>().stage, anchorage.stage);
+        assert_eq!(w.resource::<Campaign>().stage, anchorage);
         assert_eq!(w.resource::<Campaign>().seed, TEST_SEED);
-        let chart = Passage::of(anchorage.stage).chart(TEST_SEED);
+        let chart = Passage::of(anchorage).chart(TEST_SEED);
         assert_eq!(
             w.resource::<Encounter>().ports()[0].body.pos,
             chart.harbours[0].pos
@@ -113,16 +115,16 @@ fn the_passage_chart_and_enemy_air_cover_follow_the_passages_actually_sailed() {
         assert!(w.resource::<Encounter>().air_station().is_none());
         press(w, KeyCode::Escape);
         let mut labels = w.query::<&Text>();
-        for stage in [anchorage.stage, Stage::CrownDeep]
+        for stage in [anchorage, Stage::CrownDeep]
             .into_iter()
-            .chain(SEAS[1])
+            .chain(charted(TEST_SEED, 2).unwrap())
         {
             assert!(labels.iter(w).any(|label| label.0 == stage.mission().name));
         }
         press(w, KeyCode::Escape);
         // Every leg but the last earns its three stars, and each yard charts the next
         // round's passages.
-        let air = lane == 2;
+        let air = lane > 0;
         for round in 1..PATROLS {
             {
                 let mut run = w.resource_mut::<Campaign>();
@@ -140,9 +142,10 @@ fn the_passage_chart_and_enemy_air_cover_follow_the_passages_actually_sailed() {
             w.run_schedule(Update);
             assert_eq!(w.resource::<Campaign>().screen(), Screen::Chart);
             press(w, key);
-            let sea = SEAS[round][lane];
+            let sea = charted(TEST_SEED, round + 1).unwrap()[lane];
             assert_eq!(w.resource::<Campaign>().passage(), Some(sea));
             assert_eq!(w.resource::<Campaign>().stage, sea);
+            assert_eq!(w.resource::<Campaign>().grade, GRADES[lane]);
             assert_eq!(w.resource::<Encounter>().air_station().is_some(), air);
             if w.resource::<Campaign>().screen() == Screen::Refit {
                 press(w, KeyCode::Digit1);
@@ -169,7 +172,7 @@ fn the_passage_chart_and_enemy_air_cover_follow_the_passages_actually_sailed() {
         );
         press(w, KeyCode::Enter);
         assert_eq!(w.resource::<Campaign>().stage, Stage::CrownDeep);
-        assert_eq!(w.resource::<Campaign>().origin, anchorage.stage);
+        assert_eq!(w.resource::<Campaign>().origin, anchorage);
         assert_eq!(w.resource::<Encounter>().air_station().is_some(), air);
         if air {
             // Check the finale's first real launch, including the shore's contact report.
@@ -192,12 +195,10 @@ fn the_passage_chart_and_enemy_air_cover_follow_the_passages_actually_sailed() {
         }
         press(w, KeyCode::Escape);
         let mut plotted = w.query_filtered::<&Text, With<ui::passage_chart::ChartName>>();
-        for port in &ANCHORAGES {
+        for port in offered {
             assert_eq!(
-                plotted
-                    .iter(w)
-                    .any(|name| name.0 == port.stage.mission().name),
-                port.stage == anchorage.stage
+                plotted.iter(w).any(|name| name.0 == port.mission().name),
+                port == anchorage
             );
         }
         press(w, KeyCode::KeyM);
@@ -237,10 +238,32 @@ fn the_departure_chart_waits_for_a_choice_on_new_and_replayed_runs() {
     assert!(run.ship.afloat());
 }
 
+/// Begin a run in the Iron Narrows, whose waters many tests know by heart. The test
+/// seed's first chart doesn't offer them, so this clicks a pin for them, as the chart
+/// would for a seed that did.
 fn start_in_narrows(world: &mut World) {
     press(world, KeyCode::Enter);
     assert_eq!(world.resource::<Campaign>().screen(), Screen::Departure);
-    press(world, KeyCode::Digit2);
+    let pin = world
+        .spawn((
+            ui::Action::Depart(shipvivor_campaign::Stage::IronNarrows),
+            bevy::ui::RelativeCursorPosition {
+                cursor_over: true,
+                ..default()
+            },
+        ))
+        .id();
+    world
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .press(MouseButton::Left);
+    world.run_schedule(PreUpdate);
+    world.resource_mut::<ButtonInput<MouseButton>>().reset_all();
+    world.despawn(pin);
+    world.run_schedule(Update);
+    assert_eq!(
+        world.resource::<Campaign>().stage,
+        shipvivor_campaign::Stage::IronNarrows
+    );
 }
 
 fn press(world: &mut World, key: KeyCode) {
@@ -1211,13 +1234,20 @@ fn helm_mouse_look_drives_render_and_fire_then_releases_to_menus() {
 
 #[test]
 fn chart_and_telegraph_follow_the_playable_sector() {
+    use shipvivor_campaign::Grade;
     use shipvivor_encounter::{FLAGSHIP_EARLIEST, FLAGSHIP_SORTIE, SPAWN_STANDOFF};
-    for (stage, seed) in shipvivor_campaign::SEAS
+    // Every sea of every pool, sailed moderate and tough.
+    let sailings = [
+        (TEST_SEED, Grade::Moderate),
+        (2, Grade::Tough),
+        (3, Grade::Moderate),
+    ];
+    for (stage, seed, grade) in shipvivor_campaign::POOLS
         .into_iter()
         .flatten()
-        .flat_map(|stage| [TEST_SEED, 2, 3].map(|seed| (stage, seed)))
+        .flat_map(|stage| sailings.map(|(seed, grade)| (stage, seed, grade)))
     {
-        let passage = Passage::of(stage);
+        let passage = Passage::graded(stage, grade);
         let chart = passage.chart(seed);
         let battle = passage.battle(&chart);
         // Past the first leg the flagship is fitting out, not yet at sea, and she puts
@@ -1228,7 +1258,7 @@ fn chart_and_telegraph_follow_the_playable_sector() {
                 .iter()
                 .all(|ship| ship.class != shipvivor_encounter::EnemyClass::Parliament)
         );
-        let head_start = shipvivor_sim::Sector::of(stage).head_start();
+        let head_start = shipvivor_sim::Sector::of(stage, grade).head_start();
         assert_eq!(battle.escalation(), head_start);
         assert_eq!(
             battle.flagship(),

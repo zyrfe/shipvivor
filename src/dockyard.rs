@@ -839,7 +839,7 @@ fn proposal_box(run: &Campaign, job: DockJob) -> Option<(Vec3, Vec3)> {
                 .for_station(mount)
                 .round()
                 .mount_scale();
-            let local_size = if mount.paired() {
+            let local_size = if mount.abeam != 0. {
                 coords(6., 2.15, 3.35)
             } else {
                 coords(3.35, 2.15, 6.)
@@ -1169,6 +1169,8 @@ fn section_art(run: &Campaign, at: usize, art: &Insignia) -> Handle<Image> {
         art.floatplane.clone()
     } else if parts.contains(&MissileRack) {
         art.missile.clone()
+    } else if design.modules()[at].frame == shipvivor_shipyard::Frame::DoubleBattery {
+        art.double_turrets.clone()
     } else {
         match parts.iter().filter(|&&p| p == MainGun).count() {
             0 => art.reserve_bay.clone(),
@@ -1198,9 +1200,12 @@ fn exchange_name(run: &Campaign, at: usize, with: DeckModule) -> &'static str {
         (DeckModule::WingBattery, 0) => "Add wing turrets",
         (DeckModule::WingBattery, 1) => "Split into wing turrets",
         (DeckModule::WingBattery, _) => "Wing turrets",
+        (DeckModule::DoubleBattery, 0) => "Add double turrets",
+        (DeckModule::DoubleBattery, 1) => "Make double turrets",
+        (DeckModule::DoubleBattery, _) => "Double turrets",
         (DeckModule::Reserve, 0) => "Reserve bay",
         (DeckModule::Reserve, 1) => "Remove turret",
-        (DeckModule::Reserve, _) => "Remove wing turrets",
+        (DeckModule::Reserve, _) => "Remove both turrets",
     }
 }
 fn job_name(job: DockJob, run: &Campaign) -> String {
@@ -1624,6 +1629,7 @@ fn callout(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
         cmd,
         head,
         &[(here, brass()), (run.main_turrets() - here, paper())],
+        run.beam_class().most_turrets(),
     );
     catalog::options(cmd, options, run, art, &jobs);
     // The callout keeps one size whatever is picked, so a second click lands on the tile

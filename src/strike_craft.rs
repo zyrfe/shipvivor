@@ -7,6 +7,8 @@ use crate::state::{Campaign, Encounter, Mode, Screen};
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use shipvivor_campaign::DockModule;
+use shipvivor_encounter::{catapult_layout, launcher_layout};
+use shipvivor_shipyard::StrikeCraft;
 use std::collections::HashMap;
 
 /// The floatplane is drawn at this share of the harbours' spotter, to suit the ship.
@@ -19,17 +21,40 @@ const TROLLEY: f32 = 2.32;
 /// Seconds a puff of missile smoke lasts, and between puffs.
 const PUFF_LIFE: f32 = 1.1;
 const PUFF_EVERY: f32 = 0.035;
-/// Bombs that can be falling at once.
-const BOMBS: usize = 4;
+/// Bombs that can be falling at once: a full stick from every plane.
+const BOMBS: usize = 10;
 
-/// The plane on the catapult. It is hidden while the plane is flying.
+/// The plane on one catapult. It is hidden while the plane is flying.
 #[derive(Component)]
-pub struct CatapultPlane;
-/// The trained part of a missile launcher, by its order from the bow.
+pub struct CatapultPlane {
+    instance: usize,
+    slot: usize,
+}
+/// One catapult or launcher of a section's gear, by its place in the section's layout.
+/// Those the section is not fitted with are hidden.
 #[derive(Component)]
-pub struct LauncherMount(usize);
+pub struct Rig {
+    kind: DockModule,
+    slot: usize,
+}
+/// A catapult's girder and rails, shortened when catapults stand side by side.
 #[derive(Component)]
-pub struct Airborne;
+pub struct Girder;
+/// The crane that hoists the planes back aboard.
+#[derive(Component)]
+pub struct Crane;
+/// The trained part of a missile launcher.
+#[derive(Component)]
+pub struct LauncherMount {
+    instance: usize,
+    slot: usize,
+}
+/// A launcher's box of cells, drawn for one size of salvo.
+#[derive(Component)]
+pub struct Cells(usize);
+/// A floatplane in the air, by its order among the ship's planes.
+#[derive(Component)]
+pub struct Airborne(usize);
 #[derive(Component)]
 pub struct Spinner;
 #[derive(Component)]
@@ -41,6 +66,11 @@ pub struct Puff {
     age: f32,
     size: f32,
 }
+
+/// The most catapults a plane section carries, and launchers a rack.
+const RIGS: usize = 3;
+/// The salvos a launcher's box is drawn for, smallest first.
+const SALVOS: [usize; 3] = [2, 3, 4];
 
 /// Meshes and paint for the deck gear, made once when the ship is built.
 pub(crate) struct Parts {
@@ -72,7 +102,8 @@ impl Parts {
 }
 
 /// Fit the gear of one yard section to `gear`, which is placed on the module but not
-/// stretched across a widened beam.
+/// stretched across a widened beam. Every catapult or launcher the section could carry
+/// is built, and [`rig`] shows those it is fitted with.
 pub(crate) fn equip(
     commands: &mut Commands,
     gear: Entity,
@@ -94,52 +125,88 @@ pub(crate) fn equip(
             ))
             .id()
     };
+    let group = |commands: &mut Commands, parent: Entity, pose: Transform| {
+        commands
+            .spawn((pose, Visibility::Inherited, ChildOf(parent)))
+            .id()
+    };
     let at = |x, y, z, sx, sy, sz| Transform::from_xyz(x, y, z).with_scale(Vec3::new(sx, sy, sz));
     match kind {
         DockModule::Floatplane => {
-            // A turntable, the girder of the catapult along the centreline and its rails.
-            part(
-                commands,
-                gear,
-                &parts.drum,
-                &parts.iron,
-                at(0., 1.68, 0.7, 1.6, 0.26, 1.6),
-            );
-            part(
-                commands,
-                gear,
-                &parts.cube,
-                &parts.steel,
-                at(0., 1.98, -0.1, 0.46, 0.3, 4.7),
-            );
-            for x in [-0.16, 0.16] {
+            for slot in 0..RIGS {
+                let rig = commands
+                    .spawn((
+                        Rig { kind, slot },
+                        Transform::default(),
+                        Visibility::Hidden,
+                        ChildOf(gear),
+                    ))
+                    .id();
+                // A turntable, the girder of the catapult along the centreline and its rails.
                 part(
                     commands,
-                    gear,
-                    &parts.cube,
-                    &parts.pale,
-                    at(x, 2.15, -0.1, 0.05, 0.05, 4.7),
+                    rig,
+                    &parts.drum,
+                    &parts.iron,
+                    at(0., 1.68, 0.7, 1.6, 0.26, 1.6),
                 );
+                let girder = group(commands, rig, Transform::from_xyz(0., 0., -0.1));
+                commands.entity(girder).insert(Girder);
+                part(
+                    commands,
+                    girder,
+                    &parts.cube,
+                    &parts.steel,
+                    at(0., 1.98, 0., 0.46, 0.3, 4.7),
+                );
+                for x in [-0.16, 0.16] {
+                    part(
+                        commands,
+                        girder,
+                        &parts.cube,
+                        &parts.pale,
+                        at(x, 2.15, 0., 0.05, 0.05, 4.7),
+                    );
+                }
+                part(
+                    commands,
+                    rig,
+                    &parts.cube,
+                    &parts.iron,
+                    at(0., TROLLEY - 0.08, 0.25, 0.62, 0.16, 0.95),
+                );
+                let plane = part(
+                    commands,
+                    rig,
+                    &parts.plane,
+                    &parts.airframe,
+                    Transform::from_xyz(0., TROLLEY + spotter_model::KEEL * PLANE_SCALE, 0.15)
+                        .with_scale(Vec3::splat(PLANE_SCALE)),
+                );
+                commands
+                    .entity(plane)
+                    .insert(CatapultPlane { instance, slot });
+                commands.spawn((
+                    Mesh3d(parts.propeller.clone()),
+                    MeshMaterial3d(parts.airframe.clone()),
+                    Transform::from_translation(spotter_model::HUB),
+                    ChildOf(plane),
+                ));
             }
+            // The crane that hoists the planes back aboard, its jib over the catapults.
+            let crane = group(commands, gear, Transform::from_xyz(1.85, 0., 1.7));
+            commands.entity(crane).insert(Crane);
             part(
                 commands,
-                gear,
-                &parts.cube,
-                &parts.iron,
-                at(0., TROLLEY - 0.08, 0.25, 0.62, 0.16, 0.95),
-            );
-            // The crane that hoists the plane back aboard, on the starboard quarter.
-            part(
-                commands,
-                gear,
+                crane,
                 &parts.drum,
                 &parts.steel,
-                at(1.85, 2.4, 1.7, 0.22, 1.7, 0.22),
+                at(0., 2.4, 0., 0.22, 1.7, 0.22),
             );
-            let (root, tip) = (Vec3::new(1.85, 3.2, 1.7), Vec3::new(0.35, 3.55, 0.8));
+            let (root, tip) = (Vec3::new(0., 3.2, 0.), Vec3::new(-1.5, 3.55, -0.9));
             part(
                 commands,
-                gear,
+                crane,
                 &parts.cube,
                 &parts.steel,
                 Transform::from_translation(root.midpoint(tip))
@@ -148,82 +215,95 @@ pub(crate) fn equip(
             );
             part(
                 commands,
-                gear,
+                crane,
                 &parts.cube,
                 &parts.dark,
-                at(0.35, 3.15, 0.8, 0.03, 0.8, 0.03),
+                at(-1.5, 3.15, -0.9, 0.03, 0.8, 0.03),
             );
-            let plane = part(
-                commands,
-                gear,
-                &parts.plane,
-                &parts.airframe,
-                Transform::from_xyz(0., TROLLEY + spotter_model::KEEL * PLANE_SCALE, 0.15)
-                    .with_scale(Vec3::splat(PLANE_SCALE)),
-            );
-            commands.entity(plane).insert(CatapultPlane);
-            commands.spawn((
-                Mesh3d(parts.propeller.clone()),
-                MeshMaterial3d(parts.airframe.clone()),
-                Transform::from_translation(spotter_model::HUB),
-                ChildOf(plane),
-            ));
         }
         DockModule::Missiles => {
-            part(
-                commands,
-                gear,
-                &parts.drum,
-                &parts.iron,
-                at(0., 1.75, 0.3, 1.4, 0.42, 1.4),
-            );
-            let mount = commands
-                .spawn((
-                    LauncherMount(instance),
-                    Transform::from_xyz(0., 1.96, 0.3),
-                    Visibility::default(),
-                    ChildOf(gear),
-                ))
-                .id();
-            part(
-                commands,
-                mount,
-                &parts.cube,
-                &parts.steel,
-                at(0., 0.3, 0., 1.35, 0.45, 0.7),
-            );
-            // The box of cells, raised toward the bow.
-            let cradle = commands
-                .spawn((
-                    Transform::from_xyz(0., 0.62, 0.).with_rotation(Quat::from_rotation_x(0.3)),
-                    Visibility::default(),
-                    ChildOf(mount),
-                ))
-                .id();
-            part(
-                commands,
-                cradle,
-                &parts.cube,
-                &parts.pale,
-                at(0., 0.42, 0., 1.2, 0.84, 2.9),
-            );
-            for x in [-0.29, 0.29] {
+            for slot in 0..RIGS {
+                let rig = commands
+                    .spawn((
+                        Rig { kind, slot },
+                        Transform::default(),
+                        Visibility::Hidden,
+                        ChildOf(gear),
+                    ))
+                    .id();
                 part(
                     commands,
-                    cradle,
-                    &parts.cube,
-                    &parts.dark,
-                    at(x, 0.42, -1.46, 0.44, 0.58, 0.04),
-                );
-            }
-            for z in [-0.9, 0.9] {
-                part(
-                    commands,
-                    cradle,
-                    &parts.cube,
+                    rig,
+                    &parts.drum,
                     &parts.iron,
-                    at(0., 0.42, z, 1.26, 0.9, 0.12),
+                    at(0., 1.75, 0.3, 1.4, 0.42, 1.4),
                 );
+                let mount = commands
+                    .spawn((
+                        LauncherMount { instance, slot },
+                        Transform::from_xyz(0., 1.96, 0.3),
+                        Visibility::default(),
+                        ChildOf(rig),
+                    ))
+                    .id();
+                part(
+                    commands,
+                    mount,
+                    &parts.cube,
+                    &parts.steel,
+                    at(0., 0.3, 0., 1.35, 0.45, 0.7),
+                );
+                // The box of cells, raised toward the bow: two cells abreast, three
+                // abreast, or two over two.
+                for cells in SALVOS {
+                    let (width, height) = match cells {
+                        2 => (1.2, 0.84),
+                        3 => (1.75, 0.84),
+                        _ => (1.2, 1.2),
+                    };
+                    let cradle = commands
+                        .spawn((
+                            Cells(cells),
+                            Transform::from_xyz(0., 0.62, 0.)
+                                .with_rotation(Quat::from_rotation_x(0.3)),
+                            Visibility::Hidden,
+                            ChildOf(mount),
+                        ))
+                        .id();
+                    let middle = height / 2.;
+                    part(
+                        commands,
+                        cradle,
+                        &parts.cube,
+                        &parts.pale,
+                        at(0., middle, 0., width, height, 2.9),
+                    );
+                    let doors: &[(f32, f32)] = match cells {
+                        2 => &[(-0.29, 0.42), (0.29, 0.42)],
+                        3 => &[(-0.56, 0.42), (0., 0.42), (0.56, 0.42)],
+                        _ => &[(-0.29, 0.33), (0.29, 0.33), (-0.29, 0.87), (0.29, 0.87)],
+                    };
+                    // Two rows of cells are each a little lower than one.
+                    let door = if cells > 3 { 0.44 } else { 0.58 };
+                    for &(x, y) in doors {
+                        part(
+                            commands,
+                            cradle,
+                            &parts.cube,
+                            &parts.dark,
+                            at(x, y, -1.46, 0.44, door, 0.04),
+                        );
+                    }
+                    for z in [-0.9, 0.9] {
+                        part(
+                            commands,
+                            cradle,
+                            &parts.cube,
+                            &parts.iron,
+                            at(0., middle, z, width + 0.06, height + 0.06, 0.12),
+                        );
+                    }
+                }
             }
         }
         _ => {}
@@ -304,22 +384,24 @@ pub fn setup(
             ..default()
         }),
     };
-    let plane = commands
-        .spawn((
-            Airborne,
-            Mesh3d(kit.plane.clone()),
+    for index in 0..RIGS {
+        let plane = commands
+            .spawn((
+                Airborne(index),
+                Mesh3d(kit.plane.clone()),
+                MeshMaterial3d(kit.airframe.clone()),
+                Transform::default(),
+                Visibility::Hidden,
+            ))
+            .id();
+        commands.spawn((
+            Spinner,
+            Mesh3d(kit.propeller.clone()),
             MeshMaterial3d(kit.airframe.clone()),
-            Transform::default(),
-            Visibility::Hidden,
-        ))
-        .id();
-    commands.spawn((
-        Spinner,
-        Mesh3d(kit.propeller.clone()),
-        MeshMaterial3d(kit.airframe.clone()),
-        Transform::from_translation(spotter_model::HUB),
-        ChildOf(plane),
-    ));
+            Transform::from_translation(spotter_model::HUB),
+            ChildOf(plane),
+        ));
+    }
     for index in 0..BOMBS {
         commands.spawn((
             BombModel(index),
@@ -337,16 +419,89 @@ fn at_sea(run: &Campaign) -> bool {
     !matches!(run.mode, Mode::Title | Mode::Trial) && !matches!(run.screen(), Screen::Drydock(_))
 }
 
-/// Keep the plane on its catapult while it is aboard, and lay each launcher.
+/// How the strike craft are fitted out: as planned in the yard, as shipped at sea.
+fn fitted(run: &Campaign, battle: &Encounter) -> StrikeCraft {
+    if matches!(run.screen(), Screen::Drydock(_)) {
+        run.display_fittings().strike_craft()
+    } else {
+        battle.strike_craft()
+    }
+}
+
+/// Stand each catapult and launcher a section is fitted with at its place, give each
+/// launcher the box for its salvo, and bring the crane to stand clear of the catapults.
+#[allow(clippy::type_complexity)]
+pub fn rig(
+    run: Res<Campaign>,
+    battle: Res<Encounter>,
+    mut rigs: Query<(&Rig, &mut Transform, &mut Visibility)>,
+    mut girders: Query<&mut Transform, (With<Girder>, Without<Rig>, Without<Crane>)>,
+    mut cranes: Query<&mut Transform, (With<Crane>, Without<Rig>, Without<Girder>)>,
+    mut boxes: Query<(&Cells, &mut Visibility), Without<Rig>>,
+) {
+    let craft = fitted(&run, &battle);
+    for (rig, mut pose, mut shown) in &mut rigs {
+        let layout = match rig.kind {
+            DockModule::Floatplane => catapult_layout(craft.planes),
+            _ => launcher_layout(craft.launchers),
+        };
+        let Some(&(fore, abeam)) = layout.get(rig.slot) else {
+            shown.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        shown.set_if_neq(Visibility::Inherited);
+        pose.translation = Vec3::new(abeam, 0., -fore);
+        // Launchers side by side are built smaller, so their boxes clear one another.
+        let size = match (rig.kind, craft.launchers) {
+            (DockModule::Missiles, 2) => 0.85,
+            (DockModule::Missiles, 3..) => 0.75,
+            _ => 1.,
+        };
+        pose.scale = Vec3::splat(size);
+    }
+    // Catapults side by side are shorter, so their ends stay on the section.
+    let girder = if craft.planes > 1 { 0.8 } else { 1. };
+    for mut pose in &mut girders {
+        pose.scale.z = girder;
+    }
+    for mut pose in &mut cranes {
+        *pose = if craft.planes > 1 {
+            // On the centreline abaft the catapults, its jib swung out to port clear of
+            // the planes.
+            Transform::from_xyz(0., 0., 2.25).with_rotation(Quat::from_rotation_arc(
+                Vec3::new(-1.5, 0., -0.9).normalize(),
+                Vec3::NEG_X,
+            ))
+        } else {
+            Transform::from_xyz(1.85, 0., 1.7)
+        };
+    }
+    let salvo = craft.salvo.clamp(SALVOS[0], SALVOS[SALVOS.len() - 1]);
+    for (cells, mut shown) in &mut boxes {
+        shown.set_if_neq(if cells.0 == salvo {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
+    }
+}
+
+/// Keep each plane on its catapult while it is aboard, and lay each launcher.
 pub fn stow(
     run: Res<Campaign>,
     battle: Res<Encounter>,
-    mut planes: Query<&mut Visibility, With<CatapultPlane>>,
+    mut planes: Query<(&CatapultPlane, &mut Visibility)>,
     mut mounts: Query<(&LauncherMount, &mut Transform)>,
 ) {
     let sea = at_sea(&run);
-    let aloft = sea && battle.floatplane().is_some_and(|plane| !plane.aboard());
-    for mut shown in &mut planes {
+    let craft = battle.strike_craft();
+    for (plane, mut shown) in &mut planes {
+        let index = plane.instance * craft.planes + plane.slot;
+        let aloft = sea
+            && battle
+                .floatplanes()
+                .get(index)
+                .is_some_and(|plane| !plane.aboard());
         shown.set_if_neq(if aloft {
             Visibility::Hidden
         } else {
@@ -354,8 +509,9 @@ pub fn stow(
         });
     }
     for (mount, mut pose) in &mut mounts {
+        let index = mount.instance * craft.launchers + mount.slot;
         let train = if sea {
-            battle.launchers().get(mount.0).map_or(0., |l| l.train)
+            battle.launchers().get(index).map_or(0., |l| l.train)
         } else {
             0.
         };
@@ -363,12 +519,12 @@ pub fn stow(
     }
 }
 
-/// The floatplane in the air, its propeller turning.
+/// The floatplanes in the air, their propellers turning.
 pub fn fly(
     time: Res<Time>,
     run: Res<Campaign>,
     battle: Res<Encounter>,
-    mut plane: Single<(&mut Transform, &mut Visibility), With<Airborne>>,
+    mut planes: Query<(&Airborne, &mut Transform, &mut Visibility)>,
     mut spinners: Query<&mut Transform, (With<Spinner>, Without<Airborne>)>,
     lens: Option<
         Single<
@@ -378,23 +534,25 @@ pub fn fly(
     >,
 ) {
     let sea = at_sea(&run);
-    let (pose, shown) = &mut *plane;
-    match battle.floatplane().filter(|p| sea && !p.aboard()) {
-        Some(flying) => {
-            let at = flying.position_3d();
-            let clear = lens.as_ref().map_or(1., |lens| {
-                camera::lens_clearance(lens.0, lens.1, at, spotter_model::REACH * AIRBORNE_SCALE)
-            });
-            **pose = Transform::from_translation(at)
-                .with_rotation(
-                    Quat::from_rotation_y(-flying.heading) * Quat::from_rotation_z(flying.bank),
-                )
-                .with_scale(Vec3::splat(AIRBORNE_SCALE * clear));
-            shown.set_if_neq(Visibility::Inherited);
-        }
-        None => {
+    for (airborne, mut pose, mut shown) in &mut planes {
+        let flying = battle
+            .floatplanes()
+            .get(airborne.0)
+            .filter(|p| sea && !p.aboard());
+        let Some(flying) = flying else {
             shown.set_if_neq(Visibility::Hidden);
-        }
+            continue;
+        };
+        let at = flying.position_3d();
+        let clear = lens.as_ref().map_or(1., |lens| {
+            camera::lens_clearance(lens.0, lens.1, at, spotter_model::REACH * AIRBORNE_SCALE)
+        });
+        *pose = Transform::from_translation(at)
+            .with_rotation(
+                Quat::from_rotation_y(-flying.heading) * Quat::from_rotation_z(flying.bank),
+            )
+            .with_scale(Vec3::splat(AIRBORNE_SCALE * clear));
+        shown.set_if_neq(Visibility::Inherited);
     }
     for mut spin in &mut spinners {
         spin.rotation = Quat::from_rotation_z(time.elapsed_secs() * 38.);

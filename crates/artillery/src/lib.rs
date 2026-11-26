@@ -74,6 +74,9 @@ pub struct Secondaries {
     pub range: f32,
     /// Barrels on each gun. A twin mount fires both together.
     pub barrels: usize,
+    /// Each gun is a four-inch gunhouse, like the main battery's first turrets, in place
+    /// of a shielded mount.
+    pub turrets: bool,
 }
 impl Secondaries {
     /// A gun each side amidships and another on the bow.
@@ -83,6 +86,7 @@ impl Secondaries {
         reload: 0.82,
         range: 160.,
         barrels: 1,
+        turrets: false,
     };
     /// The deck has room for this many guns a side: the stock two and two more abeam.
     pub const MOST_PER_SIDE: usize = 4;

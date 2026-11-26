@@ -3,7 +3,7 @@
 //! adds the seascape's weather and logs how each chart was drawn.
 use crate::seascape::Weather;
 use bevy::log::{info, warn};
-use shipvivor_campaign::Stage;
+use shipvivor_campaign::{Grade, Stage};
 use shipvivor_encounter::{Battle, Chart};
 use shipvivor_sim::Sector;
 
@@ -14,8 +14,15 @@ pub struct Passage {
 }
 
 impl Passage {
+    /// The sea `stage` as a moderate passage sails it, which is all the weather and the
+    /// hand-set chart need.
     pub fn of(stage: Stage) -> Self {
-        let sector = Sector::of(stage);
+        Self::graded(stage, Grade::Moderate)
+    }
+
+    /// The sea `stage` sailed at `grade`, as the battle there needs it.
+    pub fn graded(stage: Stage, grade: Grade) -> Self {
+        let sector = Sector::of(stage, grade);
         let shipvivor_sim::Weather {
             sea,
             wind,

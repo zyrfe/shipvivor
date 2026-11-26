@@ -25,6 +25,9 @@ pub const CONN_LOST: f32 = 40.;
 pub const CONN_PACE: f32 = 0.35;
 /// Metres a second a ship adrift keeps once her engines stop.
 const DRIFT: f32 = 0.65;
+/// Share of a main-battery round, a torpedo or a bomb into a flagship's hull that
+/// reaches it while her turrets screen it (see [`Raider::screened`]).
+pub const SCREENED: f32 = 0.25;
 /// How much farther than her true range a warship's main guns reach, as a share of it.
 /// With [`LONG_LAY`], the simulator's bold captain takes a tenth to a third more damage
 /// a minute than with no long fire. Half again her range, with an error that grew with
@@ -97,6 +100,10 @@ impl Profile {
     /// Metres out to which her main guns are laid true.
     pub fn range(&self) -> f32 {
         self.range
+    }
+    /// Metres off the ship at which she circles her on her own.
+    pub fn stand_off(&self) -> f32 {
+        self.stand_off
     }
 }
 
@@ -501,7 +508,8 @@ pub struct SecondaryMount {
     offset: Vec2,
     train: f32,
     reload: f32,
-    director: usize,
+    /// The module she stands on. The gun goes with it when it is wrecked.
+    module: usize,
 }
 impl SecondaryMount {
     pub fn live(&self) -> bool {
@@ -546,6 +554,8 @@ pub struct Raider {
     pub(super) ram_rest: f32,
     /// A torpedo boat's runs from her base's mooring. Other classes have none.
     pub(super) attack: Option<super::torpedo_boat::Attack>,
+    /// Her part in her squadron this tick, if she sails in one (see `formation`).
+    pub(super) order: Option<super::formation::Order>,
 }
 impl Raider {
     pub(super) fn new(body: Body, class: EnemyClass) -> Self {
@@ -591,19 +601,12 @@ impl Raider {
                     side * p.hull.radius * (0.91 - 0.15 * (fore / p.hull.stern).abs()),
                     fore,
                 );
-                let director = stations
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, station)| !class.is_flagship() || station.0.signum() == side)
-                    .min_by(|(_, a), (_, b)| (a.1 - fore).abs().total_cmp(&(b.1 - fore).abs()))
-                    .unwrap()
-                    .0;
                 secondaries.push(SecondaryMount {
                     strength: 2,
                     offset,
                     train: side * PI * 0.5,
                     reload: 0.4 + bay as f32 * 0.36,
-                    director,
+                    module: design.module_at(p.hull.bow - fore),
                 });
             }
         }
@@ -634,7 +637,16 @@ impl Raider {
             way: Vec2::ZERO,
             ram_rest: 0.,
             attack: None,
+            order: None,
         }
+    }
+    /// Metres a second of way she has on through the water.
+    pub(super) fn way_on(&self) -> f32 {
+        self.helm.speed
+    }
+    /// Whether she sails in a squadron this tick, as its guide or keeping her station.
+    pub fn in_squadron(&self) -> bool {
+        self.order.is_some()
     }
     pub(super) fn disable_director(&mut self) {
         if let Some(director) = self.director {
@@ -646,6 +658,12 @@ impl Raider {
     fn sync(&mut self) {
         for gun in &mut self.guns {
             gun.out = self.ship.state(gun.berth) == State::Out;
+        }
+        let holds = self.ship.compartments();
+        for gun in &mut self.secondaries {
+            if holds[gun.module].wrecked() {
+                gun.strength = 0;
+            }
         }
         let lost = self
             .director
@@ -740,21 +758,34 @@ impl Raider {
             self.class.profile().barrels
         }
     }
+    /// A flagship with a turret still standing. Once the last is gone she is stripped:
+    /// silent and adrift.
     pub fn protected(&self) -> bool {
         self.class.is_flagship() && self.guns.iter().any(EnemyGun::live)
     }
+    /// A flagship with four in five of her turrets standing, which screen her hull.
+    /// Light guns can't hurt it, and anything heavier does [`SCREENED`] of its damage,
+    /// except where a strake has been shot off her side.
+    pub fn screened(&self) -> bool {
+        self.class.is_flagship() && self.live_guns() * 5 >= self.guns.len() * 4
+    }
     /// A penetrating hit at a point on the hull. It lands on the plating there and
-    /// the module behind it.
+    /// the module behind it, cut to [`SCREENED`] while her turrets screen her.
     pub(super) fn hit_hull(&mut self, at: Vec2, damage: u16) {
-        if self.protected() {
-            return;
-        }
+        let share = if self.screened() { SCREENED } else { 1. };
+        self.strike_hull_at(at, f32::from(damage) * share);
+    }
+    /// A penetrating hit where a strake has been shot off her side: no turret screens it.
+    pub(super) fn hit_bare_hull(&mut self, at: Vec2, damage: u16) {
+        self.strike_hull_at(at, f32::from(damage));
+    }
+    fn strike_hull_at(&mut self, at: Vec2, damage: f32) {
         let offset = at - self.body.pos;
         let forward = self.body.forward();
         let aft = self.class.profile().hull.bow - offset.dot(forward);
         // Her plate grid has already let the round in, so no calibre is given here.
         self.ship
-            .strike_side(aft, offset.dot(forward.perp()), f32::from(damage), None);
+            .strike_side(aft, offset.dot(forward.perp()), damage, None);
         self.sync();
     }
     /// A penetrating hit on one gun. True if it knocked the gun out.
@@ -869,10 +900,19 @@ impl Raider {
             self.helm.make_way(DRIFT, gather, dt);
             self.helm.amidships(dt);
         } else {
+            use super::formation::Order;
+            // In a squadron she keeps her station on the guide, wherever her quarry is.
+            let keeping = match self.order {
+                Some(Order::Keep(station)) => Some(station),
+                _ => None,
+            };
+            let player = keeping.map_or(player, |station| station.at);
             let offset = player - self.body.pos;
             let dir = offset.normalize_or_zero();
             // A torpedo boat makes straight for her firing position or her mooring.
-            let along = if mark || self.class.is_merchant() || self.class == TorpedoBoat {
+            let along = if let Some(station) = keeping {
+                station.course(self.body.pos)
+            } else if mark || self.class.is_merchant() || self.class == TorpedoBoat {
                 dir
             } else if self.class == Patrol {
                 let lane = if self.body.id.is_multiple_of(2) {
@@ -887,6 +927,19 @@ impl Raider {
                 let closing = ((range - p.stand_off) / (65. - p.stand_off)).clamp(-0.85, 1.);
                 (dir * closing + dir.perp() * lane * (0.66 * sweep + 1. - closing.abs()))
                     .normalize_or_zero()
+            } else if let Some(Order::Guide {
+                ring: Some(ring), ..
+            }) = self.order
+            {
+                // The guide of a line of battle wheels about her at its range, in a wide
+                // sweep the line can follow, and gives little ground when she closes.
+                let closing = ((offset.length() - ring) / 90.).clamp(-0.45, 1.);
+                let side = if self.body.id.is_multiple_of(2) {
+                    1.
+                } else {
+                    -1.
+                };
+                (dir * closing + dir.perp() * side * (1. - closing.abs())).normalize_or_zero()
             } else {
                 // A circling course keeps the long gun decks in profile.
                 let mut closing = ((offset.length() - p.stand_off) / 44.).clamp(-0.85, 1.);
@@ -932,8 +985,14 @@ impl Raider {
                         (hull + 4.).min(centre.distance(player) - 1.).max(hull + 1.),
                     )
                 });
-            // She looks far enough ahead to come round in time, but not past her goal.
-            let reach = (32. + p.hull.bow + p.turning).min(offset.length());
+            // She looks far enough ahead to come round in time, but not past her goal. A
+            // station moves on ahead of her, so she looks ahead all the way.
+            let ahead = 32. + p.hull.bow + p.turning;
+            let reach = if keeping.is_some() {
+                ahead
+            } else {
+                ahead.min(offset.length())
+            };
             let course = clear_course(self.body.pos, along, self.body.forward(), reach, hazards);
             if self.conn_lost > 0. {
                 // With her bridge shot away nobody answers the helm: she holds her course.
@@ -951,8 +1010,13 @@ impl Raider {
             } else {
                 self.ship.propulsion()
             };
-            // A torpedo boat eases her way as she comes up to her mooring.
-            let throttle = self.attack.as_ref().map_or(1., |run| run.throttle);
+            // A torpedo boat eases her way as she comes up to her mooring. A squadron
+            // keeps the pace of its slowest ship, and each of the rest her station.
+            let throttle = match self.order {
+                Some(Order::Keep(station)) => station.throttle(self.body.pos, p.speed),
+                Some(Order::Guide { pace, .. }) => pace,
+                None => self.attack.as_ref().map_or(1., |run| run.throttle),
+            };
             self.helm.make_way(p.speed * pace * throttle, gather, dt);
         }
         // The rudder turns her only as fast as her way through the water allows.
@@ -998,26 +1062,26 @@ impl Raider {
         } else {
             p.range * 0.80
         };
+        // Each gun on the side she lies on follows her from the moment her lookouts have
+        // her, and opens fire once she comes within its range. Each is worked by its own
+        // crew, so it fights on whatever becomes of the turrets beside it.
         for (index, gun) in self.secondaries.iter_mut().enumerate() {
             gun.reload = (gun.reload - dt).max(0.);
-            if !gun.live() || !self.guns[gun.director].live() {
+            if !gun.live() {
                 continue;
             }
             let at = gun.station(&self.body, p) + Vec3::Y * 0.7;
             let ahead = super::projectile::lead(at.xz(), player, way, Battery::EnemySecondary);
             let delta = ahead - at.xz();
             let normal = self.body.forward().perp() * gun.offset.x.signum();
-            if delta.dot(normal) < delta.length() * 0.08
-                || delta.length_squared() > close_range.powi(2)
-            {
+            let step = 76_f32.to_radians() * dt;
+            if delta.dot(normal) < delta.length() * 0.08 {
+                // She is on the other side: the gun comes back to the beam.
+                train_full(&mut gun.train, gun.offset.x.signum() * PI * 0.5, step);
                 continue;
             }
-            let trained = train_full(
-                &mut gun.train,
-                bearing(delta) - self.body.heading,
-                76_f32.to_radians() * dt,
-            );
-            if trained && gun.reload == 0. {
+            let trained = train_full(&mut gun.train, bearing(delta) - self.body.heading, step);
+            if trained && gun.reload == 0. && delta.length_squared() <= close_range.powi(2) {
                 let bracket = ((*serial + index as u64 * 3) % 9) as f32 - 4.;
                 let mark = ahead + delta.normalize_or_zero().perp() * bracket * 2.2;
                 super::fire(

@@ -9,7 +9,9 @@ use bevy::{
 use shipvivor_campaign::{CALIBRES, Card, Fittings, LOADER_CUT, Rarity, Run, limits};
 use shipvivor_encounter::{Ammo, MainShell};
 use shipvivor_navigation::Helm;
-use shipvivor_shipyard::{Component, Design, INFLOW, PUMP, Protection};
+use shipvivor_shipyard::{
+    BOMB_DAMAGE, Component, Design, INFLOW, MISSILE_DAMAGE, PUMP, Protection,
+};
 use std::borrow::Cow;
 
 const KNOTS_PER_MPS: f32 = 1.94384;
@@ -29,6 +31,7 @@ enum Kind {
     Protection,
     Secondaries,
     AntiAir,
+    StrikeCraft,
 }
 impl Kind {
     fn label(self) -> &'static str {
@@ -39,6 +42,7 @@ impl Kind {
             Self::Protection => "PROTECTION",
             Self::Secondaries => "SECONDARIES",
             Self::AntiAir => "ANTI-AIRCRAFT",
+            Self::StrikeCraft => "STRIKE CRAFT",
         }
     }
     fn color(self) -> Color {
@@ -49,6 +53,7 @@ impl Kind {
             Self::Protection => Color::srgb_u8(200, 208, 218),
             Self::Secondaries => Color::srgb_u8(132, 224, 120),
             Self::AntiAir => Color::srgb_u8(150, 158, 255),
+            Self::StrikeCraft => Color::srgb_u8(236, 150, 226),
         }
     }
 }
@@ -130,6 +135,7 @@ impl Face {
                 card,
                 Card::ArmorPiercing
                     | Card::TwinSecondaries
+                    | Card::SecondaryTurrets
                     | Card::TripleTurrets
                     | Card::QuadTurrets
             )
@@ -184,6 +190,7 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
     let next = now.with(card);
     let (wing, wing_next) = (now.secondaries(), next.secondaries());
     let (flak, flak_next) = (now.anti_air(), next.anti_air());
+    let (craft, craft_next) = (now.strike_craft(), next.strike_craft());
     match card {
         // Turrets of different bores load at their own pace, so each bore aboard has
         // its own line.
@@ -431,6 +438,74 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
             rank: (now.aa_loaders, Some(limits::AA_LOADERS)),
             stats: quicker([("Each mount".into(), flak.reload, flak_next.reload)]),
             flavour: "Clips passed up hand to hand keep the guns firing.",
+        },
+        Card::SecondaryTurrets => Face {
+            kind: Kind::Secondaries,
+            name: "Secondary Turrets",
+            rank: (now.wing_turrets, Some(limits::WING_TURRETS)),
+            stats: vec![
+                stat("Damage", wing.damage, wing_next.damage, Gain),
+                stat("Reach", metres(wing.range), metres(wing_next.range), Gain),
+                stat(
+                    "Reload",
+                    seconds(wing.reload),
+                    seconds(wing_next.reload),
+                    Cost,
+                ),
+            ],
+            flavour: "Every wing gun rebuilt as a four-inch gunhouse that the crew lays and fires itself. Only a capital beam has the room.",
+        },
+        Card::MoreLaunchers => Face {
+            kind: Kind::StrikeCraft,
+            name: "More Launchers",
+            rank: (now.launchers, Some(limits::LAUNCHERS)),
+            stats: vec![
+                stat("Each rack", craft.launchers, craft_next.launchers, Gain),
+                stat(
+                    "Missiles",
+                    craft.launchers * craft.salvo,
+                    craft_next.launchers * craft_next.salvo,
+                    Gain,
+                ),
+            ],
+            flavour: "Another trainable box on every rack, each ripple-firing at the nearest raider.",
+        },
+        Card::MoreMissiles => Face {
+            kind: Kind::StrikeCraft,
+            name: "More Missiles",
+            rank: (now.missiles, Some(limits::MISSILES)),
+            stats: vec![
+                stat("Salvo", craft.salvo, craft_next.salvo, Gain),
+                stat(
+                    "Damage",
+                    craft.salvo as u16 * MISSILE_DAMAGE,
+                    craft_next.salvo as u16 * MISSILE_DAMAGE,
+                    Gain,
+                ),
+            ],
+            flavour: "A bigger box of cells on every launcher, so each salvo carries one more missile.",
+        },
+        Card::MorePlanes => Face {
+            kind: Kind::StrikeCraft,
+            name: "More Planes",
+            rank: (now.planes, Some(limits::PLANES)),
+            stats: vec![stat("Planes", craft.planes, craft_next.planes, Gain)],
+            flavour: "Another catapult and floatplane. Each hunts the nearest raider the others are not after.",
+        },
+        Card::MoreBombs => Face {
+            kind: Kind::StrikeCraft,
+            name: "More Bombs",
+            rank: (now.bombs, Some(limits::BOMBS)),
+            stats: vec![
+                stat("Bombs", craft.bombs, craft_next.bombs, Gain),
+                stat(
+                    "Stick",
+                    craft.bombs as u16 * BOMB_DAMAGE,
+                    craft_next.bombs as u16 * BOMB_DAMAGE,
+                    Gain,
+                ),
+            ],
+            flavour: "Every plane drops a stick across its mark instead of a single bomb.",
         },
     }
 }

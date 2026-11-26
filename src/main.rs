@@ -121,6 +121,7 @@ impl Plugin for GamePlugin {
             .add_systems(
                 Update,
                 (
+                    strike_craft::rig,
                     strike_craft::stow,
                     strike_craft::fly.after(camera::follow),
                     strike_craft::trail,
@@ -193,6 +194,7 @@ impl Plugin for GamePlugin {
                     (
                         scene::place_wing_guns,
                         scene::place_aa_guns,
+                        scene::place_tower,
                         blueprint::draft.after(scene::refit_hull),
                         dockyard::fans,
                     ),
@@ -288,7 +290,7 @@ impl Voyage<'_, '_> {
     /// sails waters charted from the run's seed. The trial and the title keep fixed charts.
     fn outfit(&mut self, run: &mut Campaign) {
         run.watch = Default::default();
-        let passage = Passage::of(run.stage);
+        let passage = Passage::graded(run.stage, run.grade);
         let chart = match run.mode {
             Mode::Trial => {
                 *self.course = TrialCourse::default();

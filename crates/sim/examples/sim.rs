@@ -3,13 +3,13 @@
 //! `cargo run --release -p shipvivor-sim --example sim -- [stage] [first seed] [count] [temperaments]`
 //!
 //! `stage` is the first word of a sea's name: lantern, narrows (the default), blackcap,
-//! outer, greywater, pilots, sealers, kittiwake, rime, whaleback, fogbound, gullet,
-//! longnight, hollow, splinter, frostline, tern, devils, boreal, calving, regents or
-//! crown. Each seed is sailed once by each temperament (bold, steady and cautious, or a
+//! outer, greywater, pilots, eider, walrus and so on through every round's pool, or
+//! crown. A passage is sailed moderate unless `-tough` follows the name, as in
+//! `pilots-tough`. Each seed is sailed once by each temperament (bold, steady and cautious, or a
 //! comma-separated choice of them) on a fresh, stock ship, using the run seed the way
 //! the game does, so `SHIPVIVOR_SEED=<seed> cargo run` sails the same waters. Each leg's
 //! log goes to `work/sims/<stage>/<seed>-<temperament>.log`, and the summary is printed.
-use shipvivor_campaign::Stage;
+use shipvivor_campaign::{Grade, Stage};
 use shipvivor_sim::bot::Temperament;
 use shipvivor_sim::leg::{Activity, Outcome, Report, Setup, clock, sail};
 use std::collections::BTreeMap;
@@ -22,7 +22,7 @@ fn stage(name: &str) -> Option<Stage> {
     if name == "narrows" {
         return Some(Stage::IronNarrows);
     }
-    shipvivor_campaign::SEAS
+    shipvivor_campaign::POOLS
         .iter()
         .flatten()
         .copied()
@@ -59,7 +59,11 @@ fn mean(values: impl Iterator<Item = f32>) -> f32 {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let stage_name = args.first().map_or("narrows", String::as_str);
-    let Some(stage) = stage(stage_name) else {
+    let (sea_name, grade) = match stage_name.strip_suffix("-tough") {
+        Some(name) => (name, Grade::Tough),
+        None => (stage_name, Grade::Moderate),
+    };
+    let Some(stage) = stage(sea_name) else {
         eprintln!("unknown stage {stage_name}");
         std::process::exit(2);
     };
@@ -72,6 +76,7 @@ fn main() {
         .flat_map(|seed| {
             chosen.iter().map(move |&temperament| Setup {
                 stage,
+                grade,
                 seed,
                 temperament,
             })

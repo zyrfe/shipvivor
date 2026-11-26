@@ -11,9 +11,10 @@ pub use plan::{Order, Plan};
 use shipvivor_artillery::{
     AntiAir, MainShell, STOCK_TRAVERSE, Secondaries, TurretLayout, training_rate,
 };
-use shipvivor_shipyard::{Component, Design, Frame, Module, Protection, Ship};
+use shipvivor_shipyard::{Component, Design, Frame, Module, Protection, Ship, StrikeCraft};
 pub use workshop::{
-    DeckModule, DockJob, MAX_GUN_STATIONS, MAX_LENGTH, MAX_SECTIONS_PER_KIND, Refusal,
+    DeckModule, DockJob, MAX_GUN_STATIONS, MAX_LENGTH, MAX_SECTIONS_PER_KIND, MOST_GUN_STATIONS,
+    Refusal,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -34,8 +35,8 @@ pub enum LegEnd {
     RegentSunk,
 }
 
-/// One sea of a run. Each belongs to one round of [`SEAS`], except Crown Deep, where
-/// every route ends.
+/// One sea of a run. Each belongs to the pool of one round of [`POOLS`], except Crown
+/// Deep, where every route ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Stage {
     #[default]
@@ -63,55 +64,210 @@ pub enum Stage {
     BorealRoad,
     CalvingSound,
     RegentsGate,
+    // The rest of each round's pool, round by round, after the first three of each.
+    EiderSound,
+    SkerryHaven,
+    DriftwoodBay,
+    PtarmiganInlet,
+    CairnRoad,
+    SnowmeltNarrows,
+    WalrusReach,
+    GannetSound,
+    ShingleRoad,
+    NarwhalCut,
+    BrineNarrows,
+    AukBay,
+    SkuaNarrows,
+    FloeRoad,
+    BearclawCut,
+    IvorySound,
+    HoarfrostBay,
+    LodestoneReach,
+    PetrelSound,
+    IcefallCut,
+    BeaconRoad,
+    CormorantReach,
+    ShiverNarrows,
+    WreckersBay,
+    PolarRoad,
+    SleetSound,
+    AnvilCut,
+    BlackwaterNarrows,
+    RavensReach,
+    HarrowBay,
+    TempestRoad,
+    HailstoneSound,
+    WolfpackNarrows,
+    CoffinCut,
+    NorthlightReach,
+    ShroudBay,
+    MidwinterRoad,
+    AdmiraltySound,
+    BastionCut,
+    GauntletNarrows,
+    CitadelBay,
+    WhiteoutReach,
 }
 
 /// Patrols in a full run before the intercept: an anchorage, then a passage from each yard.
 pub const PATROLS: usize = 7;
 /// Rounds in a full run: the patrols, then Crown Deep.
 pub const ROUNDS: usize = PATROLS + 1;
+/// Seas in each round's pool.
+pub const POOL: usize = 9;
+/// Passages each yard charts, and anchorages the first chart offers.
+pub const OFFERED: usize = 3;
 
-/// The seas of every patrol round, three to a round. The first round is the choice of
-/// anchorage. From each yard after it the chart offers the next round's three, lane by
-/// lane as [`LANES`] prices them: open water, a sheltered sound and a hard passage.
-pub const SEAS: [[Stage; 3]; PATROLS] = [
-    [Stage::LanternBay, Stage::IronNarrows, Stage::BlackcapReach],
-    [Stage::OuterRoad, Stage::GreywaterSound, Stage::PilotsCut],
-    [Stage::SealersRoad, Stage::KittiwakeSound, Stage::RimeGate],
-    [Stage::WhalebackReach, Stage::FogboundBay, Stage::TheGullet],
-    [Stage::LongnightRoad, Stage::HollowSound, Stage::SplinterCut],
-    [Stage::FrostlineReach, Stage::TernHaven, Stage::DevilsThroat],
-    [Stage::BorealRoad, Stage::CalvingSound, Stage::RegentsGate],
-];
+/// The seas of every patrol round, a pool of nine to a round, all of a round with as
+/// many bases. Each run charts three of each pool from its seed: the first round's as
+/// the choice of anchorage, and each later round's as the passages every yard of the
+/// round before offers, graded as [`GRADES`] says.
+pub const POOLS: [[Stage; POOL]; PATROLS] = {
+    use Stage::*;
+    [
+        [
+            LanternBay,
+            IronNarrows,
+            BlackcapReach,
+            EiderSound,
+            SkerryHaven,
+            DriftwoodBay,
+            PtarmiganInlet,
+            CairnRoad,
+            SnowmeltNarrows,
+        ],
+        [
+            OuterRoad,
+            GreywaterSound,
+            PilotsCut,
+            WalrusReach,
+            GannetSound,
+            ShingleRoad,
+            NarwhalCut,
+            BrineNarrows,
+            AukBay,
+        ],
+        [
+            SealersRoad,
+            KittiwakeSound,
+            RimeGate,
+            SkuaNarrows,
+            FloeRoad,
+            BearclawCut,
+            IvorySound,
+            HoarfrostBay,
+            LodestoneReach,
+        ],
+        [
+            WhalebackReach,
+            FogboundBay,
+            TheGullet,
+            PetrelSound,
+            IcefallCut,
+            BeaconRoad,
+            CormorantReach,
+            ShiverNarrows,
+            WreckersBay,
+        ],
+        [
+            LongnightRoad,
+            HollowSound,
+            SplinterCut,
+            PolarRoad,
+            SleetSound,
+            AnvilCut,
+            BlackwaterNarrows,
+            RavensReach,
+            HarrowBay,
+        ],
+        [
+            FrostlineReach,
+            TernHaven,
+            DevilsThroat,
+            TempestRoad,
+            HailstoneSound,
+            WolfpackNarrows,
+            CoffinCut,
+            NorthlightReach,
+            ShroudBay,
+        ],
+        [
+            BorealRoad,
+            CalvingSound,
+            RegentsGate,
+            MidwinterRoad,
+            AdmiraltySound,
+            BastionCut,
+            GauntletNarrows,
+            CitadelBay,
+            WhiteoutReach,
+        ],
+    ]
+};
 
-/// What each lane of a passage round asks of the leg just sailed and grants on arrival.
-/// Open water is always open. A sheltered sound needs two stars, and the yard there
-/// repairs her further. The hard passage needs three, fits a card on arrival and runs
-/// under enemy air cover.
-pub const LANES: [(u8, Perk); 3] = [
-    (0, Perk::None),
-    (2, Perk::Repair(30)),
-    (3, Perk::FreeFitting),
-];
-
-pub struct Anchorage {
-    pub stage: Stage,
-    pub pilot_note: &'static str,
+/// How hard a passage runs. Any sea of a pool may be charted either way, so the same
+/// waters come round again as a different fight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum Grade {
+    /// Always open. Its stars pay about four fifths of a tough passage's, and its yard
+    /// repairs her further.
+    #[default]
+    Moderate,
+    /// Needs three stars. It runs under enemy air cover, its raids come sooner and
+    /// quicker, and it fits a card on arrival.
+    Tough,
+}
+impl Grade {
+    /// Stars the leg just sailed must have earned to take a passage of this grade.
+    pub fn stars(self) -> u8 {
+        match self {
+            Self::Moderate => 0,
+            Self::Tough => MAX_STARS,
+        }
+    }
+    /// What a passage of this grade grants on arrival.
+    pub fn perk(self) -> Perk {
+        match self {
+            Self::Moderate => Perk::Repair(30),
+            Self::Tough => Perk::FreeFitting,
+        }
+    }
+    /// Yard points each star of a passage of this grade pays.
+    pub fn star_points(self) -> u16 {
+        GRADE_STAR_POINTS[self as usize]
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Moderate => "Moderate",
+            Self::Tough => "Tough",
+        }
+    }
 }
 
-pub const ANCHORAGES: [Anchorage; 3] = [
-    Anchorage {
-        stage: Stage::LanternBay,
-        pilot_note: "Calm water behind wooded islands. Patrols are spaced furthest apart.",
-    },
-    Anchorage {
-        stage: Stage::IronNarrows,
-        pilot_note: "Steady patrols in a winding channel between the islands.",
-    },
-    Anchorage {
-        stage: Stage::BlackcapReach,
-        pilot_note: "An exposed coast with heavy swell and the quickest reinforcements.",
-    },
-];
+/// The grades of the passages each yard charts, in the order the chart numbers them:
+/// one moderate, always open, then two tough ones that pay the same.
+pub const GRADES: [Grade; OFFERED] = [Grade::Moderate, Grade::Tough, Grade::Tough];
+
+/// Keeps the charted seas' stream apart from anything else drawn from the run seed.
+const ROUTE_STREAM: u64 = 0x726f_7574_6500_0000;
+
+/// The three seas a run charts for `round`, from 1 for the anchorages to [`PATROLS`],
+/// drawn from the round's pool by the run seed with no sea twice, or `None` past the
+/// last patrol. The same seed always charts the same seas, whichever way she came.
+pub fn charted(seed: u64, round: usize) -> Option<[Stage; OFFERED]> {
+    let pool = POOLS.get(round.checked_sub(1)?)?;
+    let mut seas = pool.to_vec();
+    let mut state = mix(seed ^ ROUTE_STREAM.wrapping_add(round as u64));
+    Some(std::array::from_fn(|_| {
+        let at = next(&mut state) % seas.len() as u64;
+        seas.swap_remove(at as usize)
+    }))
+}
+
+/// The anchorages a run's first chart offers.
+pub fn anchorages(seed: u64) -> [Stage; OFFERED] {
+    charted(seed, 1).expect("the first round has a pool")
+}
 
 /// The time limit and star goals of one leg.
 #[derive(Clone, Copy)]
@@ -123,22 +279,12 @@ pub struct Mission {
 }
 
 impl Stage {
-    /// Its round and lane in [`SEAS`], counting from zero. Crown Deep has none.
-    fn place(self) -> Option<(usize, usize)> {
-        SEAS.iter().enumerate().find_map(|(round, seas)| {
-            seas.iter()
-                .position(|&sea| sea == self)
-                .map(|lane| (round, lane))
-        })
-    }
     /// The round this sea is sailed in, from 1 for an anchorage to [`ROUNDS`] for Crown Deep.
     pub fn round(self) -> usize {
-        self.place().map_or(ROUNDS, |(round, _)| round + 1)
-    }
-    /// Its place across its round: 0 for open water, 1 for the sheltered sound, 2 for the
-    /// hard passage. Crown Deep lies in the middle.
-    pub fn lane(self) -> usize {
-        self.place().map_or(1, |(_, lane)| lane)
+        POOLS
+            .iter()
+            .position(|pool| pool.contains(&self))
+            .map_or(ROUNDS, |round| round + 1)
     }
     pub fn is_opening(self) -> bool {
         self.round() == 1
@@ -147,37 +293,23 @@ impl Stage {
     pub fn is_last_patrol(self) -> bool {
         self.round() == PATROLS
     }
-
-    /// A hard passage takes the ship into enemy air cover.
-    pub fn enters_air_cover(self) -> bool {
-        self.round() > 1 && self.round() <= PATROLS && self.lane() == 2
+    /// A passage between the anchorage and Crown Deep, which a yard charts and grades.
+    fn is_passage(self) -> bool {
+        (2..=PATROLS).contains(&self.round())
     }
 
-    /// The way into this sea from the yard before it. An anchorage and Crown Deep ask
-    /// nothing.
-    pub fn exit(self) -> Exit {
-        let (stars, perk) = if self.round() > 1 && self.round() <= PATROLS {
-            LANES[self.lane()]
-        } else {
-            (0, Perk::None)
-        };
-        Exit {
-            stage: self,
-            stars,
-            perk,
-        }
-    }
-    /// The passages the yard after this sea offers, or `None` after the last patrol.
-    pub fn exits(self) -> Option<[Exit; 3]> {
-        SEAS.get(self.round()).map(|seas| seas.map(Self::exit))
+    /// A tough passage takes the ship into enemy air cover.
+    pub fn enters_air_cover(self, grade: Grade) -> bool {
+        self.is_passage() && grade == Grade::Tough
     }
 
-    /// Yard points each star earned in this sea pays. A passage pays more the harder
-    /// its lane, and every anchorage pays the open-water rate. Crown Deep earns no stars.
-    pub fn star_points(self) -> u16 {
+    /// Yard points each star earned in this sea pays, sailed at `grade`. A tough passage
+    /// pays more than a moderate one, and every anchorage pays the open-water rate.
+    /// Crown Deep earns no stars.
+    pub fn star_points(self, grade: Grade) -> u16 {
         match self.round() {
             1 => STAR_POINTS,
-            round if round <= PATROLS => LANE_STAR_POINTS[self.lane()],
+            round if round <= PATROLS => grade.star_points(),
             _ => 0,
         }
     }
@@ -191,24 +323,66 @@ impl Stage {
             Self::LanternBay => ("Lantern Bay", 5, 3, 2),
             Self::IronNarrows => ("The Iron Narrows", 5, 4, 2),
             Self::BlackcapReach => ("Blackcap Reach", 5, 5, 2),
+            Self::EiderSound => ("Eider Sound", 5, 3, 2),
+            Self::SkerryHaven => ("Skerry Haven", 5, 3, 2),
+            Self::DriftwoodBay => ("Driftwood Bay", 5, 4, 2),
+            Self::PtarmiganInlet => ("Ptarmigan Inlet", 5, 4, 2),
+            Self::CairnRoad => ("Cairn Road", 5, 5, 2),
+            Self::SnowmeltNarrows => ("Snowmelt Narrows", 5, 4, 2),
             Self::OuterRoad => ("Outer Road", 5, 5, 2),
             Self::GreywaterSound => ("Greywater Sound", 5, 5, 3),
             Self::PilotsCut => ("Pilot's Cut", 5, 6, 3),
+            Self::WalrusReach => ("Walrus Reach", 5, 5, 2),
+            Self::GannetSound => ("Gannet Sound", 5, 5, 3),
+            Self::ShingleRoad => ("Shingle Road", 5, 6, 2),
+            Self::NarwhalCut => ("Narwhal Cut", 5, 6, 3),
+            Self::BrineNarrows => ("Brine Narrows", 5, 5, 3),
+            Self::AukBay => ("Auk Bay", 5, 5, 3),
             Self::SealersRoad => ("Sealers' Road", 5, 6, 3),
             Self::KittiwakeSound => ("Kittiwake Sound", 5, 6, 3),
             Self::RimeGate => ("Rime Gate", 5, 7, 3),
+            Self::SkuaNarrows => ("Skua Narrows", 5, 7, 3),
+            Self::FloeRoad => ("Floe Road", 5, 6, 3),
+            Self::BearclawCut => ("Bearclaw Cut", 5, 7, 3),
+            Self::IvorySound => ("Ivory Sound", 5, 6, 3),
+            Self::HoarfrostBay => ("Hoarfrost Bay", 5, 6, 3),
+            Self::LodestoneReach => ("Lodestone Reach", 5, 7, 3),
             Self::WhalebackReach => ("Whaleback Reach", 6, 7, 3),
             Self::FogboundBay => ("Fogbound Bay", 6, 7, 4),
             Self::TheGullet => ("The Gullet", 6, 8, 3),
+            Self::PetrelSound => ("Petrel Sound", 6, 7, 4),
+            Self::IcefallCut => ("Icefall Cut", 6, 8, 3),
+            Self::BeaconRoad => ("Beacon Road", 6, 7, 3),
+            Self::CormorantReach => ("Cormorant Reach", 6, 8, 3),
+            Self::ShiverNarrows => ("Shiver Narrows", 6, 8, 3),
+            Self::WreckersBay => ("Wreckers' Bay", 6, 7, 4),
             Self::LongnightRoad => ("Longnight Road", 6, 8, 3),
             Self::HollowSound => ("Hollow Sound", 6, 8, 4),
             Self::SplinterCut => ("Splinter Cut", 6, 9, 4),
+            Self::PolarRoad => ("Polar Road", 6, 8, 3),
+            Self::SleetSound => ("Sleet Sound", 6, 8, 4),
+            Self::AnvilCut => ("Anvil Cut", 6, 9, 4),
+            Self::BlackwaterNarrows => ("Blackwater Narrows", 6, 9, 3),
+            Self::RavensReach => ("Ravens' Reach", 6, 9, 4),
+            Self::HarrowBay => ("Harrow Bay", 6, 8, 4),
             Self::FrostlineReach => ("Frostline Reach", 6, 9, 4),
             Self::TernHaven => ("Tern Haven", 6, 9, 4),
             Self::DevilsThroat => ("Devil's Throat", 6, 10, 4),
+            Self::TempestRoad => ("Tempest Road", 6, 10, 4),
+            Self::HailstoneSound => ("Hailstone Sound", 6, 9, 4),
+            Self::WolfpackNarrows => ("Wolfpack Narrows", 6, 10, 4),
+            Self::CoffinCut => ("Coffin Cut", 6, 10, 4),
+            Self::NorthlightReach => ("Northlight Reach", 6, 9, 4),
+            Self::ShroudBay => ("Shroud Bay", 6, 9, 4),
             Self::BorealRoad => ("Boreal Road", 6, 10, 4),
             Self::CalvingSound => ("Calving Sound", 6, 10, 5),
             Self::RegentsGate => ("Regent's Gate", 6, 11, 4),
+            Self::MidwinterRoad => ("Midwinter Road", 6, 10, 4),
+            Self::AdmiraltySound => ("Admiralty Sound", 6, 10, 5),
+            Self::BastionCut => ("Bastion Cut", 6, 11, 4),
+            Self::GauntletNarrows => ("Gauntlet Narrows", 6, 11, 4),
+            Self::CitadelBay => ("Citadel Bay", 6, 10, 5),
+            Self::WhiteoutReach => ("Whiteout Reach", 6, 11, 4),
         };
         Mission {
             name,
@@ -226,11 +400,12 @@ pub const MAX_STARS: u8 = 3;
 /// Seconds the leg's clock gains for each base wrecked, so a patrol that keeps working
 /// through its bases has a reason to press on and no need to rush.
 pub const BASE_TIME: f32 = 45.;
-/// Yard points for each star a leg in open water earns.
+/// Yard points for each star a leg in an anchorage earns.
 pub const STAR_POINTS: u16 = 2;
-/// Yard points for each star by lane: open water, the sheltered sound and the hard
-/// passage. The harder way pays double.
-pub const LANE_STAR_POINTS: [u16; 3] = [STAR_POINTS, 3, 4];
+/// Yard points for each star of a moderate passage and of a tough one. With every
+/// star, the clock's star's worth and a point a base, a moderate passage pays about
+/// four fifths of what a tough one of the same round does.
+pub const GRADE_STAR_POINTS: [u16; 2] = [3, 4];
 /// Yard points for each enemy yard whose gantry comes down on a leg.
 pub const YARD_POINTS: u16 = 1;
 
@@ -305,13 +480,33 @@ pub enum Perk {
     FreeFitting,
 }
 
-/// A passage from a yard to the next round, the stars the leg just sailed must have
-/// earned to take it, and what it grants on arrival.
+/// A passage from a yard to the next round: the sea, how hard it runs, the stars the
+/// leg just sailed must have earned to take it, and what it grants on arrival.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Exit {
     pub stage: Stage,
+    pub grade: Grade,
     pub stars: u8,
     pub perk: Perk,
+}
+impl Exit {
+    /// The passage into `stage` at `grade`, priced as the grade says.
+    pub fn new(stage: Stage, grade: Grade) -> Self {
+        Self {
+            stage,
+            grade,
+            stars: grade.stars(),
+            perk: grade.perk(),
+        }
+    }
+    /// Yard points each star earned on this passage pays.
+    pub fn star_points(&self) -> u16 {
+        self.stage.star_points(self.grade)
+    }
+    /// The passage runs under enemy air cover.
+    pub fn under_air_cover(&self) -> bool {
+        self.stage.enters_air_cover(self.grade)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -349,6 +544,17 @@ pub enum Card {
     QuickAntiAir,
     /// Bigger pumps, which clear the water from flooding compartments faster.
     Pumps,
+    /// Another trainable launcher on every missile rack.
+    MoreLaunchers,
+    /// Another missile in every launcher's salvo.
+    MoreMissiles,
+    /// Another catapult and floatplane on the plane section.
+    MorePlanes,
+    /// Another bomb on every floatplane, dropped in a stick across its mark.
+    MoreBombs,
+    /// Every wing gun rebuilt as a four-inch gunhouse that fires on its own. It wants a
+    /// capital beam under it.
+    SecondaryTurrets,
 }
 impl Card {
     /// How often a level-up hand deals this card, or `None` for work only the yard does.
@@ -378,7 +584,8 @@ impl Rarity {
 }
 
 /// The level-up deck: every card a hand can deal, and how rare it is. The bore and the
-/// barrels a turret carries are yard work, so they are not here. A new card joins the deck
+/// barrels a turret carries are yard work, so they are not here, and nor is the gear of
+/// the strike craft or the secondary turrets, which the yard fits where they stand. A new card joins the deck
 /// with one line.
 pub const DECK: &[(Card, Rarity)] = &[
     (Card::Loader, Rarity::Common),
@@ -437,6 +644,11 @@ fn draw(mut pool: Vec<(Card, Rarity)>, key: u64) -> Vec<Card> {
 
 /// Metres each rangefinder card adds to the secondaries' reach.
 const WING_RANGE_STEP: f32 = 40.;
+/// What rebuilding the wing guns as four-inch gunhouses adds to each hit, to their
+/// reach in metres, and the share their reload grows by for the heavier round.
+const WING_TURRET_DAMAGE: u16 = 2;
+const WING_TURRET_REACH: f32 = 100.;
+const WING_TURRET_LOAD: f32 = 1.5;
 /// The share of a barrel's loading time each rank of loaders takes off, for the main
 /// battery, the secondaries and the AA alike. It comes off what the ranks before left,
 /// so every rank is worth the same to the crew: four ranks take it down to about half.
@@ -455,6 +667,13 @@ pub mod limits {
     pub const AA_SHELLS: u16 = 2;
     pub const AA_LOADERS: u16 = 3;
     pub const PUMPS: u16 = 3;
+    /// Launchers past the first on each missile rack, missiles past the stock salvo,
+    /// planes past the first and bombs past the first on each plane.
+    pub const LAUNCHERS: u16 = 2;
+    pub const MISSILES: u16 = 2;
+    pub const PLANES: u16 = 2;
+    pub const BOMBS: u16 = 2;
+    pub const WING_TURRETS: u16 = 1;
 }
 /// Each rank of pumps adds this share of the stock pumping.
 const PUMP_STEP: f32 = 0.5;
@@ -491,6 +710,11 @@ pub struct Fittings {
     pub aa_shells: u16,
     pub aa_loaders: u16,
     pub pumps: u16,
+    pub launchers: u16,
+    pub missiles: u16,
+    pub planes: u16,
+    pub bombs: u16,
+    pub wing_turrets: u16,
 }
 impl Fittings {
     /// These fittings with one more rank of `card`.
@@ -518,6 +742,11 @@ impl Fittings {
             Card::HeavyAntiAir => &mut self.aa_shells,
             Card::QuickAntiAir => &mut self.aa_loaders,
             Card::Pumps => &mut self.pumps,
+            Card::MoreLaunchers => &mut self.launchers,
+            Card::MoreMissiles => &mut self.missiles,
+            Card::MorePlanes => &mut self.planes,
+            Card::MoreBombs => &mut self.bombs,
+            Card::SecondaryTurrets => &mut self.wing_turrets,
             // Bore and barrels are fitted turret by turret in the yard.
             Card::TripleTurrets | Card::QuadTurrets => return self,
         };
@@ -588,15 +817,37 @@ impl Fittings {
     /// The close-range battery: the stock guns on the bow and the beam and one more gun a
     /// beam per mounting card, one more damage a hit per heavier round, quick loaders
     /// working as they do for the main battery, 40 m more reach per rangefinder and a
-    /// second barrel on every gun once twinned.
+    /// second barrel on every gun once twinned. Rebuilt as four-inch gunhouses, each
+    /// gun hits harder and reaches farther, and loads more slowly.
     pub fn secondaries(&self) -> Secondaries {
         let stock = Secondaries::STOCK.per_side;
+        let turrets = self.wing_turrets > 0;
+        let (damage, reach, load) = if turrets {
+            (WING_TURRET_DAMAGE, WING_TURRET_REACH, WING_TURRET_LOAD)
+        } else {
+            (0, 0., 1.)
+        };
         Secondaries {
             per_side: (stock + usize::from(self.wing_mounts)).min(Secondaries::MOST_PER_SIDE),
-            damage: Secondaries::STOCK.damage.saturating_add(self.wing_shells),
-            reload: Secondaries::STOCK.reload * drilled(self.wing_loaders),
-            range: Secondaries::STOCK.range + WING_RANGE_STEP * f32::from(self.wing_range),
+            damage: (Secondaries::STOCK.damage.saturating_add(self.wing_shells))
+                .saturating_add(damage),
+            reload: Secondaries::STOCK.reload * drilled(self.wing_loaders) * load,
+            range: Secondaries::STOCK.range + WING_RANGE_STEP * f32::from(self.wing_range) + reach,
             barrels: if self.wing_twin > 0 { 2 } else { 1 },
+            turrets,
+        }
+    }
+    /// The strike craft: a launcher on each missile rack and another per launcher card,
+    /// the stock salvo and another missile per missile card, a plane and another per
+    /// plane card, and a bomb on each plane and another per bomb card.
+    pub fn strike_craft(&self) -> StrikeCraft {
+        let more = |ranks: u16, most: u16| usize::from(ranks.min(most));
+        let stock = StrikeCraft::STOCK;
+        StrikeCraft {
+            launchers: stock.launchers + more(self.launchers, limits::LAUNCHERS),
+            salvo: stock.salvo + more(self.missiles, limits::MISSILES),
+            planes: stock.planes + more(self.planes, limits::PLANES),
+            bombs: stock.bombs + more(self.bombs, limits::BOMBS),
         }
     }
 
@@ -629,6 +880,11 @@ impl Fittings {
             HeavyAntiAir => (self.aa_shells, limits::AA_SHELLS),
             QuickAntiAir => (self.aa_loaders, limits::AA_LOADERS),
             Pumps => (self.pumps, limits::PUMPS),
+            MoreLaunchers => (self.launchers, limits::LAUNCHERS),
+            MoreMissiles => (self.missiles, limits::MISSILES),
+            MorePlanes => (self.planes, limits::PLANES),
+            MoreBombs => (self.bombs, limits::BOMBS),
+            SecondaryTurrets => (self.wing_turrets, limits::WING_TURRETS),
             _ => return None,
         })
     }
@@ -653,6 +909,14 @@ impl Fittings {
             HeavyAntiAir => self.aa_shells < limits::AA_SHELLS,
             QuickAntiAir => self.aa_loaders < limits::AA_LOADERS,
             Pumps => self.pumps < limits::PUMPS,
+            MoreLaunchers => self.launchers < limits::LAUNCHERS,
+            MoreMissiles => self.missiles < limits::MISSILES,
+            MorePlanes => self.planes < limits::PLANES,
+            MoreBombs => self.bombs < limits::BOMBS,
+            // A gunhouse at every wing station wants the room of a capital beam.
+            SecondaryTurrets => {
+                self.wing_turrets < limits::WING_TURRETS && self.beam >= ShipBeam::Capital
+            }
             // The yard rebores and rearms each turret on its own: see `DockJob::Calibre`
             // and `DockJob::Barrels`.
             TripleTurrets | QuadTurrets => false,
@@ -699,6 +963,9 @@ pub const TORPEDO_BOAT_XP: u32 = 5;
 pub struct Run {
     phase: Phase,
     pub stage: Stage,
+    /// How hard the passage she took into these waters runs. An anchorage is moderate,
+    /// and Crown Deep keeps the grade of the last passage before it.
+    pub grade: Grade,
     /// Where the ship began her first patrol, retained on subsequent charts.
     pub origin: Stage,
     /// The passages taken from each yard, in order, retained after the routes meet at
@@ -731,6 +998,7 @@ impl Default for Run {
         Self {
             phase: Phase::Sailing,
             stage: Stage::IronNarrows,
+            grade: Grade::Moderate,
             origin: Stage::IronNarrows,
             course: Vec::new(),
             elapsed: 0.,
@@ -758,13 +1026,25 @@ impl Run {
     pub fn passage(&self) -> Option<Stage> {
         self.course.last().copied()
     }
-    /// A hard passage sails under enemy air cover, and so does the intercept after one.
+    /// A tough passage sails under enemy air cover, and so does the intercept after one.
     pub fn under_air_cover(&self) -> bool {
         match self.stage {
-            Stage::CrownDeep => self.passage(),
-            stage => Some(stage),
+            Stage::CrownDeep => self.passage().is_some() && self.grade == Grade::Tough,
+            stage => stage.enters_air_cover(self.grade),
         }
-        .is_some_and(Stage::enters_air_cover)
+    }
+    /// Yard points each star of this leg pays.
+    pub fn star_points(&self) -> u16 {
+        self.stage.star_points(self.grade)
+    }
+    /// What the passage into these waters granted on arrival. An anchorage and Crown
+    /// Deep grant nothing.
+    pub fn perk(&self) -> Perk {
+        if self.passage() == Some(self.stage) {
+            self.grade.perk()
+        } else {
+            Perk::None
+        }
     }
     /// Seconds on the leg's clock: its minutes, and [`BASE_TIME`] for each base wrecked.
     pub fn clock(&self) -> f32 {
@@ -783,7 +1063,7 @@ impl Run {
     /// finished with time still on it.
     pub fn clock_points(&self) -> u16 {
         if self.beat_clock {
-            self.stage.star_points()
+            self.star_points()
         } else {
             0
         }
@@ -840,12 +1120,11 @@ impl Run {
         self.ship.design().length() - Design::BREAKWATER_LENGTH
     }
 
-    /// Yard points this leg has earned so far: its lane's [`LANE_STAR_POINTS`] a star,
+    /// Yard points this leg has earned so far: its grade's [`GRADE_STAR_POINTS`] a star,
     /// [`YARD_POINTS`] a wrecked yard, one for each whole point of cargo sunk, and once
     /// she has finished inside it, the clock's [`Run::clock_points`].
     pub fn leg_points(&self) -> u16 {
-        self.stage
-            .star_points()
+        self.star_points()
             .saturating_mul(u16::from(self.stars()))
             .saturating_add(YARD_POINTS.saturating_mul(self.objectives.yards))
             .saturating_add(self.cargo_points())
@@ -1058,10 +1337,12 @@ impl Run {
             self.phase = Phase::Sailing;
         }
     }
-    /// The passages on the chart from the yard she is in, or `None` once the next leg is
-    /// the intercept.
-    pub fn exits(&self) -> Option<[Exit; 3]> {
-        self.stage.exits()
+    /// The passages on the chart from the yard she is in: three seas of the next round's
+    /// pool, drawn from the run seed and graded as [`GRADES`] says, or `None` once the
+    /// next leg is the intercept.
+    pub fn exits(&self) -> Option<[Exit; OFFERED]> {
+        let seas = charted(self.seed, self.stage.round() + 1)?;
+        Some(std::array::from_fn(|i| Exit::new(seas[i], GRADES[i])))
     }
     /// Sail from the chart into the next round, by a passage the leg just sailed has
     /// earned the stars for.
@@ -1080,6 +1361,7 @@ impl Run {
         self.previous_stars += self.stars();
         self.course.push(next);
         self.stage = next;
+        self.grade = exit.grade;
         self.elapsed = 0.;
         self.new_leg();
         self.phase = Phase::Sailing;
@@ -1102,6 +1384,12 @@ impl Run {
     /// Bring down the last of her bases and end the leg, with nothing else gained.
     pub(crate) fn clear(&mut self) {
         self.tick_sector(0., Objectives::default(), 0, true);
+    }
+    /// The moderate passage the chart from her yard offers, always open.
+    pub(crate) fn moderate_passage(&self) -> Stage {
+        self.exits()
+            .expect("a yard before the last charts passages")[0]
+            .stage
     }
 }
 
@@ -1138,7 +1426,7 @@ mod tests {
                 assert_eq!((run.goals_met(), run.stars()), (stars, stars));
                 assert_eq!(run.beat_clock(), !late);
                 // Every anchorage pays the open-water rate, and the clock a star's worth.
-                assert_eq!(run.stage.star_points(), STAR_POINTS);
+                assert_eq!(run.star_points(), STAR_POINTS);
                 let clock_points = if late { 0 } else { STAR_POINTS };
                 assert_eq!(run.clock_points(), clock_points);
                 let earned = STAR_POINTS * u16::from(stars) + YARD_POINTS * yards + clock_points;
@@ -1153,7 +1441,7 @@ mod tests {
                 assert_eq!(run.fittings_remaining(), 0);
                 // She may sail without spending them, and they sail with her.
                 assert!(run.leave_dock());
-                assert!(run.depart(Stage::OuterRoad));
+                assert!(run.depart(run.moderate_passage()));
                 assert_eq!(run.points(), earned);
                 // The second leg pays too, into a second yard, where the points carried
                 // from the first are added to its own.
@@ -1167,25 +1455,28 @@ mod tests {
                     true,
                 );
                 assert_eq!(run.phase(), Phase::Drydock(LegEnd::BasesDestroyed));
-                // A new leg starts on time: its drydock star and its clock both pay.
+                // A new leg starts on time: its drydock star and its clock both pay, at
+                // the moderate passage's rate.
                 assert!(run.beat_clock());
-                let both = earned + 2 * STAR_POINTS + 3 * YARD_POINTS;
+                let both = earned + 2 * GRADE_STAR_POINTS[0] + 3 * YARD_POINTS;
                 assert_eq!(run.points(), both);
                 assert!(!run.engage_regent());
                 assert!(run.refit_in_dock(DockJob::Fitting(Card::Loader)));
                 assert_eq!(run.points(), both - 2);
                 // Each yard after charts the next round, until the last patrol's yard
-                // sails her on to intercept the Regent. Each clearance pays its star,
-                // and its clock.
+                // sails her on to intercept the Regent. Each clearance of a moderate
+                // passage pays its star, and its clock, at the moderate rate.
                 let mut points = both - 2;
                 for round in 2..PATROLS {
                     assert!(run.leave_dock());
                     assert_eq!(run.phase(), Phase::Chart);
                     assert!(!run.engage_regent());
-                    assert!(run.depart(SEAS[round][0]));
+                    let moderate = run.exits().unwrap()[0];
+                    assert_eq!(moderate.grade, Grade::Moderate);
+                    assert!(run.depart(moderate.stage));
                     assert_eq!(run.stage.round(), round + 1);
                     run.tick_sector(1., Objectives::default(), 0, true);
-                    points += 2 * STAR_POINTS;
+                    points += 2 * GRADE_STAR_POINTS[0];
                     assert_eq!(run.points(), points);
                 }
                 assert!(run.leave_dock());
@@ -1536,7 +1827,7 @@ mod tests {
         assert!(run.section_jobs(3).contains(&pumps) && pumps.cost() == 2);
         assert!(run.refit_in_dock(pumps));
         assert_eq!((run.points(), run.ship.design().pumps()), (0, 1.5));
-        assert!(run.leave_dock() && run.depart(Stage::OuterRoad));
+        assert!(run.leave_dock() && run.depart(run.moderate_passage()));
         run.tick(1., Objectives::default(), 0);
         assert_eq!(run.ship.design().pumps(), 1.5);
     }
@@ -1654,7 +1945,7 @@ mod tests {
         }
         assert_eq!(TurretLayout::Quad.more(), None);
         assert!(run.leave_dock());
-        assert!(run.depart(Stage::OuterRoad));
+        assert!(run.depart(run.moderate_passage()));
         assert_eq!(barrels(&run), TurretLayout::Quad);
         assert_eq!(
             run.ship.design().gun_stations()[1].gunhouse.barrels,
@@ -1773,19 +2064,16 @@ mod tests {
         run.clear();
         assert!(before + DOCK_REPAIR < MAX_HULL, "{before} hull");
         assert_eq!(run.hull(), before + DOCK_REPAIR);
-        assert!(run.leave_dock());
-        assert!(run.depart(Stage::OuterRoad));
-        assert_eq!(run.hull(), before + DOCK_REPAIR);
         assert!(run.ship.compartments().iter().all(|hold| !hold.wrecked()));
-        // The second yard repairs her too, and open water onward mends nothing more.
+        // The second yard repairs her too.
+        assert!(run.leave_dock());
+        assert!(run.depart(run.exits().unwrap()[0].stage));
         run.tick(60., Objectives::default(), 30);
         let battered = run.hull();
         run.clear();
         assert_eq!(run.phase(), Phase::Drydock(LegEnd::BasesDestroyed));
         let repaired = run.hull();
         assert!(repaired > battered && repaired <= battered + DOCK_REPAIR);
-        assert!(run.leave_dock() && run.depart(SEAS[2][0]));
-        assert_eq!(run.hull(), repaired);
     }
 
     #[test]
@@ -1811,12 +2099,8 @@ mod tests {
                 3,
             ),
         ] {
-            for Exit {
-                stage: dest,
-                stars: required,
-                ..
-            } in Stage::IronNarrows.exits().unwrap()
-            {
+            for exit in Run::default().exits().unwrap() {
+                let (dest, required) = (exit.stage, exit.stars);
                 let mut r = Run::default();
                 r.tick(60., goals, 50);
                 while r.phase == Phase::Refit {
@@ -1832,21 +2116,23 @@ mod tests {
                 assert_eq!(r.stars(), stars);
                 assert_eq!(r.depart(dest), stars >= required);
                 if stars >= required {
-                    assert_eq!(r.stars(), 0);
-                    // The dock makes good 40 points on any route, and 30 more on this one.
-                    let docked = if dest == Stage::GreywaterSound {
+                    assert_eq!((r.stars(), r.grade), (0, exit.grade));
+                    // The dock makes good 40 points on any route, and a moderate
+                    // passage's yard 30 more.
+                    let docked = if exit.grade == Grade::Moderate {
                         70
                     } else {
                         40
                     };
                     assert_eq!(r.hull(), (hull + docked).min(100));
                     assert_eq!(r.previous_stars, stars);
-                    if dest == Stage::PilotsCut {
-                        assert_eq!(r.phase, Phase::Refit);
+                    if exit.grade == Grade::Tough {
+                        assert_eq!((r.phase, r.perk()), (Phase::Refit, Perk::FreeFitting));
                         let hand = r.offers();
                         r.install(hand[0]);
                         assert_eq!(r.fittings, fitted.with(hand[0]));
                     } else {
+                        assert_eq!(r.perk(), Perk::Repair(30));
                         assert_eq!(r.fittings, fitted);
                     }
                     // Unspent points sail with her, the clock's among them if she beat it.
@@ -1863,14 +2149,17 @@ mod tests {
                     r.clear();
                     assert_eq!(r.phase, Phase::Drydock(LegEnd::BasesDestroyed));
                     // The second yard charts the third round, and a leg with only its
-                    // drydock star opens only its open water.
+                    // drydock star opens only its moderate passage.
                     assert_eq!((r.stars(), r.beat_clock()), (1, false));
                     assert!(r.leave_dock());
                     assert_eq!(r.phase, Phase::Chart);
-                    assert_eq!(r.exits(), Some(SEAS[2].map(Stage::exit)));
-                    assert!(!r.depart(SEAS[2][1]) && !r.depart(SEAS[3][0]));
-                    assert!(r.depart(SEAS[2][0]));
-                    assert_eq!(r.course, [dest, SEAS[2][0]]);
+                    let third = r.exits().unwrap();
+                    assert_eq!(third.map(|e| e.stage), charted(r.seed, 3).unwrap());
+                    assert_eq!(third.map(|e| e.grade), GRADES);
+                    assert!(!r.depart(third[1].stage) && !r.depart(third[2].stage));
+                    assert!(!r.depart(POOLS[3][0]));
+                    assert!(r.depart(third[0].stage));
+                    assert_eq!(r.course, [dest, third[0].stage]);
                     assert_eq!(r.previous_stars, stars + 1);
                 } else {
                     assert_eq!(r.phase, Phase::Chart);
@@ -1880,88 +2169,121 @@ mod tests {
     }
 
     #[test]
-    fn harder_passages_pay_more_a_star_and_every_anchorage_pays_the_same() {
-        for (round, seas) in SEAS.iter().enumerate() {
-            for (lane, sea) in seas.iter().enumerate() {
-                let pay = if round == 0 {
-                    STAR_POINTS
-                } else {
-                    LANE_STAR_POINTS[lane]
-                };
-                assert_eq!(sea.star_points(), pay, "{sea:?}");
+    fn tough_passages_pay_more_a_star_and_every_anchorage_pays_the_same() {
+        for (round, pool) in POOLS.iter().enumerate() {
+            for sea in pool {
+                for grade in [Grade::Moderate, Grade::Tough] {
+                    let pay = if round == 0 {
+                        STAR_POINTS
+                    } else {
+                        grade.star_points()
+                    };
+                    assert_eq!(sea.star_points(grade), pay, "{sea:?}");
+                }
             }
         }
-        assert_eq!(Stage::CrownDeep.star_points(), 0);
-        assert!(LANE_STAR_POINTS.windows(2).all(|w| w[0] < w[1]));
-        assert_eq!(LANE_STAR_POINTS[2], 2 * LANE_STAR_POINTS[0]);
-        // Three stars in the hard passage of the second round pay twelve, and the clock
-        // four more.
-        let mut run = Run {
-            stage: SEAS[1][2],
-            ..Run::default()
-        };
-        let goals = run.stage.mission();
-        run.tick_sector(
-            1.,
-            Objectives {
-                kills: goals.kills,
-                crates: goals.crates,
-                ..Default::default()
-            },
-            0,
-            true,
-        );
-        assert_eq!((run.stars(), run.points()), (3, 16));
+        assert_eq!(Stage::CrownDeep.star_points(Grade::Tough), 0);
+        assert!(GRADE_STAR_POINTS[0] < GRADE_STAR_POINTS[1]);
+        assert_eq!(GRADE_STAR_POINTS[1], 2 * STAR_POINTS);
+        // Three stars in a tough passage of the second round pay twelve, and the clock
+        // four more. The same stars in a moderate one pay nine, and the clock three.
+        for (grade, points) in [(Grade::Tough, 16), (Grade::Moderate, 12)] {
+            let mut run = Run {
+                stage: POOLS[1][0],
+                grade,
+                ..Run::default()
+            };
+            let goals = run.stage.mission();
+            run.tick_sector(
+                1.,
+                Objectives {
+                    kills: goals.kills,
+                    crates: goals.crates,
+                    ..Default::default()
+                },
+                0,
+                true,
+            );
+            assert_eq!((run.stars(), run.points()), (3, points));
+        }
     }
 
     #[test]
     fn a_run_is_seven_short_patrols_forking_at_every_yard_and_then_the_regent() {
-        let seas: Vec<Stage> = SEAS.iter().flatten().copied().collect();
+        let seas: Vec<Stage> = POOLS.iter().flatten().copied().collect();
+        assert_eq!(seas.len(), PATROLS * POOL);
         for (i, sea) in seas.iter().enumerate() {
-            assert!(!seas[..i].contains(sea), "{sea:?} sails twice");
+            assert!(!seas[..i].contains(sea), "{sea:?} is in two pools");
             assert_ne!(*sea, Stage::CrownDeep);
             let names = seas
                 .iter()
                 .filter(|other| other.mission().name == sea.mission().name);
             assert_eq!(names.count(), 1, "{sea:?}");
         }
-        assert_eq!(ANCHORAGES.map(|port| port.stage), SEAS[0]);
         assert_eq!(Stage::CrownDeep.round(), ROUNDS);
-        // Each round asks at least as many sinkings as the open water before it.
+        // Each round asks at least as many sinkings as the round before it.
         let mut least = 0;
-        for (round, row) in SEAS.iter().enumerate() {
-            for (lane, &sea) in row.iter().enumerate() {
-                assert_eq!((sea.round(), sea.lane()), (round + 1, lane));
+        for (round, pool) in POOLS.iter().enumerate() {
+            for &sea in pool {
+                assert_eq!(sea.round(), round + 1);
                 assert_eq!(sea.is_opening(), round == 0);
-                // Only a hard passage flies enemy aircraft, and an anchorage asks nothing.
-                assert_eq!(sea.enters_air_cover(), round > 0 && lane == 2);
-                let exit = sea.exit();
-                let priced = if round == 0 {
-                    (0, Perk::None)
-                } else {
-                    LANES[lane]
-                };
-                assert_eq!((exit.stars, exit.perk), priced);
+                // Only a tough passage flies enemy aircraft, and an anchorage never does.
+                assert!(!sea.enters_air_cover(Grade::Moderate));
+                assert_eq!(sea.enters_air_cover(Grade::Tough), round > 0, "{sea:?}");
                 let mission = sea.mission();
                 assert!((5..=6).contains(&mission.minutes), "{sea:?}");
                 assert!(mission.kills >= least, "{sea:?}");
             }
-            least = row[0].mission().kills;
-            let next = row[0].exits();
-            assert_eq!(next, SEAS.get(round + 1).map(|seas| seas.map(Stage::exit)));
+            least = pool.iter().map(|sea| sea.mission().kills).min().unwrap();
         }
-        assert!(Stage::CrownDeep.exits().is_none() && !Stage::CrownDeep.enters_air_cover());
+        assert!(!Stage::CrownDeep.enters_air_cover(Grade::Tough));
 
-        // The Regent fights under the air cover of the hard passage just sailed.
+        // Every run charts three different seas of each round's pool, and its seed
+        // decides which, so the best-paid way is not the same from one run to the next.
+        let mut seen = vec![Vec::new(); PATROLS];
+        for seed in 0..120 {
+            assert_eq!(anchorages(seed), charted(seed, 1).unwrap());
+            for round in 1..=PATROLS {
+                let three = charted(seed, round).unwrap();
+                assert!(three.iter().all(|sea| sea.round() == round), "{three:?}");
+                assert!(three[0] != three[1] && three[1] != three[2] && three[0] != three[2]);
+                assert_eq!(charted(seed, round), Some(three));
+                for sea in three {
+                    if !seen[round - 1].contains(&sea) {
+                        seen[round - 1].push(sea);
+                    }
+                }
+            }
+            assert!(charted(seed, 0).is_none() && charted(seed, ROUNDS).is_none());
+        }
+        assert!(seen.iter().all(|seas| seas.len() == POOL), "{seen:?}");
+        // Each yard charts one moderate passage, always open, then two tough ones for
+        // three stars that pay alike.
+        let exits = Run::default().exits().unwrap();
+        assert_eq!(exits.map(|e| e.grade), GRADES);
+        assert_eq!(
+            exits.map(|e| (e.stars, e.perk)),
+            [
+                (0, Perk::Repair(30)),
+                (3, Perk::FreeFitting),
+                (3, Perk::FreeFitting)
+            ]
+        );
+        assert_eq!(exits[1].star_points(), exits[2].star_points());
+        assert!(exits[1].under_air_cover() && !exits[0].under_air_cover());
+
+        // The Regent fights under the air cover of the tough passage just sailed.
         let mut run = Run {
             stage: Stage::CrownDeep,
+            grade: Grade::Tough,
             ..Run::default()
         };
         assert!(!run.under_air_cover());
-        run.course = vec![Stage::PilotsCut, SEAS[PATROLS - 1][2]];
+        run.course = vec![POOLS[1][0], POOLS[PATROLS - 1][0]];
         assert!(run.under_air_cover());
-        run.course = vec![Stage::PilotsCut, SEAS[PATROLS - 1][0]];
+        run.grade = Grade::Moderate;
         assert!(!run.under_air_cover());
+        assert_eq!(run.perk(), Perk::None);
     }
 
     #[test]
@@ -2030,16 +2352,16 @@ mod tests {
         assert_eq!((r.fittings_remaining(), r.points()), (1, 10));
         r.install(Card::QuadTurrets);
         assert_eq!(r.fittings_remaining(), 1);
-        assert!(!r.depart(Stage::OuterRoad));
+        assert!(!r.depart(r.moderate_passage()));
         r.install(r.offers()[0]);
         assert!(r.leave_dock());
         assert_eq!(r.phase(), Phase::Chart);
-        assert!(!r.depart(Stage::PilotsCut));
-        assert!(r.depart(Stage::OuterRoad));
+        assert!(!r.depart(r.exits().unwrap()[1].stage));
+        assert!(r.depart(r.moderate_passage()));
         assert_eq!((r.elapsed, r.fittings_remaining(), r.points()), (0., 0, 10));
         r.tick_sector(1., Objectives::default(), 0, true);
         assert_eq!(r.phase(), Phase::Drydock(LegEnd::BasesDestroyed));
-        assert_eq!(r.points(), 10 + 2 * STAR_POINTS);
+        assert_eq!(r.points(), 10 + 2 * GRADE_STAR_POINTS[0]);
         assert!(r.leave_dock());
         assert_eq!(r.phase(), Phase::Chart);
     }
@@ -2059,7 +2381,7 @@ mod tests {
         );
         run.clear();
         assert!(run.leave_dock());
-        assert!(run.depart(Stage::OuterRoad));
+        assert!(run.depart(run.moderate_passage()));
         run.tick(1., stores(1), 0);
         assert_eq!((run.phase, run.level, run.experience), (Phase::Refit, 2, 0));
         run.install(run.offers()[0]);
@@ -2094,7 +2416,7 @@ mod tests {
     fn the_regent_must_sink_however_long_it_takes_and_breakwater_must_survive() {
         let finale = || {
             let mut run = Run::default();
-            run.stage = SEAS[PATROLS - 1][0];
+            run.stage = POOLS[PATROLS - 1][0];
             run.tick_sector(1., Objectives::default(), 0, true);
             assert!(!run.engage_regent() && run.leave_dock());
             assert!(run.engage_regent());
@@ -2158,7 +2480,7 @@ mod tests {
         );
         let banked = run.points();
         assert!(run.leave_dock());
-        assert!(run.depart(Stage::OuterRoad));
+        assert!(run.depart(run.moderate_passage()));
         assert_eq!((run.cargo_points(), run.cargo_progress()), (0, 0.625));
         run.tick(1., cargo(0.375 + 2.), 0);
         assert_eq!((run.cargo_points(), run.cargo_progress()), (3, 0.));

@@ -23,6 +23,9 @@ pub enum Frame {
     BatteryGallery,
     /// A broader section with room for two of everything.
     Wide,
+    /// Two full-size main turrets abreast, each training over its own side and round to
+    /// the bow and the stern. Only a capital beam has the room for them.
+    DoubleBattery,
     Stern,
 }
 
@@ -43,12 +46,18 @@ pub struct FrameSpec {
 
 impl Frame {
     /// The frames that can stand between a bow and a stern.
-    pub const MIDSHIPS: [Self; 4] = [
+    pub const MIDSHIPS: [Self; 5] = [
         Self::Straight,
         Self::Sponsons,
         Self::Wide,
         Self::BatteryGallery,
+        Self::DoubleBattery,
     ];
+
+    /// Main turrets on this frame stand abreast, a port turret and a starboard one.
+    pub fn abreast(self) -> bool {
+        matches!(self, Self::BatteryGallery | Self::DoubleBattery)
+    }
 
     pub fn spec(self) -> FrameSpec {
         let spec = |length, beam, slots: [usize; 3], structure, mass| FrameSpec {
@@ -66,6 +75,7 @@ impl Frame {
             Self::Straight => spec(5., 5.5, [1, 0, 1], 18., 1.),
             Self::Sponsons => spec(5., 5.5, [1, 2, 1], 18., 1.1),
             Self::BatteryGallery => spec(5., 5.5, [2, 0, 1], 18., 1.2),
+            Self::DoubleBattery => spec(5., 5.5, [2, 0, 1], 20., 1.35),
             Self::Wide => spec(5., 7., [2, 0, 2], 24., 1.5),
             Self::Stern => spec(5., 5., [1, 0, 0], 14., 0.7),
         }
@@ -115,11 +125,36 @@ pub const MISSILE_SALVO: usize = 2;
 pub const MISSILE_DAMAGE: u16 = 8;
 pub const MISSILE_RANGE: f32 = 1000.;
 pub const MISSILE_RELOAD: f32 = 20.;
-/// How far from the ship the floatplane hunts, the damage of the bomb it drops on
-/// each pass, and the seconds between passes while it rearms.
+/// How far from the ship the floatplane hunts, the damage of each bomb it drops, and
+/// the seconds between passes while it rearms.
 pub const FLOATPLANE_REACH: f32 = 700.;
 pub const BOMB_DAMAGE: u16 = 5;
 pub const SORTIE_SECONDS: f32 = 16.;
+
+/// How the ship's strike craft are fitted out: the launchers on each missile rack and
+/// the missiles in each salvo, the catapults and planes on the plane section and the
+/// bombs each plane carries on a sortie.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StrikeCraft {
+    pub launchers: usize,
+    pub salvo: usize,
+    pub planes: usize,
+    pub bombs: usize,
+}
+impl StrikeCraft {
+    /// One launcher of two missiles on a rack, and one plane with one bomb.
+    pub const STOCK: Self = Self {
+        launchers: 1,
+        salvo: MISSILE_SALVO,
+        planes: 1,
+        bombs: 1,
+    };
+}
+impl Default for StrikeCraft {
+    fn default() -> Self {
+        Self::STOCK
+    }
+}
 
 impl Component {
     pub fn slot(self) -> Slot {
@@ -668,7 +703,7 @@ impl Design {
                 };
                 let placed = m.fit.iter().enumerate().filter(|(_, c)| c.slot() == slot);
                 for (order, (index, &component)) in placed.enumerate() {
-                    if m.frame == Frame::BatteryGallery && component == Component::MainGun {
+                    if m.frame.abreast() && component == Component::MainGun {
                         fittings.push(Fitting {
                             berth: Berth { module, index },
                             component,

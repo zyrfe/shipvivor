@@ -885,14 +885,16 @@ impl Battle {
                     // turn every round from the hull.
                     Contact::Raider(i, ShipPart::Tower) if self.raiders[i].bridge_standing() => {
                         let r = &mut self.raiders[i];
-                        let (outcome, normal, grade) = r.strike_hull(
+                        let struck = r.strike_hull(
                             p,
                             travel,
                             (shot.shell.ammo, shell),
                             shot.shell.bore,
                             true,
+                            0.,
                         );
-                        met = Some((outcome, grade));
+                        let (outcome, normal) = (struck.impact, struck.normal);
+                        met = Some((outcome, struck.grade));
                         let dealt = outcome.dealt(shot.damage);
                         if dealt > 0 && r.hit_bridge(dealt) {
                             self.effects.push(Effect {
@@ -904,8 +906,9 @@ impl Battle {
                         }
                         armor_effect(outcome, normal)
                     }
+                    // Light guns can't hurt a hull her turrets screen.
                     Contact::Raider(i, ShipPart::Hull | ShipPart::Tower)
-                        if self.raiders[i].protected() =>
+                        if self.raiders[i].screened() && shot.battery != Battery::Main =>
                     {
                         let normal = (p.xz() - self.raiders[i].body.pos)
                             .normalize_or_zero()
@@ -916,21 +919,42 @@ impl Battle {
                     Contact::Raider(i, part) => {
                         let r = &mut self.raiders[i];
                         let tower = matches!(part, ShipPart::Tower);
-                        let (outcome, normal, grade) = r.strike_hull(
+                        // Only the main battery's rounds shift a strake on her side.
+                        let wear = if shot.battery == Battery::Main {
+                            f32::from(shot.damage)
+                        } else {
+                            0.
+                        };
+                        let struck = r.strike_hull(
                             p,
                             travel,
                             (shot.shell.ammo, shell),
                             shot.shell.bore,
                             tower,
+                            wear,
                         );
-                        met = Some((outcome, grade));
+                        let (outcome, normal) = (struck.impact, struck.normal);
+                        met = Some((outcome, struck.grade));
                         let dealt = outcome.dealt(shot.damage);
                         if dealt > 0 {
                             if tower && r.class == super::EnemyClass::Battleship {
                                 r.disable_director();
+                            } else if struck.bare {
+                                r.hit_bare_hull(p.xz(), dealt);
                             } else {
                                 r.hit_hull(p.xz(), dealt);
                             }
+                        }
+                        if let Some(strake) = struck.loosed {
+                            let at = r.strake_at(strake);
+                            let kind = EffectKind::StrakeLost(r.class, strake as u8);
+                            let heading = r.body.heading;
+                            self.effects.push(Effect {
+                                body: body(&mut self.serial, at.xz(), heading),
+                                height: at.y,
+                                kind,
+                                age: 0.,
+                            });
                         }
                         armor_effect(outcome, normal)
                     }

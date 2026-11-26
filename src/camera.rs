@@ -1,8 +1,9 @@
 //! Ship-centred view. The helm and the sight have independent world bearings.
 use crate::state::{Campaign, Mode, PlayerHelm};
 use bevy::{
-    core_pipeline::tonemapping::Tonemapping,
+    core_pipeline::{prepass::DepthPrepass, tonemapping::Tonemapping},
     input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit},
+    pbr::{ScreenSpaceTransmission, ScreenSpaceTransmissionQuality},
     post_process::effect_stack::ChromaticAberration,
     prelude::*,
     window::{CursorGrabMode, CursorOptions},
@@ -618,6 +619,13 @@ pub fn setup(mut commands: Commands) {
             ..default()
         },
         Tonemapping::Reinhard,
+        // The sea mirrors the ships and shores standing over it from the picture of
+        // everything solid drawn before it, found again by the depth of each pixel.
+        DepthPrepass,
+        ScreenSpaceTransmission {
+            steps: 1,
+            quality: ScreenSpaceTransmissionQuality::Low,
+        },
         DistanceFog {
             color: SKY,
             falloff: FogFalloff::Linear {

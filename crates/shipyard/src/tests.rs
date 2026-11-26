@@ -126,7 +126,7 @@ fn stock_designs_come_out_at_the_figures_the_game_already_uses() {
     for (design, length, structure) in [
         (Design::freighter(), 30.1, 100. * 4. / 18.),
         (Design::cruiser(), 30.1, 100. * 5. / 18.),
-        (Design::flagship(), 81., 21.5),
+        (Design::flagship(), 81., 43.),
     ] {
         assert!(near(design.length(), length) && near(design.structure(), structure));
     }
@@ -870,4 +870,33 @@ fn hardening_strengthens_engine_and_fittings_and_keeps_damage_as_a_share() {
     });
     assert_eq!(fresh.strike_hull(17., 17.), []);
     assert_eq!(fresh.state(engine), State::Damaged);
+}
+
+#[test]
+fn double_turrets_stand_abreast_and_train_round_their_own_side_to_bow_and_stern() {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let mut design = Design::breakwater();
+    design
+        .insert(4, Module::new(Frame::DoubleBattery, [MainGun, MainGun]))
+        .unwrap();
+    let guns = design.gun_stations();
+    let pair: Vec<_> = guns
+        .iter()
+        .filter(|g| g.mounting == Mounting::Double)
+        .collect();
+    assert_eq!(pair.len(), 2);
+    assert_eq!(pair[0].berth.module, 4);
+    assert!(pair[0].abeam < 0. && pair[1].abeam > 0.);
+    assert!(near(pair[0].fore, pair[1].fore));
+    for g in pair {
+        // Full-size turrets, not a light wing pair.
+        assert!(!g.paired());
+        let own = g.abeam.signum() * FRAC_PI_2;
+        assert!(g.bears(own) && g.bears(0.) && g.bears(PI));
+        assert!(!g.bears(-own));
+    }
+    // A centreline turret beside them is masked across them, as by any centreline turret.
+    let after = guns.iter().find(|g| g.berth.module == 5).unwrap();
+    assert_eq!(after.mounting, Mounting::Centre);
+    assert!(!after.bears(0.));
 }

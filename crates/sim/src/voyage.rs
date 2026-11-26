@@ -19,6 +19,8 @@ pub fn hull_shape(run: &Run) -> Hull {
 
 /// Fit the battle's player mounts to her design and fittings.
 pub fn fit_player(battle: &mut Battle, run: &Run) {
+    // The strike craft are shipped with the design, so they are fitted out first.
+    battle.fit_strike(run.fittings.strike_craft());
     battle.fit_design(run.ship.design(), |station| {
         let local = run.fittings.for_station(station);
         (local.round(), local.turrets)

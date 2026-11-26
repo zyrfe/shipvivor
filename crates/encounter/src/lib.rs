@@ -18,6 +18,8 @@ mod fleet;
 pub use fleet::{COASTER_CARGO, EnemyClass, EnemyGun, FREIGHTER_CARGO, Profile, Raider};
 mod weight;
 pub use weight::Weight;
+mod formation;
+pub use formation::{DEPLOY, LINE_RANGE, SQUADRON_PACE, close_order, line_range};
 mod flak;
 pub use flak::{AaMount, Airframe, BURST_RADIUS};
 mod mounts;
@@ -25,7 +27,7 @@ mod pilot;
 mod plating;
 mod port;
 pub use mounts::{Control, DeckOffsets, MainMount, MountStatus, Station, WingGun};
-pub use plating::{HULL_OUTLINE, Scar, breakwater_outline};
+pub use plating::{HULL_OUTLINE, STRAKE_RISE, STRAKES_A_SIDE, Scar, Strake, breakwater_outline};
 mod air_station;
 mod projectile;
 mod ram;
@@ -41,7 +43,9 @@ pub use recon::{AIR_SIGHT, ALERT_SECONDS, BASE_SIGHT, Spotter};
 mod aviation;
 mod torpedo;
 mod torpedo_boat;
-pub use aviation::{Bomb, CATAPULT_DECK, Flight, Floatplane, Launcher, Missile};
+pub use aviation::{
+    Bomb, CATAPULT_DECK, Flight, Floatplane, Launcher, Missile, catapult_layout, launcher_layout,
+};
 use glam::{Vec2, Vec3, Vec3Swizzles};
 pub use port::{
     DOCK_STATIONS, Dock, Factory, ISLAND_RADIUS, Pock, Port, REBUILD_SECONDS, SHORE_RANGE,
@@ -117,6 +121,9 @@ pub enum EffectKind {
     Torpedoed,
     /// Ice breaking apart, and how big it was: its waterline radius in whole metres.
     Shatter(u8),
+    /// One of a capital ship's side strakes shot loose and thrown clear of her: her
+    /// class, and the strake's index among hers.
+    StrakeLost(EnemyClass, u8),
 }
 impl EffectKind {
     /// Seconds before the effect is removed.
@@ -145,6 +152,7 @@ impl EffectKind {
             Self::Downed(_) => 3.4,
             Self::Torpedoed => 2.4,
             Self::Shatter(_) => 1.4,
+            Self::StrakeLost(..) => 1.6,
         }
     }
 }
@@ -218,28 +226,47 @@ const COMBATANT_LIMIT: usize = 16;
 /// The warships lying at anchor off a base at the mouth of the channel in the first
 /// round, which is every base of a sector charted in a single stage.
 const GARRISON: [EnemyClass; 1] = [EnemyClass::Patrol];
-/// The squadron lying in each base's harbour when a sector opens, by how deep into the
-/// run the sector lies (see [`Battle::with_squadrons`]) and where the base stands up the
-/// channel: at its mouth, between, or the heavy yard at its head. Each was launched
-/// from the base's own docks before she came, and none is replaced but by them.
+/// The squadron lying in each base's harbour when a sector opens, by the round of the
+/// run the sector lies in (see [`Battle::with_squadrons`]) and where the base stands up
+/// the channel: at its mouth, between, or the heavy yard at its head. Each was launched
+/// from the base's own docks before she came, and none is replaced but by them. Two or
+/// more sail as one, in close order on the heaviest and in line of battle once they
+/// have her in reach (see `formation`). The first rounds' are small, a cruiser and her
+/// two destroyers, and the last rounds' are battle fleets.
 #[rustfmt::skip]
-const SQUADRONS: [[&[EnemyClass]; 3]; 4] = {
+const SQUADRONS: [[&[EnemyClass]; 3]; 8] = {
     use EnemyClass::*;
+    const D: EnemyClass = Destroyer;
+    const C: EnemyClass = Cruiser;
+    const B: EnemyClass = Battleship;
     [
-        [&GARRISON, &[Patrol, Patrol, Destroyer], &[Destroyer, Destroyer, Cruiser]],
-        [&[Patrol], &[Patrol, Destroyer, Destroyer], &[Destroyer, Cruiser, Cruiser]],
-        [&[Destroyer], &[Destroyer, Destroyer, Cruiser], &[Cruiser, Cruiser, Battleship]],
-        [&[Destroyer], &[Destroyer, Cruiser, Cruiser], &[Cruiser, Battleship, Battleship]],
+        [&GARRISON, &[Patrol, Patrol, D], &[D, D, C]],
+        [&[Patrol], &[D, D, C], &[D, D, C, C]],
+        [&[Patrol, Patrol, D], &[D, D, C], &[D, D, C, B]],
+        [&[D, D, C], &[D, D, C], &[D, D, C, C, B]],
+        [&[D, D, C], &[D, D, C, B], &[D, D, C, C, B, B]],
+        [&[D, D, B], &[D, D, C, C, B], &[D, D, D, C, C, B, B]],
+        [&[D, D, C, B], &[D, D, C, C, B, B], &[D, D, D, D, C, C, C, B, B, B]],
+        [&[D, D, C, B], &[D, D, C, C, B, B], &[D, D, D, D, C, C, C, B, B, B]],
     ]
 };
-/// The heaviest squadron tier.
-pub const SQUADRON_TIERS: usize = SQUADRONS.len();
+/// Metres off at the least that the Regent lies when she enters Crown Deep: past the
+/// reach of her fleet's guns and her own, and inside her lookout's sight.
+const REGENT_RANGE: f32 = 800.;
+/// The Regent's battle fleet at Crown Deep, which forms its line on her.
+#[rustfmt::skip]
+const REGENT_FLEET: [EnemyClass; 10] = {
+    use EnemyClass::*;
+    [Battleship, Battleship, Battleship, Cruiser, Cruiser, Cruiser,
+     Destroyer, Destroyer, Destroyer, Destroyer]
+};
 /// Seconds a base stays at alert after the base before it up the channel collapses: its
 /// lookout and radio keep its squadron, its batteries and its torpedo boats on her.
 pub const SCRAMBLE_ALERT: f32 = 60.;
 /// Where a squadron may lie in its base's harbour off the slip, in metres out along the
-/// slip and across it, best first. The roadstead closer in is the coasters'.
-const GARRISON_STATIONS: [(f32, f32); 9] = [
+/// slip and across it, best first. The roadstead closer in is the coasters'. A battle
+/// fleet's heavy ships take the outer berths, which have room for their length.
+const GARRISON_STATIONS: [(f32, f32); 25] = [
     (150., 70.),
     (150., -70.),
     (205., 25.),
@@ -249,6 +276,22 @@ const GARRISON_STATIONS: [(f32, f32); 9] = [
     (265., 75.),
     (265., -75.),
     (290., 0.),
+    (180., 160.),
+    (180., -160.),
+    (340., 110.),
+    (340., -110.),
+    (370., 0.),
+    (250., 190.),
+    (250., -190.),
+    (420., 90.),
+    (420., -90.),
+    (330., 220.),
+    (330., -220.),
+    (460., 0.),
+    (500., 120.),
+    (500., -120.),
+    (420., 230.),
+    (420., -230.),
 ];
 /// Raid intervals a slip stands empty after a launch. Three yards taking turns put a
 /// ship to sea about once an interval.
@@ -292,8 +335,21 @@ pub enum Sortie {
     /// She put to sea from this port this many seconds into the sector.
     Sailed { port: usize, at: f32 },
 }
-/// Seconds between barrels while the trigger is held.
+/// Seconds between barrels while the trigger is held, for guns that load slower than
+/// this per barrel. `ripple` closes it up for guns that load faster.
 pub const RIPPLE: f32 = 0.3;
+
+/// Seconds between barrels for guns that load `rounds` a second between them: `RIPPLE`,
+/// or closer for guns that load faster than that, so every barrel fires once each time
+/// it loads and none waits loaded for its turn. A closer ripple is cut to whole steps,
+/// rounding down, and half a step under, so the step never makes it longer.
+fn ripple(rounds: f32, dt: f32) -> f32 {
+    let even = rounds.recip();
+    if even >= RIPPLE {
+        return RIPPLE;
+    }
+    ((even / dt).floor().max(1.) - 0.5) * dt
+}
 /// Seconds a clicked order stands while its guns finish training or loading.
 pub const VOLLEY_WINDOW: f32 = 0.4;
 /// Seconds the call for AP stands after the last HE round that AP would have opened
@@ -342,8 +398,10 @@ pub struct Battle {
     /// Seconds into the sector until which each base stays at alert, scrambled when the
     /// base before it collapsed.
     alert_until: Vec<f32>,
-    /// How heavy each base's squadron is, from 0 to [`SQUADRON_TIERS`] less one.
-    squadron_tier: usize,
+    /// The round of the run whose squadrons lie in the harbours, from one.
+    squadron_round: usize,
+    /// The ships that sail as one, each led by her heaviest.
+    squadrons: Vec<formation::Squadron>,
     /// The weights the sector's warships are gunned in, by its round. Without one, each
     /// ship carries her class's stock guns.
     muster: Option<weight::Muster>,
@@ -356,9 +414,11 @@ pub struct Battle {
     shots: Vec<Shot>,
     torpedoes: Vec<Torpedo>,
     racks: [f32; 2],
-    floatplane: Option<Floatplane>,
+    floatplanes: Vec<Floatplane>,
     bombs: Vec<Bomb>,
     launchers: Vec<Launcher>,
+    /// How the strike craft are fitted out: launchers and salvos, planes and bombs.
+    strike: shipvivor_shipyard::StrikeCraft,
     missiles: Vec<Missile>,
     salvage: Vec<Package>,
     rewards: Rewards,
@@ -475,7 +535,8 @@ impl Battle {
             moorings: harrier::Moorings::default(),
             harrier_due: vec![0.; ports.len()],
             alert_until: vec![f32::NEG_INFINITY; ports.len()],
-            squadron_tier: 0,
+            squadron_round: 1,
+            squadrons: Vec::new(),
             muster: None,
             spotters: ports
                 .iter()
@@ -495,9 +556,10 @@ impl Battle {
             shots: vec![],
             torpedoes: vec![],
             racks: [0.; 2],
-            floatplane: None,
+            floatplanes: vec![],
             bombs: vec![],
             launchers: vec![],
+            strike: shipvivor_shipyard::StrikeCraft::STOCK,
             missiles: vec![],
             salvage: vec![],
             rewards: Rewards::Packages,
@@ -641,21 +703,27 @@ impl Battle {
     fn flagship_due(&self) -> f32 {
         (FLAGSHIP_SORTIE - self.escalation).max(FLAGSHIP_EARLIEST)
     }
-    /// The Regent is already at sea with a screen. Find water wide enough for her
-    /// whole hull, even on a chart whose first gate points straight at a headland.
+    /// The Regent is already at sea with her battle fleet, bearing down on her from
+    /// beyond the reach of its guns but in sight of her, so she sees its line form before
+    /// the first salvo. Find water wide enough for every hull of it, even on a chart
+    /// whose first gate points straight at a headland.
     pub fn regent_encounter(wave_interval: f32, chart: &Chart) -> Self {
         let mut battle = Self::chart_sector(wave_interval, chart);
         let approach = chart.gates[0].normalize_or(Vec2::NEG_Y);
-        // The leading boats can be drawn away from the slower battle line.
-        let screen = [
-            (EnemyClass::Patrol, -95., -98.),
-            (EnemyClass::Destroyer, -60., 145.),
-            (EnemyClass::Destroyer, 72., -157.),
-            (EnemyClass::Cruiser, 86., 80.),
-        ];
         let class = EnemyClass::Regent;
         let hull = class.profile().hull;
-        let mut range = 480.;
+        // Her battle fleet lies in close order on her, to form its line on her.
+        let hulls: Vec<Hull> = std::iter::once(class)
+            .chain(REGENT_FLEET)
+            .map(|c| c.profile().hull)
+            .collect();
+        let screen: Vec<(EnemyClass, (f32, f32))> =
+            REGENT_FLEET.into_iter().zip(close_order(&hulls)).collect();
+        let place = |at: Vec2, axis: Vec2, (ahead, starboard): (f32, f32)| {
+            let forward = -axis;
+            at + forward * ahead + forward.perp() * starboard
+        };
+        let mut range = REGENT_RANGE;
         let station = 'search: loop {
             for sector in [0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6] {
                 let axis =
@@ -664,11 +732,9 @@ impl Battle {
                 let clear =
                     |pos, room| battle.navigable_position(pos, room).distance_squared(pos) < 0.01;
                 if clear(at, hull.bow)
-                    && screen.iter().all(|(escort, fore, abeam)| {
-                        clear(
-                            at + axis * *fore + axis.perp() * *abeam,
-                            escort.profile().hull.bow,
-                        )
+                    && screen.iter().all(|&(escort, offset)| {
+                        let spot = place(at, axis, offset);
+                        spot.length() >= SPAWN_STANDOFF && clear(spot, escort.profile().hull.bow)
                     })
                 {
                     break 'search at;
@@ -677,11 +743,14 @@ impl Battle {
             range += hull.bow;
         };
         let axis = station.normalize();
-        for (escort, fore, abeam) in screen {
-            let at = station + axis * fore + axis.perp() * abeam;
-            battle.spawn(escort, at, Vec2::ZERO);
+        battle.spawn(class, station, station - axis);
+        let mut fleet = vec![battle.serial];
+        for (escort, offset) in screen {
+            let at = place(station, axis, offset);
+            battle.spawn(escort, at, at - axis);
+            fleet.push(battle.serial);
         }
-        battle.spawn(class, station, station + axis.perp());
+        battle.form_squadron(fleet);
         battle.with_heavy_battery(chart).with_sea(chart)
     }
 
@@ -706,41 +775,56 @@ impl Battle {
         }
     }
     /// The squadron base `base` keeps in its harbour: heavier the further up the channel
-    /// it stands and the deeper into the run.
+    /// it stands and the deeper into the run. The heavy yard's is the heaviest: the base
+    /// of the last stage with the most works. A base paired with it keeps one from
+    /// between.
     pub fn squadron(&self, base: usize) -> &'static [EnemyClass] {
         let last = self.ports.iter().map(Port::stage).max().unwrap_or(0);
+        let works = |port: &Port| port.factories().len();
+        let heavy = (self.ports.iter())
+            .filter(|p| p.stage() == last)
+            .map(works)
+            .max()
+            .unwrap_or(0);
         let stage = self.ports[base].stage();
         let place = match stage {
             0 => 0,
-            _ if stage == last => 2,
+            _ if stage == last && works(&self.ports[base]) == heavy => 2,
             _ => 1,
         };
-        SQUADRONS[self.squadron_tier.min(SQUADRON_TIERS - 1)][place]
+        SQUADRONS[self.squadron_round.clamp(1, SQUADRONS.len()) - 1][place]
     }
-    /// Squadrons of `tier`, for waters deeper into a run, in place of the first round's.
-    pub fn with_squadrons(mut self, tier: usize) -> Self {
-        self.squadron_tier = tier.min(SQUADRON_TIERS - 1);
+    /// The squadrons of round `round` of a run, counting from one, in place of the first
+    /// round's.
+    pub fn with_squadrons(mut self, round: usize) -> Self {
+        self.squadron_round = round.clamp(1, SQUADRONS.len());
         // Weigh the squadrons charted with the sector and moor these in their place. The
         // torpedo boats and coasters keep their moorings.
         self.raiders
             .retain(|r| r.moored.is_none() || r.class.is_merchant() || r.attack.is_some());
+        self.squadrons.clear();
         self.garrison();
         self
+    }
+    /// Each squadron afloat: its ships' ids, and whether it is in line of battle.
+    pub fn squadrons(&self) -> impl Iterator<Item = (&[u64], bool)> {
+        (self.squadrons.iter()).map(|squadron| (squadron.ships(), squadron.deployed()))
     }
     /// Whether base `index` is at alert: scrambled when the base before it collapsed.
     pub fn at_alert(&self, index: usize) -> bool {
         self.at_sea < self.alert_until[index]
     }
     /// Moor each base's [`Battle::squadron`] in its harbour: warships at anchor clear of
-    /// its slip and of her entry, which sail with the base when it is roused.
+    /// its slip and of her entry, which sail with the base when it is roused, as one.
     fn garrison(&mut self) {
         for base in 0..self.ports.len() {
             let (berth, forward) = (self.ports[base].berth(), self.ports[base].body.forward());
-            let mut stations = GARRISON_STATIONS.into_iter();
+            let mut moored = Vec::new();
             for &class in self.squadron(base) {
                 let hull = class.profile().hull;
-                let spot = stations
-                    .by_ref()
+                // A berth a heavy ship had no room for may suit a lighter one.
+                let spot = GARRISON_STATIONS
+                    .into_iter()
                     .map(|(out, across)| berth + forward * out + forward.perp() * across)
                     .find(|&spot| {
                         spot.length() >= SPAWN_STANDOFF
@@ -760,9 +844,12 @@ impl Battle {
                     });
                 if let Some(spot) = spot {
                     self.spawn(class, spot, spot + forward);
-                    self.raiders.last_mut().unwrap().moor(base);
+                    let ship = self.raiders.last_mut().unwrap();
+                    ship.moor(base);
+                    moored.push(ship.body.id);
                 }
             }
+            self.form_squadron(moored);
         }
     }
     pub fn flagship(&self) -> Option<Sortie> {
@@ -1019,9 +1106,7 @@ impl Battle {
     fn fire_turret(&mut self, station: Station, orders: &Orders) -> bool {
         let mount = &mut self.main_mounts[station.index()];
         let shell = mount.round(orders.shell);
-        // The ordered reload is for the ship's own bore. A turret of another bore loads on
-        // the same curve, with the same drill.
-        let reload = orders.reload * shell.load_seconds() / orders.shell.load_seconds();
+        let reload = mount.reload(orders);
         let Some(path) = mount.fire(reload, orders.shell.ammo) else {
             return false;
         };
@@ -1180,6 +1265,7 @@ impl Battle {
         }
         self.range_heavy_guns(dt, orders, way);
         self.work_torpedo_boats(dt, orders.player, orders.heading, way);
+        self.keep_formation(dt, orders.player);
         let ground = self.patrol_ground();
         for raider in &mut self.raiders {
             let charted = raider.cargo_run.map_or_else(
@@ -1293,7 +1379,8 @@ impl Battle {
         // The crew fires a turret laid on its own target as each barrel loads, a ripple apart.
         for k in 0..self.main_mounts.len() {
             let mount = &self.main_mounts[k];
-            if mount.engaged() && mount.since_fired >= RIPPLE {
+            let rounds = mount.layout().count() as f32 / mount.reload(orders);
+            if mount.engaged() && mount.since_fired >= ripple(rounds, dt) {
                 self.fire_turret(Station::SLOTS[k], orders);
             }
         }
@@ -1311,9 +1398,20 @@ impl Battle {
                 self.volley = Some((volley, left - dt));
             }
         }
-        // A held trigger walks the battery one barrel at a time.
-        if held && self.since_main >= RIPPLE {
-            self.fire_main(orders);
+        // A held trigger walks the battery one barrel at a time, as quick as the barrels it
+        // has in the fight load between them, so a fast battery fires every barrel each
+        // time it loads, its big guns too, rather than the small ones over and over.
+        if held {
+            let rounds: f32 = (self.main_mounts.iter())
+                .filter(|m| {
+                    !m.crewed()
+                        && !matches!(m.status(), MountStatus::Disabled | MountStatus::Masked)
+                })
+                .map(|m| m.layout().count() as f32 / m.reload(orders))
+                .sum();
+            if self.since_main >= ripple(rounds, dt) {
+                self.fire_main(orders);
+            }
         }
         for (i, gun) in self.wing_guns.iter_mut().enumerate() {
             gun.set_position(i, self.deck);
@@ -1376,7 +1474,7 @@ impl Battle {
         self.fire_anti_air(dt, orders);
         self.advance_shots(dt, orders.player, &mut events);
         self.advance_torpedoes(dt, orders.player, &mut events);
-        self.fly_floatplane(dt, orders.player, orders.heading, &mut events);
+        self.fly_floatplanes(dt, orders.player, orders.heading, &mut events);
         self.fire_missiles(dt, orders.player, orders.heading);
         self.advance_missiles(dt, &mut events);
         // Whatever hurt a cargo ship this tick put some of her cargo over the side.

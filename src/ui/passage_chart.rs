@@ -1,7 +1,7 @@
 //! A chart plate supplies the coastline. Ink the passages, fixes and soundings for this run.
 use super::*;
 use crate::state::{ChartRoll, Mode};
-use shipvivor_campaign::SEAS;
+use shipvivor_campaign::{OFFERED, charted};
 
 const WIDTH: f32 = 538.;
 const HEIGHT: f32 = WIDTH * 2. / 3.;
@@ -202,10 +202,12 @@ fn anchorage_pin(
 }
 
 /// Where the fixes of a run stand on the plate: the anchorages down the left, a column
-/// for each later round with its open water at the top and its hard passage at the
-/// foot, and Crown Deep at the right, where every route meets.
+/// for each later round with the seas the run charts there, its moderate passage at the
+/// top and its two tough ones below, and Crown Deep at the right, where every route
+/// meets.
 struct Plate {
     jitter: Box<dyn Fn(u32, u32) -> f32>,
+    seed: u64,
 }
 
 impl Plate {
@@ -213,7 +215,19 @@ impl Plate {
         let seed = (run.seed ^ (run.seed >> 32)) as u32;
         Self {
             jitter: Box::new(move |i, j| crate::surfaces::sample(i, j, seed) - 0.5),
+            seed: run.seed,
         }
+    }
+    /// The seas the run charts for `round`, from 1 for the anchorages to [`PATROLS`].
+    fn charted(&self, round: usize) -> [Stage; OFFERED] {
+        charted(self.seed, round).expect("every patrol round has a pool")
+    }
+    /// Where `stage` stands across its round, numbered from the top as the chart
+    /// numbers its passages. A sea the run never charted stands in the middle.
+    fn slot(&self, stage: Stage) -> usize {
+        charted(self.seed, stage.round())
+            .and_then(|seas| seas.iter().position(|&sea| sea == stage))
+            .unwrap_or(1)
     }
     fn column(round: usize) -> f32 {
         match round {
@@ -229,15 +243,16 @@ impl Plate {
         if stage == Stage::CrownDeep {
             return Vec2::new(Self::column(ROUNDS), 151. + 18. * (self.jitter)(9, 0));
         }
-        let (round, lane) = (stage.round() as u32, stage.lane() as u32);
+        let slot = self.slot(stage);
+        let (round, lane) = (stage.round() as u32, slot as u32);
         Vec2::new(
             Self::column(stage.round()) + 6. * (self.jitter)(round, lane),
-            Self::lane(stage.lane()) + 12. * (self.jitter)(lane + 7, round),
+            Self::lane(slot) + 12. * (self.jitter)(lane + 7, round),
         )
     }
     /// An anchorage pin on the departure chart, which needs more room than a fix.
     fn pin(&self, lane: usize) -> Vec2 {
-        Vec2::new(94., self.at(SEAS[0][lane]).y)
+        Vec2::new(94., self.at(self.charted(1)[lane]).y)
     }
 }
 
@@ -344,8 +359,8 @@ fn plot(cmd: &mut Commands, parent: Entity, run: &Campaign, art: &crate::insigni
     }
     // Every anchorage fans out to the second round's three passages.
     if departing {
-        for lane in 0..3 {
-            for next in SEAS[1] {
+        for lane in 0..OFFERED {
+            for next in plate.charted(2) {
                 course(cmd, sheet, plate.pin(lane), plate.at(next), true, SEA_INK);
             }
         }
@@ -353,23 +368,23 @@ fn plot(cmd: &mut Commands, parent: Entity, run: &Campaign, art: &crate::insigni
     // The rounds beyond run on as three dashed lanes to Crown Deep.
     let ahead = if departing { 2 } else { run.stage.round() + 1 };
     for round in ahead..PATROLS {
-        for lane in 0..3 {
-            let (from, to) = (SEAS[round - 1][lane], SEAS[round][lane]);
+        for lane in 0..OFFERED {
+            let (from, to) = (plate.charted(round)[lane], plate.charted(round + 1)[lane]);
             course(cmd, sheet, plate.at(from), plate.at(to), false, FADED);
         }
     }
     if ahead <= PATROLS {
-        for sea in SEAS[PATROLS - 1] {
+        for sea in plate.charted(PATROLS) {
             let (from, to) = (plate.at(sea), plate.at(Stage::CrownDeep));
             course(cmd, sheet, from, to, false, FADED);
         }
     }
 
     // The fixes go over the lines.
-    for (round, seas) in SEAS.iter().enumerate() {
-        for (lane, &sea) in seas.iter().enumerate() {
+    for round in 1..=PATROLS {
+        for (lane, &sea) in plate.charted(round).iter().enumerate() {
             let p = plate.at(sea);
-            if departing && round == 0 {
+            if departing && round == 1 {
                 anchorage_pin(cmd, sheet, plate.pin(lane), sea, lane + 1, face);
                 continue;
             }
@@ -383,9 +398,9 @@ fn plot(cmd: &mut Commands, parent: Entity, run: &Campaign, art: &crate::insigni
                 }
             } else if sailed.contains(&sea) {
                 Mark::Sailed
-            } else if offered.is_some_and(|exits| exits.iter().any(|e| e.stage == sea)) {
+            } else if let Some(exit) = offered.iter().flatten().find(|exit| exit.stage == sea) {
                 Mark::Offered {
-                    open: run.stars() >= sea.exit().stars,
+                    open: run.stars() >= exit.stars,
                 }
             } else {
                 Mark::Bare
@@ -493,10 +508,10 @@ fn offer_tab(
         stamp(cmd, tab, &art.lock, ink);
         figure(cmd, tab, exit.stars.into(), &art.star, ink, face);
     }
-    // Every star at the lane's rate and every yard, before any cargo.
-    let most = shipvivor_sim::Sector::of(sea).most_points();
+    // Every star at the grade's rate and every yard, before any cargo.
+    let most = shipvivor_sim::Sector::of(sea, exit.grade).most_points();
     figure(cmd, tab, most, &art.order, ink, face);
-    if sea.enters_air_cover() {
+    if exit.under_air_cover() {
         stamp(cmd, tab, &art.floatplane, if open { PENCIL } else { FADED });
     }
 }
@@ -545,7 +560,7 @@ fn figure(
 
 fn legend(run: &Campaign) -> &'static str {
     if run.screen() == Screen::Departure {
-        "Click an anchorage to sail.   Each yard offers the next round's three passages."
+        "Click an anchorage to sail.   Each yard charts a moderate and two tough passages."
     } else {
         "Red  Your course      Solid  Open      Dashed  Locked or ahead"
     }

@@ -5,7 +5,7 @@ mod title;
 use crate::state::{Campaign, Encounter, PlayerHelm, Screen, TrialCourse};
 use bevy::{prelude::*, ui::RelativeCursorPosition};
 use shipvivor_campaign::{
-    ANCHORAGES, Card, Fittings, LegEnd, MAX_STARS, PATROLS, Perk, ROUNDS, Stage,
+    Card, Fittings, Grade, LegEnd, MAX_STARS, PATROLS, Perk, ROUNDS, Stage, anchorages,
 };
 
 const KNOTS_PER_MPS: f32 = 1.94384;
@@ -152,7 +152,9 @@ pub fn intent(
             .and_then(|i| options::REWARDS.get(i))
             .map(|&(rewards, ..)| Action::Rewards(rewards)),
         Screen::Departure if key(KeyCode::Escape) => Some(Action::Title),
-        Screen::Departure => choice.map(|i| Action::Depart(ANCHORAGES[i].stage)),
+        Screen::Departure => {
+            choice.and_then(|i| anchorages(run.seed).get(i).copied().map(Action::Depart))
+        }
         Screen::Customise if key(KeyCode::Escape) || key(KeyCode::Enter) => Some(Action::Title),
         Screen::Customise if key(KeyCode::KeyR) => Some(Action::Spin),
         Screen::Customise => [
@@ -525,14 +527,20 @@ pub fn rebuild_screen(
     match run.screen() {
         Screen::Departure => {
             text(&mut cmd, panel, "Choose your anchorage", 25., ink());
-            for (i, port) in ANCHORAGES.iter().enumerate() {
-                let mission = port.stage.mission();
+            for (i, stage) in anchorages(run.seed).into_iter().enumerate() {
+                let mission = stage.mission();
+                let sector = shipvivor_sim::Sector::of(stage, Grade::Moderate);
                 action(
                     &mut cmd,
                     panel,
-                    Some(Action::Depart(port.stage)),
+                    Some(Action::Depart(stage)),
                     &format!("[{}]  {}", i + 1, mission.name),
-                    &format!("{} min. {}", mission.minutes, port.pilot_note),
+                    &format!(
+                        "{} min. {}.\n{}.",
+                        mission.minutes,
+                        sector.note(),
+                        sector.patrols()
+                    ),
                     false,
                 );
             }
@@ -549,7 +557,7 @@ pub fn rebuild_screen(
             text(
                 &mut cmd,
                 panel,
-                if run.stage.exit().perk == Perk::FreeFitting && run.elapsed == 0. {
+                if run.perk() == Perk::FreeFitting && run.elapsed == 0. {
                     format!(
                         "{}   /   DOCKYARD FITTING",
                         run.stage.mission().name.to_uppercase()
@@ -576,7 +584,7 @@ pub fn rebuild_screen(
             // it to this heading.
             let flagship = run
                 .exits()
-                .and_then(|exits| shipvivor_sim::Sector::of(exits[0].stage).boss())
+                .and_then(|exits| shipvivor_sim::Sector::of(exits[0].stage, exits[0].grade).boss())
                 .map_or(String::new(), |class| {
                     format!("\nFlagship: {}", crate::mission_hud::ship_class(class))
                 });
@@ -595,33 +603,33 @@ pub fn rebuild_screen(
             for (i, exit) in run.exits().into_iter().flatten().enumerate() {
                 let (stage, required) = (exit.stage, exit.stars);
                 let open = run.stars() >= required;
-                let description = match exit.perk {
-                    Perk::None => "Frequent patrols".to_string(),
-                    Perk::Repair(hull) => format!("Repair up to {hull} hull"),
-                    Perk::FreeFitting => "Free fitting on arrival".to_string(),
+                let sector = shipvivor_sim::Sector::of(stage, exit.grade);
+                // Four lines a card, so three of them fit the table: the waters, how
+                // hard the passage runs and what it grants, and the spanner count on
+                // the chart spelled out: every star at the grade's rate, the same again
+                // for beating the clock, and every base, before any cargo. A locked card
+                // gives the breakdown's line to its lock. One fact a line, so a narrow
+                // card never wraps one phrase into the next.
+                let grade = match (exit.perk, exit.under_air_cover(), stage.is_last_patrol()) {
+                    (Perk::Repair(hull), ..) => format!("Moderate: repairs {hull} hull"),
+                    (_, true, true) => "Tough: fitting, air to Crown Deep".to_string(),
+                    (_, true, false) => "Tough: free fitting, air cover".to_string(),
+                    _ => format!("{}: a free fitting", exit.grade.name()),
                 };
-                // The spanner count on the chart, spelled out: every star at the
-                // lane's rate, the same again for beating the clock, and every base,
-                // before any cargo. Two lines, so the narrow card never breaks a phrase.
-                let pay = format!(
-                    "\nUp to {} points:\n{} a star and the clock, {} a base",
-                    shipvivor_sim::Sector::of(stage).most_points(),
-                    stage.star_points(),
-                    shipvivor_campaign::YARD_POINTS
-                );
-                let air = match (stage.enters_air_cover(), stage.is_last_patrol()) {
-                    (true, true) => "\nStrafers here, bombers at Crown Deep",
-                    (true, false) => "\nStrafers fly from an air station here",
-                    _ => "",
-                };
-                // One fact a line, so a narrow card never wraps the lock or the perk
-                // into the line beside it. The lit card already says it is open.
-                let lock = if open {
-                    String::new()
+                let most = sector.most_points();
+                let detail = if open {
+                    format!(
+                        "{}\n{grade}\nUp to {most} points:\n{} a star and the clock, {} a base",
+                        sector.note(),
+                        exit.star_points(),
+                        shipvivor_campaign::YARD_POINTS
+                    )
                 } else {
-                    format!("Locked - needs {required} stars\n")
+                    format!(
+                        "Locked - needs {required} stars\n{}\n{grade}\nUp to {most} points",
+                        sector.note()
+                    )
                 };
-                let detail = format!("{lock}{description}{pay}{air}");
                 action(
                     &mut cmd,
                     panel,
@@ -781,7 +789,7 @@ fn pause_note(run: &Campaign) -> String {
     let next = if run.stage.is_last_patrol() {
         "This yard sails her on to the Iron Regent at Crown Deep."
     } else {
-        "Each yard charts three passages: open water, a sheltered sound for two stars and a hard passage for three, under enemy air cover. The harder the passage, the more each star pays."
+        "Each yard charts three passages into the next round's waters: a moderate one, always open, whose yard repairs her further, and two tough ones for three stars, under enemy air cover and with a free fitting, whose stars pay a third more."
     };
     let clock = "Sink every base to finish the patrol. Each base wrecked puts 45 seconds on the clock, and finishing inside it pays a star's worth of yard points.";
     format!("Round {round} of {ROUNDS}.{air} {clock} {next}")
@@ -974,10 +982,10 @@ fn hud(
                 panel,
                 format!(
                     "Each star   {} yard points\nEach base   {} yard point, +{:.0} s\nInside the clock   {} yard points",
-                    run.stage.star_points(),
+                    run.star_points(),
                     shipvivor_campaign::YARD_POINTS,
                     shipvivor_campaign::BASE_TIME,
-                    run.stage.star_points()
+                    run.star_points()
                 ),
                 12.,
                 pale(),
@@ -1259,7 +1267,7 @@ pub fn instruments(
                             format!(
                                 "Clear it inside  {}  for {} more points",
                                 clock_reading(&run),
-                                run.stage.star_points()
+                                run.star_points()
                             )
                         }
                     )
@@ -1445,9 +1453,15 @@ pub fn instruments(
                             "{name}    {range} m\n{n} / {} turrets firing  /  {flooded} / {fatal} flooded\nSink her to clear the patrol",
                             ship.guns().len()
                         )
-                    } else if n > 0 {
+                    } else if ship.screened() {
                         format!(
-                            "{name}    {range} m\n{n} / {} gun mounts intact\nBreak the gold turrets",
+                            "{name}    {range} m\n{n} / {} gun mounts intact  •  hull screened\nBreak the gold turrets or shoot off her side armour",
+                            ship.guns().len()
+                        )
+                    } else if n > 0 {
+                        let (flooded, fatal) = ship.vessel().flooding();
+                        format!(
+                            "{name}    {range} m\n{n} / {} gun mounts intact  •  hull open  •  {flooded} / {fatal} flooded\nSink her",
                             ship.guns().len()
                         )
                     } else {
