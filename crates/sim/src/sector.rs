@@ -413,6 +413,12 @@ impl Sector {
         self.waters.stages
     }
 
+    /// The named factory complex at the last base of this passage, if it has one.
+    pub fn industrial_yard(&self) -> Option<IndustrialYard> {
+        let &works = self.plan().last()?.last()?;
+        IndustrialYard::from_works(works)
+    }
+
     /// Seconds between the raiders' launches here.
     pub fn raid_interval(&self) -> f32 {
         self.raid_interval
@@ -493,12 +499,10 @@ impl Sector {
     /// The hand-set chart of this stage.
     pub fn classic(&self) -> Chart {
         let rotation = Mat2::from_angle(self.bearing);
-        let finale = self
-            .plan()
-            .last()
-            .and_then(|stage| stage.last())
-            .and_then(|&works| IndustrialYard::from_works(works));
-        Chart::classic_with_yard(self.waypoints.map(|p| rotation * p * self.spacing), finale)
+        Chart::classic_with_yard(
+            self.waypoints.map(|p| rotation * p * self.spacing),
+            self.industrial_yard(),
+        )
     }
 
     /// The ports, islands and patrols of a chart.

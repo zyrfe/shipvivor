@@ -174,6 +174,9 @@ pub struct Kit {
     plate: Handle<Mesh>,
     cube: Handle<Mesh>,
     shell: Handle<Mesh>,
+    /// The tracer astern of a shell: her own gold, the enemy's flame.
+    trails: [Handle<Mesh>; 2],
+    tracer: Handle<StandardMaterial>,
     spray: Handle<Mesh>,
     ring: Handle<Mesh>,
     plume: Handle<Mesh>,
@@ -261,6 +264,12 @@ pub fn setup(
     });
     let flak = paint.add(StandardMaterial {
         base_color: Color::srgba_u8(34, 34, 38, 214),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        ..default()
+    });
+    // A shell's tracer takes its colour and its fade from the mesh.
+    let tracer = paint.add(StandardMaterial {
         alpha_mode: AlphaMode::Blend,
         unlit: true,
         ..default()
@@ -370,6 +379,9 @@ pub fn setup(
             .collect(),
         cube: meshes.add(Cuboid::default()),
         shell: meshes.add(crate::ordnance::shell()),
+        trails: [(249, 189, 70), (255, 117, 37)]
+            .map(|(r, g, b)| meshes.add(crate::ordnance::trail(Color::srgb_u8(r, g, b)))),
+        tracer,
         spray: meshes.add(crate::ordnance::spray()),
         ring: meshes.add(Torus::new(0.95, 1.)),
         plume: meshes.add(Cone::new(0.5, 1.).mesh().resolution(8)),
@@ -1034,13 +1046,13 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
         }
         Shape::MainShot | Shape::CloseShot | Shape::EnemyShot | Shape::ShoreShell => {
             part(&kit.shell, &kit.casing, Vec3::ZERO, Vec3::ONE);
-            let hot = if matches!(key.1, Shape::EnemyShot | Shape::ShoreShell) {
-                &kit.flame
-            } else {
-                &kit.gold
-            };
-            part(&kit.ball, hot, v(0., 0., 5.5), v(0.20, 0.20, 4.6));
-            part(&kit.ball, &kit.foam, v(0., 0., 1.35), v(0.23, 0.23, 0.72));
+            let hostile = matches!(key.1, Shape::EnemyShot | Shape::ShoreShell);
+            part(
+                &kit.trails[usize::from(hostile)],
+                &kit.tracer,
+                Vec3::ZERO,
+                Vec3::ONE,
+            );
         }
         Shape::Muzzle => {
             part(&kit.ball, &kit.flame, v(0., 0., -1.45), v(1.34, 1.15, 2.2));

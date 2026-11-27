@@ -4,6 +4,7 @@
 //! here, and a click on a sea opens the yard before it.
 use super::*;
 use shipvivor_campaign::POOLS;
+use shipvivor_encounter::IndustrialYard;
 use shipvivor_sim::{Par, Sector};
 
 /// The seas of a round, from 1 for the anchorages to [`ROUNDS`] for Crown Deep alone.
@@ -14,12 +15,25 @@ pub(crate) fn seas(round: usize) -> &'static [Stage] {
     }
 }
 
+/// A destination belongs on the round tab when every sea listed under it ends there.
+fn common_yard(round: usize, grade: Grade) -> Option<IndustrialYard> {
+    let mut yards = seas(round)
+        .iter()
+        .map(|&stage| Sector::of(stage, grade).industrial_yard());
+    let first = yards.next().flatten()?;
+    yards.all(|yard| yard == Some(first)).then_some(first)
+}
+
 /// What the grade changes in a round, in a line under its buttons.
 fn grade_note(round: usize, grade: Grade) -> &'static str {
     match (round, grade) {
         (1, _) => "An anchorage is sailed the same at either grade.",
-        (ROUNDS, Grade::Tough) => "Tough: the Regent's bombers fly from her air station.",
-        (ROUNDS, Grade::Moderate) => "Moderate: the Regent fights without her air station.",
+        (ROUNDS, Grade::Tough) => {
+            "Cruisers and destroyers screen the Iron Regent. On Tough her air station sends bombers."
+        }
+        (ROUNDS, Grade::Moderate) => {
+            "Cruisers and destroyers screen the Iron Regent. On Moderate she fights without her air station."
+        }
         (_, Grade::Tough) => "Tough: air cover, raids sooner and quicker, heavier ships earlier.",
         (_, Grade::Moderate) => "Moderate: no air cover, and the raids build up at their own pace.",
     }
@@ -53,7 +67,7 @@ pub(super) fn show(cmd: &mut Commands, root: Entity, run: &Campaign, face: &Hand
                 bottom: percent(8.),
                 width: px(640),
                 max_width: percent(89),
-                ..column(10.)
+                ..column(8.)
             },
             ChildOf(root),
         ))
@@ -69,9 +83,9 @@ pub(super) fn show(cmd: &mut Commands, root: Entity, run: &Campaign, face: &Hand
         cmd,
         panel,
         if run.is_exercise() {
-            "She keeps the ship you built. Its yard charges nothing, and shows what a run would have brought here."
+            "Test ship models in any round. Choose a sea to refit your current ship."
         } else {
-            "Fit her out in a yard that charges nothing, and shows what a run would have brought here. Then sail the sea alone, as often as you like."
+            "Test ship models in any round. Choose a sea to fit out for free."
         },
         15.,
         ink(),
@@ -102,9 +116,16 @@ pub(super) fn show(cmd: &mut Commands, root: Entity, run: &Campaign, face: &Hand
         row
     };
     let rounds = row(cmd, "ROUND");
+    let mut selected_yard = None;
     for number in 1..=ROUNDS {
-        let label = if number == ROUNDS {
-            format!("{number}  Crown Deep")
+        let yard = common_yard(number, grade);
+        if number == round {
+            selected_yard = yard;
+        }
+        let label = if let Some(yard) = yard {
+            format!("{number} {}", yard.name().trim_start_matches("The "))
+        } else if number == ROUNDS {
+            format!("{number} Crown Deep")
         } else {
             number.to_string()
         };
@@ -114,6 +135,34 @@ pub(super) fn show(cmd: &mut Commands, root: Entity, run: &Campaign, face: &Hand
             Action::TestRound(number),
             &label,
             number == round,
+        );
+    }
+    if let Some(yard) = selected_yard {
+        let (works, machine) = match yard {
+            IndustrialYard::RedShift => ("rolling mill", "ore hopper"),
+            IndustrialYard::BellWorks => ("steam forge", "steam hammer"),
+        };
+        let note = cmd
+            .spawn((
+                Node {
+                    padding: UiRect::axes(px(10), px(5)),
+                    border: UiRect::left(px(2)),
+                    ..default()
+                },
+                BorderColor::all(brass()),
+                BackgroundColor(navy()),
+                ChildOf(panel),
+            ))
+            .id();
+        text(
+            cmd,
+            note,
+            format!(
+                "Every sea ends at {} {works}. Blast the fuel tank or break both governors to drop the {machine} and expose the cliff guns.",
+                yard.name()
+            ),
+            14.,
+            ink(),
         );
     }
     let grades = row(cmd, "GRADE");
@@ -214,7 +263,7 @@ fn tab(cmd: &mut Commands, row: Entity, action: Action, label: &str, chosen: boo
             Node {
                 min_width: px(38),
                 height: px(34),
-                padding: UiRect::horizontal(px(11)),
+                padding: UiRect::horizontal(px(7)),
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
                 border: UiRect::all(if chosen { px(2) } else { px(1) }),

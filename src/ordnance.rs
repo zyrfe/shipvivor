@@ -10,21 +10,52 @@ pub fn shell() -> Mesh {
     let cap = Color::srgb_u8(202, 207, 195);
     let band = Color::srgb_u8(211, 149, 72);
     let base = Color::srgb_u8(45, 57, 65);
-    let rings = [
-        (-1.08, 0., cap),
-        (-0.89, 0.13, cap),
-        (-0.62, 0.28, steel),
-        (-0.32, 0.355, steel),
-        (0.37, 0.355, band),
-        (0.40, 0.38, band),
-        (0.52, 0.38, steel),
-        (0.56, 0.35, steel),
-        (0.72, 0.31, base),
-        (0.72, 0., base),
-    ];
+    lathe(
+        &[
+            (-1.08, 0., cap),
+            (-0.89, 0.13, cap),
+            (-0.62, 0.28, steel),
+            (-0.32, 0.355, steel),
+            (0.37, 0.355, band),
+            (0.40, 0.38, band),
+            (0.52, 0.38, steel),
+            (0.56, 0.35, steel),
+            (0.72, SHELL_BASE.1, base),
+            (SHELL_BASE.0, 0., base),
+        ],
+        false,
+    )
+}
+
+/// Where the shell's flat base sits along its axis, and its radius there.
+const SHELL_BASE: (f32, f32) = (0.72, 0.31);
+
+/// The tracer burning in a shell's base: white hot and as wide as the base where it
+/// leaves her, thinning and fading to nothing astern. Its wide, bright end has to be
+/// the shell's end, or the trail reads as a pointed body flying tail first.
+pub fn trail(tint: Color) -> Mesh {
+    // Brighter than white, so the tone mapping leaves it glowing instead of painted.
+    let hot = Color::linear_rgb(4., 3.4, 2.2);
+    let burn = |gain: f32, alpha: f32| Color::from(tint.to_linear() * gain).with_alpha(alpha);
+    let (z, r) = SHELL_BASE;
+    lathe(
+        &[
+            (z, r * 0.9, hot),
+            (z + 0.45, r * 0.86, burn(2.2, 1.)),
+            (z + 3.6, r * 0.55, burn(1.6, 0.7)),
+            (z + 8., r * 0.18, burn(1.2, 0.)),
+        ],
+        true,
+    )
+}
+
+/// Revolve rings of (z, radius, paint) around Z. Each band takes its leading ring's
+/// paint, or shades from one ring's to the next when `graded`.
+fn lathe(rings: &[(f32, f32, Color)], graded: bool) -> Mesh {
     let mut facets = Facets::default();
     for segment in rings.windows(2) {
-        let [(z0, r0, paint), (z1, r1, _)] = [segment[0], segment[1]];
+        let [(z0, r0, paint), (z1, r1, next)] = [segment[0], segment[1]];
+        let next = if graded { next } else { paint };
         for i in 0..16 {
             let vertex = |n: usize, r, z| {
                 let a = n as f32 * std::f32::consts::TAU / 16.;
@@ -35,10 +66,10 @@ pub fn shell() -> Mesh {
             let c = vertex(i + 1, r1, z1);
             let d = vertex(i, r1, z1);
             if r0 > 0. {
-                facets.triangle([a, b, c], paint);
+                facets.triangle_colors([a, b, c], [paint, paint, next]);
             }
             if r1 > 0. {
-                facets.triangle([a, c, d], paint);
+                facets.triangle_colors([a, c, d], [paint, next, next]);
             }
         }
     }
