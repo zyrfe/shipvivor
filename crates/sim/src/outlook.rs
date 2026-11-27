@@ -9,8 +9,12 @@
 //! flagship and her escort, are fought a group at a time. In a group she sinks first
 //! whichever ship costs her most for the time it takes to sink, and every ship fires on
 //! her until it goes down. A fleet the scouts missed is a surprise, so it is left out.
-//! `cargo run --release -p shipvivor-sim --example outlook` sails the bot through
-//! passages to check the estimate against the game.
+//!
+//! The figures were set on 2026-11-26 against the simulator's bot, sailing every passage
+//! on offer at every yard, for what does her harm (shore guns, ships, the air) and how
+//! that grows round by round; and against the captain's own run logs for how hard she
+//! fights. The bot lays its guns far worse than a practised captain, so the gunnery here
+//! is the captain's: most rounds on target and the guns kept firing.
 use crate::sector::{PRESSURE, Sector, doctrine, most_barrels};
 use EnemyClass::*;
 use shipvivor_artillery::{MainShell, OVERPENETRATED_SHARE, OVERPENETRATION, Round};
@@ -103,12 +107,15 @@ fn toughness(class: EnemyClass) -> Toughness {
         TorpedoBoat => (3., 1., 2., HELD),
         Destroyer => (14.5, 3., 2., HELD),
         Cruiser => (22.5, 3.3, 2., HELD),
-        // The bosses carry the battleship's plate and outlast her: the Commodore by two
-        // thirds again, the Parliament two and a half times, the Regent four times.
+        // The bosses carry the battleship's plate and outlast her, as shelled on
+        // 2026-11-26 once they did: the Commodore about twice over, the Parliament five
+        // times and the Regent nine. Her strakes come away to bare more of her hull. A
+        // flagship's turrets screen her, so her telling plate is theirs, and she has to
+        // be stripped of them first.
         Battleship => (85., 3., 12., HELD),
-        Commodore => (140., 4., 12., HELD),
-        Parliament => (210., 6., 12., HELD),
-        Regent => (350., 10., 12., HELD),
+        Commodore => (174., 4., 12., (0.4, 0.35)),
+        Parliament => (430., 6., 6., (0.6, 0.35)),
+        Regent => (770., 10., 6., (0.5, 0.35)),
         Freighter | Coaster => (10., 1., 2., HELD),
     };
     Toughness {

@@ -25,7 +25,7 @@ const LIGHT_WEAR: f32 = 0.5;
 
 /// A draw from 0 to 1 fixed by a round's serial number and `draw`: whether it is the
 /// lucky one.
-fn luck(id: u64, draw: u64) -> f32 {
+pub(super) fn luck(id: u64, draw: u64) -> f32 {
     let mut x = id ^ draw.wrapping_mul(0x9e37_79b9_7f4a_7c15);
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
@@ -331,6 +331,22 @@ pub(super) fn ballistics(battery: Battery, shell: MainShell) -> (f32, f32) {
         Battery::Shore => (280., super::SHORE_RANGE + 35.),
         Battery::Heavy => (super::ranging::HEAVY_SPEED, super::ranging::HEAVY_REACH),
     }
+}
+
+/// How far a secondary's round may fall to either side of where the gun is laid, and
+/// short of it or over, as shares of the range: four metres either side at 160 m, and
+/// ten short or over. Most fall near the middle. A boat that turns after the gun is
+/// laid is still somewhere in the pattern, and a small one is no longer hit every time.
+const SECONDARY_SPREAD: (f32, f32) = (0.025, 0.06);
+
+/// Where the round numbered `serial` from a secondary at `from` falls when the gun is
+/// laid on `mark`: each round its own way off, within [`SECONDARY_SPREAD`].
+pub(super) fn strewn(from: Vec3, mark: Vec3, serial: u64) -> Vec3 {
+    let line = mark.xz() - from.xz();
+    let off = |draw: u64| luck(serial, draw) + luck(serial, draw + 1) - 1.;
+    let fall =
+        mark.xz() + line.perp() * SECONDARY_SPREAD.0 * off(1) + line * SECONDARY_SPREAD.1 * off(3);
+    fall.extend(mark.y).xzy()
 }
 
 /// Where a ship making `way` will be when a round from `from` reaches her.

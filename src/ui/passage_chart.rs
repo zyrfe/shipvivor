@@ -264,7 +264,8 @@ impl Plate {
     fn column(round: usize) -> f32 {
         match round {
             1 => 64.,
-            round if round < ROUNDS => 190. + 52. * (round - 2) as f32,
+            // The passages spread evenly from the second round's column to the last's.
+            round if round < ROUNDS => 190. + 260. * (round - 2) as f32 / (ROUNDS - 3) as f32,
             _ => 492.,
         }
     }
@@ -299,7 +300,7 @@ impl Plate {
     }
 }
 
-const ROMAN: [&str; ROUNDS] = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII"];
+const ROMAN: [&str; ROUNDS] = ["I", "II", "III", "IV", "V", "VI", "VII"];
 
 /// The run's course in pencil, the passages the yard offers next, and the rounds beyond
 /// in faint dashed lanes. The same seas drive the plotted courses and departure orders.

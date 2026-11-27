@@ -18,13 +18,12 @@ use Weight::*;
 /// What each round of a run musters, by class: destroyers, cruisers, battleships. A
 /// yard's launches and a harbour's squadron of a class take the listed weights in turn.
 #[rustfmt::skip]
-const ROSTER: [[&[Weight]; 3]; 8] = [
+const ROSTER: [[&[Weight]; 3]; super::RUN_ROUNDS] = [
     [&[Light], &[Light], &[Light]],
     [&[Light], &[Light], &[Light]],
     [&[Light], &[Light, Standard], &[Light]],
     [&[Light, Standard], &[Standard, Light], &[Light, Standard]],
     [&[Standard, Light], &[Standard], &[Standard]],
-    [&[Standard], &[Standard, Heavy], &[Standard, Heavy]],
     [&[Standard, Heavy], &[Heavy, Standard], &[Heavy, UltraHeavy]],
     [&[Heavy, Standard], &[Heavy], &[UltraHeavy, Heavy]],
 ];
@@ -138,7 +137,7 @@ mod tests {
     #[test]
     fn the_first_round_is_all_light_and_the_heaviest_come_last() {
         let mut first = Muster::of_round(1);
-        let mut last = Muster::of_round(8);
+        let mut last = Muster::of_round(ROSTER.len());
         for class in [Destroyer, Cruiser, Battleship] {
             let drawn: Vec<Weight> = (0..6).map(|_| last.draw(class)).collect();
             assert!(drawn.contains(&Heavy), "{class:?}: {drawn:?}");
@@ -153,7 +152,7 @@ mod tests {
             let mut muster = Muster::of_round(round);
             for class in [Destroyer, Cruiser, Battleship] {
                 let quad = (0..6).any(|_| muster.draw(class) == UltraHeavy);
-                assert_eq!(quad, class == Battleship && round >= 7, "{class:?} {round}");
+                assert_eq!(quad, class == Battleship && round >= 6, "{class:?} {round}");
             }
         }
         // Rosters never get lighter from one round to the next.
@@ -293,7 +292,7 @@ mod tests {
         let barrels: Vec<u8> = early.raiders.iter().map(Raider::barrels).collect();
         // The patrol boat and the Commodore keep their own guns.
         assert_eq!(barrels, [1, 1, 1, 1, 3, 1]);
-        let mut late = open_battle().ships_of_round(8);
+        let mut late = open_battle().ships_of_round(ROSTER.len());
         for _ in 0..3 {
             late.spawn(Battleship, at, at + Vec2::X);
         }

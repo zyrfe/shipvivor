@@ -64,7 +64,8 @@ pub enum Stage {
     BorealRoad,
     CalvingSound,
     RegentsGate,
-    // The rest of each round's pool, round by round, after the first three of each.
+    // The rest of each round's pool, round by round, after the first three of each. A
+    // sea keeps its place here when it moves to another round's pool.
     EiderSound,
     SkerryHaven,
     DriftwoodBay,
@@ -110,22 +111,22 @@ pub enum Stage {
 }
 
 /// Patrols in a full run before the intercept: an anchorage, then a passage from each yard.
-pub const PATROLS: usize = 7;
+pub const PATROLS: usize = 6;
 /// Rounds in a full run: the patrols, then Crown Deep.
 pub const ROUNDS: usize = PATROLS + 1;
-/// Seas in each round's pool.
-pub const POOL: usize = 9;
 /// Passages each yard charts, and anchorages the first chart offers.
 pub const OFFERED: usize = 3;
 
-/// The seas of every patrol round, a pool of nine to a round, all of a round with as
-/// many bases. Each run charts three of each pool from its seed: the first round's as
+/// The seas of every patrol round, all of a round with as many bases and a third of
+/// them held by each fleet: nine to a pool in the first three rounds, and twelve in the
+/// last three, which took in the seas of a round the run no longer sails, one of each
+/// fleet apiece. Each run charts three of each pool from its seed: the first round's as
 /// the choice of anchorage, and each later round's as the passages every yard of the
 /// round before offers, graded as [`GRADES`] says.
-pub const POOLS: [[Stage; POOL]; PATROLS] = {
+pub const POOLS: [&[Stage]; PATROLS] = {
     use Stage::*;
     [
-        [
+        &[
             LanternBay,
             IronNarrows,
             BlackcapReach,
@@ -136,7 +137,7 @@ pub const POOLS: [[Stage; POOL]; PATROLS] = {
             CairnRoad,
             SnowmeltNarrows,
         ],
-        [
+        &[
             OuterRoad,
             GreywaterSound,
             PilotsCut,
@@ -147,7 +148,7 @@ pub const POOLS: [[Stage; POOL]; PATROLS] = {
             BrineNarrows,
             AukBay,
         ],
-        [
+        &[
             SealersRoad,
             KittiwakeSound,
             RimeGate,
@@ -158,7 +159,7 @@ pub const POOLS: [[Stage; POOL]; PATROLS] = {
             HoarfrostBay,
             LodestoneReach,
         ],
-        [
+        &[
             WhalebackReach,
             FogboundBay,
             TheGullet,
@@ -168,8 +169,11 @@ pub const POOLS: [[Stage; POOL]; PATROLS] = {
             CormorantReach,
             ShiverNarrows,
             WreckersBay,
+            FrostlineReach,
+            TernHaven,
+            NorthlightReach,
         ],
-        [
+        &[
             LongnightRoad,
             HollowSound,
             SplinterCut,
@@ -179,19 +183,11 @@ pub const POOLS: [[Stage; POOL]; PATROLS] = {
             BlackwaterNarrows,
             RavensReach,
             HarrowBay,
-        ],
-        [
-            FrostlineReach,
-            TernHaven,
-            DevilsThroat,
-            TempestRoad,
-            HailstoneSound,
-            WolfpackNarrows,
             CoffinCut,
-            NorthlightReach,
+            HailstoneSound,
             ShroudBay,
         ],
-        [
+        &[
             BorealRoad,
             CalvingSound,
             RegentsGate,
@@ -201,6 +197,9 @@ pub const POOLS: [[Stage; POOL]; PATROLS] = {
             GauntletNarrows,
             CitadelBay,
             WhiteoutReach,
+            DevilsThroat,
+            WolfpackNarrows,
+            TempestRoad,
         ],
     ]
 };
@@ -432,6 +431,9 @@ impl Stage {
             Self::CormorantReach => ("Cormorant Reach", 6, 8, 3),
             Self::ShiverNarrows => ("Shiver Narrows", 6, 8, 3),
             Self::WreckersBay => ("Wreckers' Bay", 6, 7, 4),
+            Self::FrostlineReach => ("Frostline Reach", 6, 8, 3),
+            Self::TernHaven => ("Tern Haven", 6, 7, 4),
+            Self::NorthlightReach => ("Northlight Reach", 6, 7, 4),
             Self::LongnightRoad => ("Longnight Road", 6, 8, 3),
             Self::HollowSound => ("Hollow Sound", 6, 8, 4),
             Self::SplinterCut => ("Splinter Cut", 6, 9, 4),
@@ -441,15 +443,9 @@ impl Stage {
             Self::BlackwaterNarrows => ("Blackwater Narrows", 6, 9, 3),
             Self::RavensReach => ("Ravens' Reach", 6, 9, 4),
             Self::HarrowBay => ("Harrow Bay", 6, 8, 4),
-            Self::FrostlineReach => ("Frostline Reach", 6, 9, 4),
-            Self::TernHaven => ("Tern Haven", 6, 9, 4),
-            Self::DevilsThroat => ("Devil's Throat", 6, 10, 4),
-            Self::TempestRoad => ("Tempest Road", 6, 10, 4),
-            Self::HailstoneSound => ("Hailstone Sound", 6, 9, 4),
-            Self::WolfpackNarrows => ("Wolfpack Narrows", 6, 10, 4),
-            Self::CoffinCut => ("Coffin Cut", 6, 10, 4),
-            Self::NorthlightReach => ("Northlight Reach", 6, 9, 4),
-            Self::ShroudBay => ("Shroud Bay", 6, 9, 4),
+            Self::CoffinCut => ("Coffin Cut", 6, 9, 3),
+            Self::HailstoneSound => ("Hailstone Sound", 6, 8, 4),
+            Self::ShroudBay => ("Shroud Bay", 6, 8, 4),
             Self::BorealRoad => ("Boreal Road", 6, 10, 4),
             Self::CalvingSound => ("Calving Sound", 6, 10, 5),
             Self::RegentsGate => ("Regent's Gate", 6, 11, 4),
@@ -459,6 +455,9 @@ impl Stage {
             Self::GauntletNarrows => ("Gauntlet Narrows", 6, 11, 4),
             Self::CitadelBay => ("Citadel Bay", 6, 10, 5),
             Self::WhiteoutReach => ("Whiteout Reach", 6, 11, 4),
+            Self::DevilsThroat => ("Devil's Throat", 6, 11, 4),
+            Self::WolfpackNarrows => ("Wolfpack Narrows", 6, 11, 4),
+            Self::TempestRoad => ("Tempest Road", 6, 10, 4),
         };
         Mission {
             name,
@@ -2272,7 +2271,7 @@ mod tests {
     #[test]
     fn tough_passages_pay_more_a_star_and_every_anchorage_pays_the_same() {
         for (round, pool) in POOLS.iter().enumerate() {
-            for sea in pool {
+            for sea in *pool {
                 for grade in [Grade::Moderate, Grade::Tough] {
                     let pay = if round == 0 {
                         STAR_POINTS
@@ -2310,9 +2309,9 @@ mod tests {
     }
 
     #[test]
-    fn a_run_is_seven_short_patrols_forking_at_every_yard_and_then_the_regent() {
-        let seas: Vec<Stage> = POOLS.iter().flatten().copied().collect();
-        assert_eq!(seas.len(), PATROLS * POOL);
+    fn a_run_is_six_short_patrols_forking_at_every_yard_and_then_the_regent() {
+        let seas: Vec<Stage> = POOLS.concat();
+        assert_eq!(seas.len(), 3 * 9 + 3 * 12);
         for (i, sea) in seas.iter().enumerate() {
             assert!(!seas[..i].contains(sea), "{sea:?} is in two pools");
             assert_ne!(*sea, Stage::CrownDeep);
@@ -2325,7 +2324,7 @@ mod tests {
         // Each round asks at least as many sinkings as the round before it.
         let mut least = 0;
         for (round, pool) in POOLS.iter().enumerate() {
-            for &sea in pool {
+            for &sea in *pool {
                 assert_eq!(sea.round(), round + 1);
                 assert_eq!(sea.is_opening(), round == 0);
                 // Only a tough passage flies enemy aircraft, and an anchorage never does.
@@ -2361,11 +2360,13 @@ mod tests {
             }
             assert!(charted(seed, 0).is_none() && charted(seed, ROUNDS).is_none());
         }
-        assert!(seen.iter().all(|seas| seas.len() == POOL), "{seen:?}");
+        for (seas, pool) in seen.iter().zip(POOLS) {
+            assert_eq!(seas.len(), pool.len(), "{seen:?}");
+        }
         for pool in POOLS {
             for fleet in Fleet::ALL {
                 let held = pool.iter().filter(|sea| sea.fleet() == fleet).count();
-                assert_eq!(held, POOL / OFFERED, "{fleet:?} in {pool:?}");
+                assert_eq!(held, pool.len() / OFFERED, "{fleet:?} in {pool:?}");
             }
         }
         // Each yard charts one moderate passage, always open, then two tough ones for

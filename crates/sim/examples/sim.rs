@@ -23,7 +23,7 @@ fn stage(name: &str) -> Option<Stage> {
         return Some(Stage::IronNarrows);
     }
     shipvivor_campaign::POOLS
-        .iter()
+        .into_iter()
         .flatten()
         .copied()
         .chain([Stage::CrownDeep])

@@ -15,7 +15,10 @@ mod repair;
 mod ship;
 mod stock;
 
-pub use battery::{AaStation, BARBETTE, GunStation, HULL_OUTLINE, HULL_SPLICE, Mounting, WingStation};
+pub use battery::{
+    AaStation, BARBETTE, GunStation, HULL_OUTLINE, HULL_SPLICE, Mounting, Obstruction, WingStation,
+    clear_arcs,
+};
 pub use design::{
     BOMB_DAMAGE, Berth, Component, Design, FLOATPLANE_REACH, Fault, Fitting, Frame, FrameSpec,
     Gunhouse, MISSILE_DAMAGE, MISSILE_RANGE, MISSILE_RELOAD, MISSILE_SALVO, MOST_TIER, Module,

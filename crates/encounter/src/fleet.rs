@@ -2,14 +2,14 @@
 //! renderer all use the same station positions in the ship's rotating frame.
 use super::{Battery, Body, Effect, Hull, ISLAND_RADIUS, KNOCK_DRAG, Port, Shot, bearing};
 use super::{
-    mounts::train_full,
+    mounts::{RAGGED, STAND_EASY, signed, train_full},
     pilot::{Helm, clear_course},
-    projectile::FlightPath,
+    projectile::{FlightPath, luck},
     torpedo_boat::HARRYING_SCATTER,
 };
 use glam::{Vec2, Vec3, Vec3Swizzles};
 use shipvivor_artillery::ArmorPanel;
-use shipvivor_shipyard::{Berth, Component, Design, State};
+use shipvivor_shipyard::{Berth, Component, Design, State, WingStation, clear_arcs};
 use std::f32::consts::PI;
 use std::sync::{Arc, OnceLock};
 
@@ -544,10 +544,18 @@ impl EnemyGun {
     }
 }
 
+/// How far either way of her beam one of her secondaries trains with nothing beside it.
+const SECONDARY_ARC: f32 = 85_f32.to_radians();
+/// Metres round one of her secondaries that the guns beside it keep their fire clear of.
+const SECONDARY_BERTH: f32 = 2.;
+
 pub struct SecondaryMount {
     pub(super) strength: u16,
     offset: Vec2,
     train: f32,
+    /// How far off her beam it trains, anticlockwise and clockwise: short of the guns
+    /// that stand beside it.
+    arc: (f32, f32),
     reload: f32,
     /// The module she stands on. The gun goes with it when it is wrecked.
     module: usize,
@@ -667,10 +675,28 @@ impl Raider {
                     strength: 2,
                     offset,
                     train: side * PI * 0.5,
+                    arc: (-SECONDARY_ARC, SECONDARY_ARC),
                     reload: 0.4 + bay as f32 * 0.36,
                     module: design.module_at(p.hull.bow - fore),
                 });
             }
+        }
+        // No gun in a row fires through the next one along.
+        let stations: Vec<WingStation> = secondaries
+            .iter()
+            .map(|gun| WingStation {
+                abeam: gun.offset.x,
+                fore: gun.offset.y,
+                home: gun.train,
+                arc: gun.arc,
+            })
+            .collect();
+        for (gun, cleared) in
+            secondaries
+                .iter_mut()
+                .zip(clear_arcs(&stations, SECONDARY_BERTH, &[]))
+        {
+            gun.arc = cleared.arc;
         }
         Self {
             secondaries,
@@ -1164,13 +1190,29 @@ impl Raider {
             let delta = ahead - at.xz();
             let normal = self.body.forward().perp() * gun.offset.x.signum();
             let step = 76_f32.to_radians() * dt;
+            let beam = gun.offset.x.signum() * PI * 0.5;
+            let loading = if self.class == Regent { 5.7 } else { 3.1 } * slowed;
+            // A crew with nothing to fire at takes a moment of its own to open fire.
+            let seed = *serial ^ self.body.id.wrapping_mul(31);
+            let stand_easy = |gun: &mut SecondaryMount| {
+                if gun.reload == 0. {
+                    gun.reload = loading * STAND_EASY * luck(seed, index as u64);
+                }
+            };
             if delta.dot(normal) < delta.length() * 0.08 {
                 // She is on the other side: the gun comes back to the beam.
-                train_full(&mut gun.train, gun.offset.x.signum() * PI * 0.5, step);
+                train_full(&mut gun.train, beam, step);
+                stand_easy(gun);
                 continue;
             }
-            let trained = train_full(&mut gun.train, bearing(delta) - self.body.heading, step);
-            if trained && gun.reload == 0. && delta.length_squared() <= close_range.powi(2) {
+            // It follows her as far as its stops, short of the guns beside it.
+            let off = signed(bearing(delta) - self.body.heading - beam);
+            let trained = train_full(&mut gun.train, beam + off.clamp(gun.arc.0, gun.arc.1), step);
+            if off < gun.arc.0 || off > gun.arc.1 || delta.length_squared() > close_range.powi(2) {
+                stand_easy(gun);
+                continue;
+            }
+            if trained && gun.reload == 0. {
                 let bracket = ((*serial + index as u64 * 3) % 9) as f32 - 4.;
                 let mark = ahead + delta.normalize_or_zero().perp() * bracket * 2.2;
                 super::fire(
@@ -1182,9 +1224,8 @@ impl Raider {
                     Battery::EnemySecondary,
                     1,
                 );
-                gun.reload = (if self.class == Regent { 5.4 } else { 2.8 }
-                    + (index % 3) as f32 * 0.3)
-                    * slowed;
+                // Each round is loaded a little quicker or slower than the last.
+                gun.reload = loading * (1. + RAGGED * (2. * luck(seed, index as u64) - 1.));
             }
         }
         let reach = self.class.reach();

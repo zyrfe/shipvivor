@@ -21,6 +21,10 @@ const D: EnemyClass = Destroyer;
 const C: EnemyClass = Cruiser;
 const B: EnemyClass = Battleship;
 
+/// Rounds in a run, Crown Deep the last: the rows of every table kept by round, here and
+/// in the gun weights' roster.
+pub const RUN_ROUNDS: usize = 7;
+
 /// A round's squadrons: lying at the mouth of the channel, between, and at the heavy
 /// yard at its head.
 type Squadrons = [&'static [EnemyClass]; 3];
@@ -29,25 +33,23 @@ type Squadrons = [&'static [EnemyClass]; 3];
 /// round and by where the base stands up the channel. The first round's are small, a
 /// cruiser and her two destroyers at the head, and the last rounds' are battle fleets.
 #[rustfmt::skip]
-const MIXED: [Squadrons; 8] = [
+const MIXED: [Squadrons; RUN_ROUNDS] = [
     [&super::GARRISON, &[P, P, D], &[D, D, C]],
     [&[P, P], &[D, D, D, C], &[D, D, D, C, C]],
     [&[P, P, D], &[D, D, D, C], &[D, D, D, C, C, B]],
     [&[D, D, C], &[D, D, D, C, C], &[D, D, D, C, C, C, B]],
     [&[D, D, D, C], &[D, D, D, C, C, B], &[D, D, D, D, C, C, C, B, B]],
-    [&[D, D, D, C, B], &[D, D, D, C, C, B, B], &[D, D, D, D, C, C, C, B, B, B]],
     [&[D, D, D, C, C, B], &[D, D, D, D, C, C, B, B], &[D, D, D, D, D, C, C, C, C, B, B, B]],
     [&[D, D, D, C, C, B], &[D, D, D, D, C, C, B, B], &[D, D, D, D, D, C, C, C, C, B, B, B]],
 ];
 /// Flotillas: swarms of patrol boats and destroyers, led late on by a cruiser or three.
 #[rustfmt::skip]
-const FLOTILLAS: [Squadrons; 8] = [
+const FLOTILLAS: [Squadrons; RUN_ROUNDS] = [
     [&[P, P], &[P, P, P, D], &[D, D, P, P, P]],
     [&[P, P, P], &[D, D, P, P, P], &[D, D, D, D, P, P]],
     [&[D, P, P, P], &[D, D, D, P, P, P], &[D, D, D, D, D, C, P, P]],
     [&[D, D, P, P, P], &[D, D, D, D, P, P], &[D, D, D, D, D, D, C, P, P]],
     [&[D, D, D, P, P], &[D, D, D, D, D, P, P], &[D, D, D, D, D, D, D, C, C, P, P]],
-    [&[D, D, D, D, P, P], &[D, D, D, D, D, D, C, P], &[D, D, D, D, D, D, D, D, C, C, P, P]],
     [&[D, D, D, D, D, P, P], &[D, D, D, D, D, D, D, C, P, P],
      &[D, D, D, D, D, D, D, D, D, D, C, C, C, P]],
     [&[D, D, D, D, D, P, P], &[D, D, D, D, D, D, D, C, P, P],
@@ -57,13 +59,12 @@ const FLOTILLAS: [Squadrons; 8] = [
 /// moors about as many battleships as mixed waters do, but cruisers in place of most of
 /// the destroyers, so fewer hulls and more of them heavy.
 #[rustfmt::skip]
-const BATTLE_LINE: [Squadrons; 8] = [
+const BATTLE_LINE: [Squadrons; RUN_ROUNDS] = [
     [&[D], &[C, D], &[C, C, D]],
     [&[C], &[C, C, D], &[C, C, C, D]],
     [&[C, D], &[C, C, D], &[B, C, C, D]],
     [&[C, C, D], &[B, C, D], &[B, B, C, D]],
     [&[C, C, D], &[B, C, C, D], &[B, B, C, C, D]],
-    [&[B, C, C, D], &[B, B, C, D], &[B, B, B, C, C, D]],
     [&[B, C, C, D, D], &[B, B, C, C, D], &[B, B, B, C, C, C, D, D]],
     [&[B, C, C, D, D], &[B, B, C, C, D], &[B, B, B, C, C, C, D, D]],
 ];
@@ -72,14 +73,13 @@ const BATTLE_LINE: [Squadrons; 8] = [
 /// short enough to name on one line of the chart's card ("Escort: a battleship and 2
 /// cruisers").
 #[rustfmt::skip]
-const ESCORTS: [[&[EnemyClass]; 3]; 8] = [
+const ESCORTS: [[&[EnemyClass]; 3]; RUN_ROUNDS] = [
     // Flotillas, mixed, battle line.
     [&[], &[], &[]],
     [&[D, D, D], &[C, D], &[C, C]],
     [&[D, D, D, D], &[C, D, D], &[C, C, D]],
     [&[D, D, D, D], &[C, C, D], &[B, C]],
     [&[D, D, D, D, D], &[C, C, D, D], &[B, C]],
-    [&[D, D, D, D, D, D], &[C, C, D, D], &[B, B, C]],
     [&[D, D, D, D, D, D, D], &[B, C, C], &[B, B, C]],
     [&[], &[], &[]],
 ];
@@ -93,7 +93,7 @@ const BATTLESHIP: (EnemyClass, u8) = (Battleship, super::port::YARD_CAPACITY);
 impl Doctrine {
     pub const ALL: [Doctrine; 3] = [Flotillas, Mixed, BattleLine];
 
-    fn table(self) -> &'static [Squadrons; 8] {
+    fn table(self) -> &'static [Squadrons; RUN_ROUNDS] {
         match self {
             Flotillas => &FLOTILLAS,
             Mixed => &MIXED,
@@ -103,11 +103,11 @@ impl Doctrine {
     /// The squadron a base moors in round `round` of a run, counting from one, lying at
     /// `place`: 0 at the mouth, 1 between, 2 the heavy yard.
     pub fn squadron(self, round: usize, place: usize) -> &'static [EnemyClass] {
-        self.table()[round.clamp(1, 8) - 1][place.min(2)]
+        self.table()[round.clamp(1, RUN_ROUNDS) - 1][place.min(2)]
     }
     /// The ships that put to sea with a boss in round `round`.
     pub fn escort(self, round: usize) -> &'static [EnemyClass] {
-        ESCORTS[round.clamp(1, 8) - 1][self as usize]
+        ESCORTS[round.clamp(1, RUN_ROUNDS) - 1][self as usize]
     }
     /// The share of the waters' time between launches its yards keep: flotillas' light
     /// hulls come off the slips quicker.
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn squadrons_grow_up_the_channel_and_round_by_round() {
         for doctrine in Doctrine::ALL {
-            for round in 1..=7 {
+            for round in 1..=RUN_ROUNDS {
                 let [mouth, between, head] = doctrine.table()[round - 1];
                 assert!(heft(mouth) <= heft(between), "{doctrine:?} {round}");
                 assert!(heft(between) <= heft(head), "{doctrine:?} {round}");
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn flotillas_send_more_hulls_and_a_battle_line_heavier_ones() {
-        for round in 1..=7 {
+        for round in 1..=RUN_ROUNDS {
             for place in 0..3 {
                 let [swarm, mixed, line] =
                     Doctrine::ALL.map(|doctrine| doctrine.squadron(round, place));

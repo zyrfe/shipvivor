@@ -445,7 +445,7 @@ fn apply_action(In(action): In<Option<ui::Action>>, mut run: ResMut<Campaign>, m
 /// trying the later rounds by hand: the simulator's captain sails every round before it
 /// for real, takes her cards, spends her yard points and picks her passages, so the ship
 /// is one a good player would bring. `SHIPVIVOR_START_SKILL` sets that captain's skill,
-/// from 0 to 1 (1 by default). Rounds 2 to 8; anything else starts as usual. Sailing the
+/// from 0 to 1 (1 by default). Rounds 2 to 7; anything else starts as usual. Sailing the
 /// rounds before takes a few seconds a round in a release build, and a captain lost on the
 /// way is sailed again from the next seed.
 fn dev_start(seed: u64) -> Option<shipvivor_campaign::Run> {

@@ -36,7 +36,7 @@ fn each_round_builds_to_its_boss_and_a_tough_passage_comes_sooner_and_pays_more(
             _ => Some(EnemyClass::Parliament),
         };
         let mut pay = Vec::new();
-        for &sea in pool {
+        for &sea in *pool {
             let moderate = Sector::of(sea, Grade::Moderate);
             let tough = Sector::of(sea, Grade::Tough);
             let battle = moderate.battle(&moderate.chart(40));
@@ -92,7 +92,11 @@ fn every_sea_of_every_pool_charts_and_grows_harder_round_by_round() {
     use crate::Sector;
     use shipvivor_campaign::{POOLS, ROUNDS};
     use shipvivor_encounter::Survey;
-    let seas = POOLS.iter().flatten().copied().chain([Stage::CrownDeep]);
+    let seas = POOLS
+        .into_iter()
+        .flatten()
+        .copied()
+        .chain([Stage::CrownDeep]);
     let mut last = (0, 0, -1.);
     for sea in seas {
         let sector = Sector::of(sea, Grade::Moderate);
@@ -133,7 +137,7 @@ fn every_sea_has_a_short_note_and_each_pool_holds_more_than_one_kind_of_channel(
     use shipvivor_campaign::POOLS;
     for pool in POOLS {
         let mut kinds = Vec::new();
-        for sea in pool {
+        for &sea in pool {
             let sector = Sector::of(sea, Grade::Tough);
             let note = sector.note();
             assert!(note.len() <= 26, "{sea:?}: {note}");
@@ -153,7 +157,7 @@ fn shore_guns_mount_no_more_barrels_than_the_round_allows() {
     use shipvivor_campaign::POOLS;
     for (round, pool) in POOLS.iter().enumerate() {
         let most = (round + 1).min(4) as u8;
-        for &sea in pool {
+        for &sea in *pool {
             let sector = Sector::of(sea, Grade::Moderate);
             let battle = sector.battle(&sector.chart(40));
             let barrels: Vec<u8> = battle

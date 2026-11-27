@@ -4126,3 +4126,169 @@ fn the_sight_passes_over_trees_but_not_rock() {
     let rock = b.sight(eye, low, Vec2::new(400., 0.)).point;
     assert!((69. ..71.).contains(&rock.x), "{rock}");
 }
+
+#[test]
+fn a_row_of_secondaries_fires_ragged_and_never_through_the_gun_beside_it() {
+    let full = Secondaries {
+        per_side: Secondaries::MOST_PER_SIDE,
+        ..Secondaries::STOCK
+    };
+    let orders = Orders {
+        player: Vec2::ZERO,
+        heading: 0.,
+        speed: 0.,
+        hull: Hull::CRUISER,
+        aim: Aim::Hold,
+        reload: 6.4,
+        shell: MainShell::STOCK,
+    };
+    // A mark fine on the starboard bow, and another on her quarter. Alone on the beam,
+    // the gun abaft the bridge bears on both. In a row it would fire through the guns
+    // ahead of it and astern, so only the bow gun bears on the first, and only the gun
+    // at the after end of the row on the second.
+    let fine = shipvivor_compass::direction(15_f32.to_radians()) * 120.;
+    let quarter = shipvivor_compass::direction(170_f32.to_radians()) * 120.;
+    let bears = |b: &Battle, mark: Vec2| -> Vec<usize> {
+        (0..b.wing_guns.len())
+            .filter(|&i| b.wing_guns[i].covers(Vec2::ZERO, 0., mark))
+            .collect()
+    };
+    let mut b = battle();
+    assert_eq!(bears(&b, fine), [1, 3]);
+    assert_eq!(bears(&b, quarter), [1]);
+    b.fit_secondaries(full);
+    assert_eq!(bears(&b, fine), [3]);
+    let aftermost = (0..b.wing_guns.len())
+        .filter(|&i| b.wing_guns[i].deck_x() > 0.)
+        .min_by(|&x, &y| {
+            let fore = |i: usize| b.wing_guns[i].deck_fore();
+            fore(x).total_cmp(&fore(y))
+        })
+        .unwrap();
+    assert_eq!(bears(&b, quarter), [aftermost]);
+    // On the beam, every gun of that side but the bow gun.
+    assert_eq!(bears(&b, Vec2::X * 120.), [1, 5, 7, 9, 11]);
+
+    // A cruiser off the starboard beam: five guns bear, and each fires in its own time
+    // rather than all five together, at the rate they fired before.
+    b.raiders.clear();
+    b.next_wave = 1000.;
+    b.spawn(
+        EnemyClass::Cruiser,
+        Vec2::new(120., 0.),
+        Vec2::new(120., -10.),
+    );
+    toughen(&mut b.raiders[0], 1000.);
+    for gun in b.wing_guns.iter_mut().filter(|gun| gun.deck_fore() > 9.) {
+        gun.reload = 100.;
+    }
+    let mut volleys = Vec::new();
+    for _ in 0..300 {
+        b.step(1. / 60., &orders);
+        let fired = (b.effects.iter())
+            .filter(|fx| fx.kind == EffectKind::Muzzle(Battery::Secondary) && fx.age == 0.)
+            .count();
+        if fired > 0 {
+            volleys.push(fired);
+        }
+    }
+    let rounds: usize = volleys.iter().sum();
+    assert!((26..=36).contains(&rounds), "{rounds} rounds");
+    assert!(volleys.iter().all(|&guns| guns <= 2), "{volleys:?}");
+    assert!(volleys.len() * 5 >= rounds * 4, "{volleys:?}");
+}
+
+#[test]
+fn her_secondaries_open_fire_each_in_its_own_time_and_not_through_the_next_gun() {
+    let secondary = |fx: &&Effect| fx.kind == EffectKind::Muzzle(Battery::EnemySecondary);
+    let mut b = battle();
+    b.raiders.clear();
+    b.spawn(EnemyClass::Battleship, Vec2::ZERO, Vec2::NEG_Y);
+    let r = &mut b.raiders[0];
+    // Out of range off her starboard beam, her six guns a side follow and stand loaded.
+    for _ in 0..600 {
+        r.fire_guns(
+            1. / 60.,
+            Vec2::X * 2000.,
+            Vec2::ZERO,
+            &mut b.shots,
+            &mut b.effects,
+            &mut b.serial,
+        );
+    }
+    assert_eq!(b.effects.iter().filter(secondary).count(), 0);
+    // Within it, they open one after another, not in a single volley, and keep apart.
+    let mut volleys = Vec::new();
+    for _ in 0..900 {
+        let before = b.effects.iter().filter(secondary).count();
+        r.fire_guns(
+            1. / 60.,
+            Vec2::X * 130.,
+            Vec2::ZERO,
+            &mut b.shots,
+            &mut b.effects,
+            &mut b.serial,
+        );
+        let fired = b.effects.iter().filter(secondary).count() - before;
+        if fired > 0 {
+            volleys.push(fired);
+        }
+    }
+    let rounds: usize = volleys.iter().sum();
+    assert!((24..=34).contains(&rounds), "{rounds} rounds");
+    assert!(volleys.iter().all(|&guns| guns <= 2), "{volleys:?}");
+    assert!(volleys.len() * 5 >= rounds * 4, "{volleys:?}");
+
+    // Fine on her starboard bow, only the gun at the head of the row bears: the others
+    // would fire through the guns ahead of them.
+    b.effects.clear();
+    let fine = shipvivor_compass::direction(15_f32.to_radians()) * 130.;
+    for _ in 0..600 {
+        r.fire_guns(
+            1. / 60.,
+            fine,
+            Vec2::ZERO,
+            &mut b.shots,
+            &mut b.effects,
+            &mut b.serial,
+        );
+    }
+    let foremost = (r.secondaries.iter())
+        .map(|gun| gun.offset().y)
+        .fold(f32::MIN, f32::max);
+    for gun in &r.secondaries {
+        let station = gun.station(&r.body, EnemyClass::Battleship.profile()).xz();
+        let fired_here =
+            (b.effects.iter().filter(secondary)).any(|fx| fx.body.pos.distance(station) <= 1.81);
+        let head = gun.offset().x > 0. && gun.offset().y == foremost;
+        assert_eq!(fired_here, head, "{:?}", gun.offset());
+    }
+}
+
+#[test]
+fn a_secondarys_rounds_fall_about_the_mark_and_not_all_on_it() {
+    let from = Vec3::new(0., 2., 0.);
+    let mark = Vec3::new(160., 1.7, 0.);
+    let falls: Vec<Vec3> = (0..400)
+        .map(|serial| projectile::strewn(from, mark, serial))
+        .collect();
+    // At 160 m none falls more than four metres to either side, nor ten short or over.
+    for fall in &falls {
+        assert!(
+            fall.z.abs() <= 4.001 && (fall.x - 160.).abs() <= 9.601,
+            "{fall}"
+        );
+        assert_eq!(fall.y, mark.y);
+    }
+    // They fall to both sides, short and over, most of them near the middle and about
+    // the mark on the whole.
+    assert!(falls.iter().any(|f| f.z > 2.) && falls.iter().any(|f| f.z < -2.));
+    assert!(falls.iter().any(|f| f.x > 165.) && falls.iter().any(|f| f.x < 155.));
+    let wide = falls.iter().filter(|f| f.z.abs() >= 2.).count();
+    assert!(wide * 3 < falls.len(), "{wide} wide");
+    let middle = falls.iter().sum::<Vec3>() / falls.len() as f32;
+    assert!(middle.distance(mark) < 0.8, "{middle}");
+    // Twice as far off, twice as wide.
+    let far = (0..400).map(|serial| projectile::strewn(from, mark * Vec3::new(2., 1., 1.), serial));
+    assert!(far.map(|f| f.z.abs()).fold(0., f32::max) > 6.);
+}

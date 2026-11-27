@@ -1,12 +1,12 @@
 //! Deck-relative training for Breakwater's mounts, with each barrel loaded on its own.
 use super::{
-    MainShell, Orders, TurretLayout,
+    MainShell, Orders, Secondaries, TurretLayout,
     projectile::{FlightPath, Trajectory},
 };
 use glam::{FloatExt, Vec2, Vec3, Vec3Swizzles};
 use shipvivor_artillery::ArmorGrade;
 use shipvivor_compass::direction;
-use shipvivor_shipyard::{GunStation, WingStation};
+use shipvivor_shipyard::{GunStation, Obstruction, WingStation};
 use std::f32::consts::{PI, TAU};
 
 const CRUISER_TRAVERSE: f32 = shipvivor_artillery::STOCK_TRAVERSE.to_radians();
@@ -17,7 +17,7 @@ const RECOIL: f32 = 0.22;
 /// send it to and fro.
 const SIDE_CHANGE: f32 = 6_f32.to_radians();
 
-fn signed(angle: f32) -> f32 {
+pub(super) fn signed(angle: f32) -> f32 {
     (angle + PI).rem_euclid(TAU) - PI
 }
 
@@ -228,6 +228,15 @@ impl MainMount {
             self.status = self.settle();
         }
     }
+    /// The room the gunhouse takes up on deck at the bore it is fitted with, for the
+    /// secondaries beside it to keep their fire clear of.
+    pub(super) fn standing(&self) -> Obstruction {
+        Obstruction {
+            abeam: self.position.abeam,
+            fore: self.position.fore,
+            radius: TURRET_BERTH * self.round(MainShell::STOCK).mount_scale(),
+        }
+    }
     pub fn round(&self, round: MainShell) -> MainShell {
         MainShell {
             bore: self.fitted_bore.unwrap_or(round.bore),
@@ -430,14 +439,45 @@ impl DeckOffsets {
     }
 }
 
+/// Metres round a shielded secondary that its neighbours' fire keeps clear of, and round
+/// one rebuilt as a gunhouse, which is broader.
+const WING_BERTH: (f32, f32) = (1.5, 1.75);
+/// Metres round a main turret that the secondaries' fire keeps clear of, for a six-inch
+/// gunhouse: its ring and a little over.
+const TURRET_BERTH: f32 = 1.5;
+/// Share of its loading time each round from a secondary comes early or late by, so a
+/// row of them never settles into firing as one.
+pub(super) const RAGGED: f32 = 0.18;
+/// Share of its loading time a crew with nothing in its arc takes, at most, to open fire
+/// when something comes into it. Each crew takes its own time.
+pub(super) const STAND_EASY: f32 = 0.5;
+
+/// The first `count` of `stations` as the guns `fit` there may train: each arc cut
+/// short of the guns beside it and of the main turrets.
+pub(super) fn wing_berths(
+    stations: &[WingStation],
+    count: usize,
+    fit: Secondaries,
+    turrets: &[MainMount],
+) -> Vec<WingStation> {
+    let berth = if fit.turrets {
+        WING_BERTH.1
+    } else {
+        WING_BERTH.0
+    };
+    let standing: Vec<Obstruction> = turrets.iter().map(MainMount::standing).collect();
+    shipvivor_shipyard::clear_arcs(&stations[..count.min(stations.len())], berth, &standing)
+}
+
 /// A shielded close-range gun on the bow or the beam, worked by the crew.
 pub struct WingGun {
     pub(super) reload: f32,
     abeam: f32,
     fore: f32,
-    /// Bearing from the bow of the middle of its arc, and how far either way it trains.
+    /// Bearing from the bow it rests on, and how far it trains anticlockwise and
+    /// clockwise of that: short of the guns and turrets standing beside it.
     home: f32,
-    half_arc: f32,
+    arc: (f32, f32),
     /// Bearing from `home`.
     train: f32,
 }
@@ -448,7 +488,7 @@ impl WingGun {
             abeam: station.abeam,
             fore: station.fore,
             home: station.home,
-            half_arc: station.half_arc,
+            arc: station.arc,
             train: 0.,
             reload: 0.,
         }
@@ -459,8 +499,8 @@ impl WingGun {
         self.abeam = station.abeam;
         self.fore = station.fore;
         self.home = station.home;
-        self.half_arc = station.half_arc;
-        self.train = self.train.clamp(-station.half_arc, station.half_arc);
+        self.arc = station.arc;
+        self.train = self.train.clamp(station.arc.0, station.arc.1);
     }
     pub fn deck_x(&self) -> f32 {
         self.abeam
@@ -484,7 +524,8 @@ impl WingGun {
         signed(shipvivor_compass::heading(delta) - heading - self.home)
     }
     pub(super) fn covers(&self, player: Vec2, heading: f32, target: Vec2) -> bool {
-        self.off_home(player, heading, target).abs() <= self.half_arc
+        let off = self.off_home(player, heading, target);
+        self.arc.0 <= off && off <= self.arc.1
     }
     pub(super) fn track(
         &mut self,
@@ -495,10 +536,10 @@ impl WingGun {
     ) -> Option<Vec3> {
         let pivot = self.pivot(player, heading);
         let wanted = self.off_home(player, heading, target);
-        let limit = self.half_arc;
+        let (least, most) = self.arc;
         self.train = self
             .train
-            .move_towards(wanted.clamp(-limit, limit), 68_f32.to_radians() * dt);
+            .move_towards(wanted.clamp(least, most), 68_f32.to_radians() * dt);
         ((self.train - wanted).abs() < 0.0001).then_some(pivot)
     }
 }

@@ -161,10 +161,60 @@ pub struct WingStation {
     pub abeam: f32,
     /// Metres forward of her helm datum.
     pub fore: f32,
-    /// Bearing from the bow of the middle of the gun's arc.
+    /// Bearing from the bow the gun rests on: the middle of the arc it was built with.
     pub home: f32,
-    /// How far either way of `home` the gun trains.
-    pub half_arc: f32,
+    /// How far from `home` the gun trains, anticlockwise and clockwise seen from above:
+    /// the first is never above zero, nor the second below it.
+    pub arc: (f32, f32),
+}
+
+/// Something standing on deck that a secondary must not fire through: metres to
+/// starboard and forward of her helm datum, and the metres round it to keep clear.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Obstruction {
+    pub abeam: f32,
+    pub fore: f32,
+    pub radius: f32,
+}
+
+/// The `stations` she has guns at, each arc cut short of every other gun's `berth`, the
+/// metres round a mount its neighbours' fire keeps clear of, and of whatever else is
+/// `standing` on her deck. A gun in the middle of a row trains only so far towards the
+/// guns either side of it, while the one at the end of the row keeps the open end.
+pub fn clear_arcs(
+    stations: &[WingStation],
+    berth: f32,
+    standing: &[Obstruction],
+) -> Vec<WingStation> {
+    let guns = stations.iter().map(|s| Obstruction {
+        abeam: s.abeam,
+        fore: s.fore,
+        radius: berth,
+    });
+    stations
+        .iter()
+        .enumerate()
+        .map(|(own, &station)| {
+            let mut arc = station.arc;
+            let others = guns.clone().enumerate().filter(|&(i, _)| i != own);
+            for block in others.map(|(_, gun)| gun).chain(standing.iter().copied()) {
+                let (abeam, fore) = (block.abeam - station.abeam, block.fore - station.fore);
+                let distance = abeam.hypot(fore);
+                // Standing inside it, no arc would clear it.
+                if distance <= block.radius {
+                    continue;
+                }
+                let off = (abeam.atan2(fore) - station.home + PI).rem_euclid(TAU) - PI;
+                let width = (block.radius / distance).asin();
+                if off > 0. {
+                    arc.1 = arc.1.min((off - width).max(0.));
+                } else {
+                    arc.0 = arc.0.max((off + width).min(0.));
+                }
+            }
+            WingStation { arc, ..station }
+        })
+        .collect()
 }
 
 /// A beam gun covers its own side, short of four degrees from the bow and the stern.
@@ -284,7 +334,7 @@ impl Design {
                     abeam: side * abeam * beam,
                     fore,
                     home: side * home,
-                    half_arc,
+                    arc: (-half_arc, half_arc),
                 })
             })
             .collect()
@@ -490,6 +540,52 @@ mod wing_tests {
             )
             .unwrap();
         assert_eq!(engines.wing_room(), stock.wing_room() + 2);
+    }
+
+    #[test]
+    fn a_gun_in_a_row_trains_short_of_the_guns_beside_it() {
+        use super::{Obstruction, clear_arcs};
+        use std::f32::consts::FRAC_PI_2;
+        let built = Design::breakwater().wing_stations();
+        let berth = 1.2;
+        // The two pairs she is built with stand well apart and keep their whole arcs.
+        assert_eq!(clear_arcs(&built[..4], berth, &[]), built[..4]);
+        // With every station manned, nowhere in a gun's arc does its fire pass within a
+        // berth of another gun.
+        let cleared = clear_arcs(&built, berth, &[]);
+        for (own, gun) in cleared.iter().enumerate() {
+            assert!(gun.arc.0 < 0. && gun.arc.1 > 0., "{gun:?}");
+            for step in 0..=40 {
+                let bearing = gun.home + gun.arc.0 + (gun.arc.1 - gun.arc.0) * step as f32 / 40.;
+                let (east, north) = bearing.sin_cos();
+                for (_, other) in cleared.iter().enumerate().filter(|&(i, _)| i != own) {
+                    let (abeam, fore) = (other.abeam - gun.abeam, other.fore - gun.fore);
+                    let along = abeam * east + fore * north;
+                    let wide = (abeam * north - fore * east).abs();
+                    assert!(along <= 0. || wide >= berth - 1e-3, "{gun:?} {other:?}");
+                }
+            }
+        }
+        // The aftermost gun on the starboard beam is cut short towards the bow, where the
+        // row stands, and keeps the open end towards the stern.
+        let aftermost = (0..built.len())
+            .filter(|&i| built[i].home == FRAC_PI_2)
+            .min_by(|&a, &b| built[a].fore.total_cmp(&built[b].fore))
+            .unwrap();
+        assert!(cleared[aftermost].arc.0 > built[aftermost].arc.0 + 0.3);
+        assert_eq!(cleared[aftermost].arc.1, built[aftermost].arc.1);
+        // A turret at the deck edge astern of it closes that end too.
+        let turret = Obstruction {
+            abeam: built[aftermost].abeam,
+            fore: built[aftermost].fore - 4.,
+            radius: 2.,
+        };
+        let masked = clear_arcs(&built, berth, &[turret])[aftermost];
+        assert!(
+            (masked.arc.1 - 60_f32.to_radians()).abs() < 1e-4,
+            "{masked:?}"
+        );
+        assert_eq!(masked.arc.0, cleared[aftermost].arc.0);
     }
 
     #[test]

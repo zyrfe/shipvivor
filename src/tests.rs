@@ -832,7 +832,7 @@ fn a_run_reaches_the_regent_through_the_helm_and_keeps_its_refits() {
                 w.query::<(&Instrument, &Text)>()
                     .iter(w)
                     .any(|(gauge, text)| matches!(gauge, Instrument::Flagship)
-                        && text.contains("fitting out\nPuts to sea in 4:00"))
+                        && text.contains("fitting out\nPuts to sea in 3:54"))
             );
         } else {
             // The second patrol ends in a yard too, where the points carried from the
@@ -1278,7 +1278,12 @@ fn chart_and_telegraph_follow_the_playable_sector() {
         (2, Grade::Tough),
         (3, Grade::Moderate),
     ];
-    for (i, stage) in shipvivor_campaign::POOLS.into_iter().flatten().enumerate() {
+    for (i, stage) in shipvivor_campaign::POOLS
+        .into_iter()
+        .flatten()
+        .copied()
+        .enumerate()
+    {
         let (seed, grade) = sailings[i % sailings.len()];
         let passage = Passage::graded(stage, grade);
         let chart = passage.chart(seed);

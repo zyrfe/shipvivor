@@ -440,14 +440,14 @@ mod tests {
         assert_eq!(squadron(&light, 1), [Patrol, Patrol, Destroyer]);
         assert_eq!(squadron(&light, 2), [Destroyer, Destroyer, Cruiser]);
         // The last rounds' heavy yards keep a battle fleet, every ship of it at anchor.
-        let heavy = staged_sector().with_squadrons(8);
+        let heavy = staged_sector().with_squadrons(crate::RUN_ROUNDS);
         for base in 0..3 {
             assert_eq!(squadron(&heavy, base), heavy.squadron(base), "base {base}");
         }
         let fleet = squadron(&heavy, 2);
         assert_eq!(count(&fleet, Battleship), 3);
         assert!(fleet.len() >= 10);
-        for round in 1..8 {
+        for round in 1..crate::RUN_ROUNDS {
             let (now, next) = (
                 staged_sector().with_squadrons(round),
                 staged_sector().with_squadrons(round + 1),

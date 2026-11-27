@@ -123,9 +123,10 @@ impl Kind {
     }
 }
 
-/// How far along their escalation each round's raids begin, a round deeper than the last.
-/// The first round's start from patrol boats, as they always have.
-pub const HEAD_START_PER_ROUND: f32 = 30.;
+/// How far along their escalation each round's raids begin, a round deeper than the last,
+/// so the last patrol starts as far along as any. The first round's start from patrol
+/// boats, as they always have.
+pub const HEAD_START_PER_ROUND: f32 = MOST_HEAD_START / (PATROLS - 1) as f32;
 /// The furthest along any waters start, which the last patrol and Crown Deep share.
 const MOST_HEAD_START: f32 = 180.;
 /// Seconds further along their escalation a tough passage's raids begin than a moderate
@@ -139,6 +140,7 @@ pub const TOUGH_RAID_PACE: f32 = 0.85;
 /// `Battle::with_pressure`). `cargo run --release -p shipvivor-sim --example runs`
 /// shows what a setting does to the chance of a field of players getting through.
 pub const PRESSURE: [f32; ROUNDS] = [1.; ROUNDS];
+const _: () = assert!(shipvivor_encounter::RUN_ROUNDS == ROUNDS);
 
 /// One passage in this many, past the anchorages, hides a fleet the scouts missed.
 pub const SURPRISE_ODDS: u64 = 3;
@@ -161,15 +163,15 @@ pub fn most_barrels(stage: Stage) -> u8 {
 }
 
 /// Bases by stage up the channel, as factory counts. Every sea of a round holds as many
-/// bases: three in the first two rounds, four in the next two and five after, so a sweep
-/// stays near four minutes as she grows, and the passages of a round pay alike.
+/// bases: three in the first two rounds, four in the next two and five in the last two,
+/// so a sweep stays near four minutes as she grows, and the passages of a round pay alike.
 type Plan = &'static [&'static [u8]];
 /// Sea state, wave heading in degrees, cloud cover and seconds between raider launches.
 type Climate = (f32, f32, f32, f32);
 
 /// Each sea's channel, the bases staged up it, and its weather. A `4` is an airfield
-/// base: two seas of each pool from the third round on keep one up the channel, short of
-/// the heavy yard. A stage of two leaves
+/// base: two or three seas of each pool from the third round on keep one up the channel,
+/// short of the heavy yard. A stage of two leaves
 /// the order to the captain, and the next stage stirs once both are down.
 fn sea(stage: Stage) -> (Kind, Plan, Climate) {
     use Kind::*;
@@ -217,6 +219,10 @@ fn sea(stage: Stage) -> (Kind, Plan, Climate) {
         CormorantReach => (Open, &[&[1, 1], &[2], &[3]], (0.58, 80., 0.3, 5.1)),
         ShiverNarrows => (Narrows, &[&[1], &[2], &[2, 3]], (0.85, 25., 0.9, 4.8)),
         WreckersBay => (Sound, &[&[1], &[4], &[2, 3]], (0.4, 200., 0.7, 5.2)),
+        FrostlineReach => (Open, &[&[1], &[1, 2], &[3]], (0.7, 70., 0.2, 5.)),
+        // A clear, calm haven, and the yards there work fast.
+        TernHaven => (Sound, &[&[1, 1], &[2], &[3]], (0.12, 120., 0.1, 4.8)),
+        NorthlightReach => (Open, &[&[1], &[2], &[2, 3]], (0.3, 10., 0.05, 5.1)),
         // The fifth round: five bases, with a pair to choose between on the way up.
         LongnightRoad => (Open, &[&[1], &[1, 2], &[2, 3]], (0.6, 20., 0.8, 4.8)),
         HollowSound => (Sound, &[&[1], &[2], &[1, 2], &[3]], (0.24, 200., 0.45, 5.2)),
@@ -227,17 +233,9 @@ fn sea(stage: Stage) -> (Kind, Plan, Climate) {
         BlackwaterNarrows => (Narrows, &[&[1], &[1, 2], &[2], &[3]], (0.7, 110., 1., 4.7)),
         RavensReach => (Open, &[&[1], &[1, 2], &[2], &[3]], (0.8, 40., 0.6, 4.7)),
         HarrowBay => (Sound, &[&[1], &[1, 2], &[4], &[3]], (0.2, 90., 0.35, 5.2)),
-        // The sixth round: five bases.
-        FrostlineReach => (Open, &[&[1], &[1, 2], &[2], &[3]], (0.7, 70., 0.2, 4.6)),
-        // A clear, calm haven, and the yards there work fast.
-        TernHaven => (Sound, &[&[1, 1], &[2], &[2, 3]], (0.12, 120., 0.1, 5.)),
-        DevilsThroat => (Narrows, &[&[1], &[1, 2], &[2], &[3]], (0.9, 30., 0.9, 4.5)),
-        TempestRoad => (Open, &[&[1], &[1, 4], &[2, 3]], (0.95, 115., 0.95, 4.6)),
-        HailstoneSound => (Sound, &[&[1], &[2], &[1, 2], &[3]], (0.45, 160., 0.8, 4.8)),
-        WolfpackNarrows => (Narrows, &[&[1], &[2], &[1, 2], &[3]], (0.6, 50., 0.65, 4.4)),
-        CoffinCut => (Cut, &[&[1], &[1, 2], &[2], &[3]], (0.75, 185., 0.85, 4.5)),
-        NorthlightReach => (Open, &[&[1], &[2], &[1, 2], &[3]], (0.3, 10., 0.05, 4.9)),
-        ShroudBay => (Sound, &[&[1], &[1, 2], &[4], &[3]], (0.18, 140., 1., 4.8)),
+        CoffinCut => (Cut, &[&[1], &[1, 2], &[2], &[3]], (0.75, 185., 0.85, 4.8)),
+        HailstoneSound => (Sound, &[&[1], &[2], &[1, 2], &[3]], (0.45, 160., 0.8, 5.)),
+        ShroudBay => (Sound, &[&[1], &[1, 2], &[4], &[3]], (0.18, 140., 1., 4.9)),
         // The last patrol: five bases.
         BorealRoad => (Open, &[&[1], &[2], &[1, 2], &[3]], (0.75, 85., 0.55, 4.4)),
         CalvingSound => (Sound, &[&[1], &[1, 2], &[2], &[3]], (0.3, 165., 0.7, 4.8)),
@@ -249,6 +247,9 @@ fn sea(stage: Stage) -> (Kind, Plan, Climate) {
         GauntletNarrows => (Narrows, &[&[1], &[1, 2], &[2], &[3]], (0.85, 60., 0.8, 4.2)),
         CitadelBay => (Sound, &[&[1], &[2], &[1, 4], &[3]], (0.22, 190., 0.4, 4.7)),
         WhiteoutReach => (Open, &[&[1], &[1, 2], &[2], &[3]], (0.9, 120., 1., 4.3)),
+        DevilsThroat => (Narrows, &[&[1], &[1, 2], &[2], &[3]], (0.9, 30., 0.9, 4.3)),
+        WolfpackNarrows => (Narrows, &[&[1], &[2], &[1, 2], &[3]], (0.6, 50., 0.65, 4.3)),
+        TempestRoad => (Open, &[&[1], &[1, 4], &[2, 3]], (0.95, 115., 0.95, 4.4)),
         // A broad deep for the Regent, under a long swell and a clearing sky: A; B and
         // C together. Its breadth is set apart in `Sector::of`.
         CrownDeep => (Open, &[&[1], &[2, 3]], (0.48, 76., 0.24, 5.5)),
@@ -327,7 +328,7 @@ impl Sector {
         let Some(pool) = POOLS.get(self.stage.round() - 1) else {
             return "The Regent's screen";
         };
-        let mut pace = pool.map(launches);
+        let mut pace: Vec<f32> = pool.iter().map(|&sea| launches(sea)).collect();
         pace.sort_by(f32::total_cmp);
         let ratio = launches(self.stage) / pace[pace.len() / 2];
         if ratio > 1.1 {
