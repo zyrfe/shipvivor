@@ -533,7 +533,7 @@ mod tests {
         assert_eq!(plan.place(&plan.orders()[2]), None, "hull work");
         // One bay is length enough for a cruiser's beam.
         plan.undo(&mut run, 1);
-        assert_eq!(run.beam_class(), ShipBeam::Cruiser);
+        assert_eq!(run.beam_class(), ShipBeam::HeavyCruiser);
         // Without either she is too short to widen, so the beam goes, and the fifth rank
         // of armor that waited on it.
         plan.undo(&mut run, 0);

@@ -213,6 +213,13 @@ impl Raider {
 }
 
 impl Plating {
+    /// Every strake hung `factor` times as stout, on a ship built up before she is hit.
+    pub(super) fn harden(&mut self, factor: f32) {
+        for strake in &mut self.strakes {
+            strake.strength *= factor;
+            strake.full *= factor;
+        }
+    }
     pub fn new(class: EnemyClass) -> Self {
         let heavy = class.plated();
         Self {

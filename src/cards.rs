@@ -448,7 +448,11 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
         },
         Card::SecondaryTurrets => Face {
             kind: Kind::Secondaries,
-            name: "Secondary Turrets",
+            // Named for the size the next rank builds, or the one fitted once it is the last.
+            name: match now.next_secondary_bore() {
+                Some(..=4) => "4-inch Secondary Turrets",
+                _ => "6-inch Secondary Turrets",
+            },
             rank: (now.wing_turrets, Some(limits::WING_TURRETS)),
             stats: vec![
                 stat("Damage", wing.damage, wing_next.damage, Gain),
@@ -460,7 +464,7 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
                     Cost,
                 ),
             ],
-            flavour: "Every wing gun rebuilt as a four-inch gunhouse that the crew lays and fires itself. Only a capital beam has the room.",
+            flavour: "Every wing gun rebuilt as a gunhouse that the crew lays and fires itself: four-inch on a battleship's hull, six-inch on a heavy battleship's. Twin mounts go in either.",
         },
         Card::MoreLaunchers => Face {
             kind: Kind::StrikeCraft,

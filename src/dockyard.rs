@@ -1237,7 +1237,10 @@ fn exchange_name(run: &Campaign, at: usize, with: DeckModule) -> &'static str {
 fn job_name(job: DockJob, run: &Campaign) -> String {
     match job {
         DockJob::Insert { module, .. } => format!("Add {}", module.name().to_lowercase()),
-        DockJob::WidenBeam => "Widen beam".into(),
+        DockJob::WidenBeam => match run.beam_class().next() {
+            Some(next) => format!("{} hull", next.name()),
+            None => "Heaviest hull".into(),
+        },
         DockJob::Fitting(card) => cards::face(card, run.fittings, run.ship.design())
             .name
             .into(),
@@ -1581,13 +1584,24 @@ fn order_row(
         cyan(),
         14.,
     );
-    text(
-        cmd,
-        row,
-        catalog::order_caption(order.job, run),
-        12.,
-        paper(),
-    );
+    let caption = match order.job {
+        // The class this order made of her. Any hull ordered after it made a heavier one.
+        DockJob::WidenBeam => {
+            let later = run.plan().map_or(0, |plan| {
+                (plan.orders().iter().skip(index + 1))
+                    .filter(|o| o.job == DockJob::WidenBeam)
+                    .count()
+            });
+            let classes = shipvivor_campaign::ShipBeam::ALL;
+            let now = classes.iter().position(|&class| class == run.beam_class());
+            now.and_then(|at| at.checked_sub(later))
+                .map_or(run.beam_class(), |at| classes[at])
+                .name()
+                .to_string()
+        }
+        job => catalog::order_caption(job, run),
+    };
+    text(cmd, row, caption, 12., paper());
     spacer(cmd, row);
     if order.cost > 0 {
         icon(cmd, row, art.order.clone(), brass(), 11.);
@@ -1941,6 +1955,8 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia, ask: 
         );
     }
     let head = title(cmd, hull, art.hull.clone(), "HULL");
+    // The class she is built to now.
+    text(cmd, head, run.beam_class().name(), 12., cyan());
     spacer(cmd, head);
     let design = run.ship.design();
     let figures = node(
@@ -2009,7 +2025,9 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia, ask: 
             false,
             false,
             Node {
-                width: px(64),
+                // The hull's next class is named in full, and a lock names the class
+                // the plate waits on.
+                width: px(if job == DockJob::WidenBeam { 104 } else { 80 }),
                 height: px(50),
                 border: UiRect::all(px(1)),
                 flex_direction: FlexDirection::Column,
@@ -2031,11 +2049,12 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia, ask: 
                     "Full".to_string()
                 },
             ),
+            // The hull is rebuilt as the next class up, which the tile names.
             _ => (
                 art.beam.clone(),
                 match (refused, run.beam_class().next()) {
-                    (Some(Refusal::Widest), _) | (_, None) => "Widest".to_string(),
-                    (_, Some(next)) => format!("{:.1} m", next.metres()),
+                    (Some(Refusal::Widest), _) | (_, None) => "Heaviest".to_string(),
+                    (_, Some(next)) => next.name().to_string(),
                 },
             ),
         };
@@ -2049,13 +2068,38 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia, ask: 
             price_tag(cmd, tile, art, job.cost(), ink);
         }
         // A step the hull is not ready for shows what it waits on, as the stock tiles do:
-        // thicker armor on a broader beam, and a broader beam on a longer hull.
+        // thicker armor on a heavier class of hull, and a heavier class on a longer hull.
         let waits = match refused {
-            Some(Refusal::Beam(beam)) => Some((art.beam.clone(), format!("{:.1}", beam.metres()))),
-            Some(Refusal::Length(metres)) => Some((art.length.clone(), metres.to_string())),
+            Some(Refusal::Beam(beam)) => Some((None, beam.short_name().to_string())),
+            Some(Refusal::Length(metres)) => {
+                Some((Some(art.length.clone()), format!("{metres} m")))
+            }
             _ => None,
         };
         match waits {
+            // A new hull keeps its name, and what it waits on stands in the corner where
+            // its price will.
+            Some((image, wait)) if job == DockJob::WidenBeam => {
+                let corner = node(
+                    cmd,
+                    tile,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        top: px(3),
+                        right: px(4),
+                        column_gap: px(2),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    Color::NONE,
+                );
+                icon(cmd, corner, art.lock.clone(), muted(), 9.);
+                if let Some(image) = image {
+                    icon(cmd, corner, image, muted(), 9.);
+                }
+                text(cmd, corner, wait, 10., muted());
+                text(cmd, tile, words, 10., tint);
+            }
             Some((image, words)) => {
                 let caption = node(
                     cmd,
@@ -2068,7 +2112,9 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia, ask: 
                     Color::NONE,
                 );
                 icon(cmd, caption, art.lock.clone(), muted(), 9.);
-                icon(cmd, caption, image, muted(), 9.);
+                if let Some(image) = image {
+                    icon(cmd, caption, image, muted(), 9.);
+                }
                 text(cmd, caption, words, 10., muted());
             }
             None => text(cmd, tile, words, 10., tint),
@@ -2099,7 +2145,8 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia, ask: 
                 },
                 RelativeCursorPosition::default(),
                 Node {
-                    width: px(72),
+                    // Wide enough for the class of hull a locked section waits on.
+                    width: px(80),
                     height: px(62),
                     border: UiRect::all(px(1)),
                     flex_direction: FlexDirection::Column,
@@ -2141,9 +2188,8 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia, ask: 
             Some(why) => {
                 icon(cmd, caption, art.lock.clone(), muted(), 9.);
                 let (image, words) = match why {
-                    Refusal::Beam(beam) => {
-                        (Some(art.beam.clone()), format!("{:.1}", beam.metres()))
-                    }
+                    // The class of hull it waits on.
+                    Refusal::Beam(beam) => (None, beam.short_name().to_string()),
                     Refusal::Longest => (Some(art.length.clone()), "Max".to_string()),
                     Refusal::Full(_)
                     | Refusal::Length(_)

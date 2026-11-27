@@ -164,7 +164,10 @@ pub(super) fn caption(job: DockJob, run: &Campaign) -> &'static str {
         DockJob::Move { from, to } if to < from => "Fwd",
         DockJob::Move { .. } => "Aft",
         DockJob::Insert { module, .. } => stock_caption(module),
-        DockJob::WidenBeam => "Widen",
+        DockJob::WidenBeam => match run.beam_class().next() {
+            Some(next) => next.short_name(),
+            None => "Heaviest",
+        },
         DockJob::Barrels { from, to, .. } if to < from => "Fewer",
         DockJob::Barrels { to, .. } => match to {
             TurretLayout::Twin => "Twin",
@@ -202,7 +205,11 @@ pub(super) fn caption(job: DockJob, run: &Campaign) -> &'static str {
             MoreMissiles => "Salvo",
             MorePlanes => "Planes",
             MoreBombs => "Bombs",
-            SecondaryTurrets => "Turrets",
+            // The size of gunhouse the next rank builds, or the last once it is fitted.
+            SecondaryTurrets => match run.fittings.next_secondary_bore() {
+                Some(..=4) => "4-inch",
+                _ => "6-inch",
+            },
         },
     }
 }

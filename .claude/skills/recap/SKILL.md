@@ -45,8 +45,10 @@ Read each log whole. They run to a few hundred lines.
   pulse means nothing happened.
 - One-off events: `leg`, `ship`, `sunk`, `contact` (a cruiser or bigger put to sea),
   `spotted`, `harriers` (a formation of 2–5 took off), `steam` (the boss is raising
-  steam, 30 s before she sails), `flagship` (the boss sailed), `torpedo`, `collide`,
-  `heavy` (one blow of 6% of the hull or more), `gear`, `section`, `hull` (fell through
+  steam, 30 s before she sails), `flagship` (the boss sailed, or at Crown Deep the
+  Regent came over the horizon once her screen was broken, with how many times as
+  stout she was built against the ship's battery), `torpedo`, `collide`, `heavy`
+  (one blow of 6% of the hull or more), `gear`, `section`, `hull` (fell through
   75/50/25/10%), `peril`, `base`, `stores`, `star`, `clock` (the clock ran out: the leg
   goes on, a star down), `level`, `refit`, `pause`/`resume`, `capture`.
 - The `leg` line gives the clock to beat, the goals, the boss and the points a star

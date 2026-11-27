@@ -244,7 +244,9 @@ impl Design {
     }
 
     /// The Regent has five paired gun decks, two end turrets and a deep hull beneath them,
-    /// the stoutest afloat: she outlasts a battleship about four times over.
+    /// the stoutest afloat: she outlasts a battleship about four times over, and each of
+    /// her turrets is twice as stout as one of the Parliament's. At Crown Deep she is built
+    /// up further against a heavy battery (see the encounter's `regent_hardening`).
     pub fn iron_regent() -> Self {
         let pair = || Module::new(Wide, [MainGun, MainGun]);
         enemy(
@@ -262,7 +264,7 @@ impl Design {
             ],
             168.,
             (Wide, 40.),
-            7.,
+            14.,
             0.,
         )
     }

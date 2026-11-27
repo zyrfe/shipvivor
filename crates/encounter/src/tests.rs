@@ -2619,6 +2619,55 @@ fn fitted_secondaries_add_guns_fire_faster_and_hit_harder() {
 }
 
 #[test]
+fn a_secondary_gunhouse_fires_its_own_bore_and_reaches_as_far_as_it_engages() {
+    /// The widest secondary round in flight, in inches, and how far out the farthest
+    /// flies, in five seconds' fire at a cruiser lying `range` metres off her beam.
+    fn engage(fit: Secondaries, range: f32) -> (f32, f32) {
+        let mut b = battle();
+        b.raiders.clear();
+        b.landmarks.clear();
+        b.next_wave = 1000.;
+        let at = Vec2::new(range, 0.);
+        b.spawn(EnemyClass::Cruiser, at, at + Vec2::NEG_Y);
+        toughen(&mut b.raiders[0], 100.);
+        b.fit_secondaries(fit);
+        let orders = Orders {
+            player: Vec2::ZERO,
+            ..distant_observer()
+        };
+        let (mut widest, mut farthest) = (0_f32, 0_f32);
+        for _ in 0..300 {
+            // She lies where she is put, so the range holds.
+            b.raiders[0].body.pos = at;
+            b.step(1. / 60., &orders);
+            for shot in b.shots().iter().filter(|s| s.battery == Battery::Secondary) {
+                widest = widest.max(shot.calibre());
+                farthest = farthest.max(shot.position().xz().length());
+            }
+        }
+        (widest, farthest)
+    }
+    let house = |bore, range| Secondaries {
+        gunhouse: Some(bore),
+        range,
+        ..Secondaries::STOCK
+    };
+    // A shielded mount fires its light round, and a gunhouse the round of its bore.
+    let (light, _) = engage(Secondaries::STOCK, 120.);
+    assert!((light - Secondaries::MOUNT_BORE).abs() < 0.01, "{light}");
+    let (four, _) = engage(house(4, 260.), 120.);
+    let (six, _) = engage(house(6, 340.), 120.);
+    assert!(
+        (four - 4.).abs() < 0.01 && (six - 6.).abs() < 0.01,
+        "{four}, {six}"
+    );
+    // With every rangefinder a six-inch gunhouse engages out past 500 metres, and its
+    // rounds carry that far rather than falling short.
+    let (_, far) = engage(house(6, 540.), 500.);
+    assert!(far > 480., "rounds fly {far} m at a cruiser 500 m off");
+}
+
+#[test]
 fn the_bow_pair_covers_dead_ahead_together_and_each_its_own_bow_to_the_beam() {
     /// Secondary rounds from each side's bow gun and beam guns at a cruiser lying
     /// `bearing` degrees from the bow, to starboard, 130 metres off.
@@ -3528,14 +3577,12 @@ fn the_regent_requires_sustained_fire_and_can_be_finished_with_stock_guns() {
         Vec2::new(72., 164.),
     ]);
     let mut b = Battle::regent_encounter(14., &chart);
-    assert_eq!(
-        b.raiders
-            .iter()
-            .filter(|r| r.class == EnemyClass::Regent)
-            .count(),
-        1
-    );
     assert!(b.raiders.iter().any(|r| r.class == EnemyClass::Cruiser));
+    assert!(b.boss_ship().is_none());
+    // Her screen broken, she comes up the deep with her battle line.
+    b.raiders.clear();
+    b.step(1. / 30., &distant_observer());
+    assert!(b.boss_ship().is_some());
     // Isolate the duel so escort kills cannot satisfy the boss objective.
     b.raiders.retain(|r| r.class == EnemyClass::Regent);
     b.landmarks.clear();

@@ -25,6 +25,9 @@ const DATUM: f32 = 16.;
 
 /// Metres one barbette step lifts a turret above the deck.
 pub const BARBETTE: f32 = 1.05;
+/// The machinery space's funnels stand as high as a turret raised this many steps, so a
+/// turret raised one step more fires over them. The bridge masks a turret at any height.
+pub const FUNNEL_TIER: u8 = 1;
 /// How far either way of her beam a double turret trains: round its own side and a
 /// little past the bow and the stern.
 const DOUBLE_ARC: f32 = 95.;
@@ -78,19 +81,18 @@ impl GunStation {
 
 impl Design {
     /// The nearest sections ahead of and astern of section `at` that mask a centreline
-    /// turret standing `tier` barbette steps up. A deckhouse or funnel masks it at any
-    /// height, a centreline or double turret only when it stands as high. A wing gallery
-    /// leaves the centreline clear.
+    /// turret standing `tier` barbette steps up. The bridge masks it at any height, the
+    /// funnels until it stands above [`FUNNEL_TIER`], and a centreline or double turret
+    /// only when it stands as high. A wing gallery leaves the centreline clear.
     pub fn masking(&self, at: usize, tier: u8) -> [Option<usize>; 2] {
         let blocks = |&i: &usize| {
             let module = &self.modules()[i];
-            module
-                .fit
-                .iter()
-                .any(|kind| matches!(kind, Component::Director | Component::Engine))
+            let has = |kind: Component| module.fit.contains(&kind);
+            has(Component::Director)
+                || (has(Component::Engine) && FUNNEL_TIER >= tier)
                 // A wing gallery leaves the centreline clear. A double pair fills it.
                 || (module.frame != Frame::BatteryGallery
-                    && module.fit.contains(&Component::MainGun)
+                    && has(Component::MainGun)
                     && module.gunhouse.tier >= tier)
         };
         [
@@ -102,7 +104,7 @@ impl Design {
     /// Main mounts in compartment order, with a port mount before its starboard mate.
     /// A deckhouse or centreline turret masks forty degrees a side from the next
     /// compartment. A wing gallery leaves the centreline clear, and a raised turret fires
-    /// over a centreline turret that stands lower than itself.
+    /// over a centreline turret, or funnels, that stand lower than itself.
     pub fn gun_stations(&self) -> Vec<GunStation> {
         let shadow =
             |gap: Option<usize>| gap.map_or(0., |n| (40. / (n as f32).sqrt()).to_radians());

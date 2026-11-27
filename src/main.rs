@@ -324,11 +324,25 @@ impl Voyage<'_, '_> {
         self.guns.torpedo_mode = false;
         self.guns.launch_pending = false;
         self.guns.volley = None;
-        let flagship = self
-            .encounter
-            .raiders()
-            .iter()
-            .find(|r| r.class == shipvivor_encounter::EnemyClass::Regent);
+        // Crown Deep opens on what is coming for her: the Regent, or the screen she sends
+        // on ahead while she holds back over the horizon.
+        let raiders = self.encounter.raiders();
+        let flagship = (raiders.iter())
+            .find(|r| r.class == shipvivor_encounter::EnemyClass::Regent)
+            .or_else(|| {
+                (run.stage == shipvivor_campaign::Stage::CrownDeep)
+                    .then(|| {
+                        (raiders.iter())
+                            .filter(|r| !r.class.is_merchant())
+                            .min_by(|a, b| {
+                                let d = |r: &&shipvivor_encounter::Raider| {
+                                    r.body.pos.distance_squared(self.helm.position)
+                                };
+                                d(a).total_cmp(&d(b))
+                            })
+                    })
+                    .flatten()
+            });
         if let Some(ship) = flagship {
             self.helm.heading = shipvivor_compass::heading(ship.body.pos - self.helm.position);
         }

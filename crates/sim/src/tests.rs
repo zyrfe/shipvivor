@@ -81,7 +81,8 @@ fn each_round_builds_to_its_boss_and_a_tough_passage_comes_sooner_and_pays_more(
     );
     let battle = deep.battle(&deep.chart(40));
     assert_eq!(battle.boss(), Some(EnemyClass::Regent));
-    assert!(battle.boss_ship().is_some() && battle.flagship().is_none());
+    // She holds back over the horizon while her screen comes on.
+    assert!(battle.boss_ship().is_none() && battle.flagship() == Some(Sortie::Holding));
 }
 
 /// Every sea of every pool charts from every run seed, every sea of a round holds as

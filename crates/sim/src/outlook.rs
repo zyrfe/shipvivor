@@ -29,8 +29,6 @@ use shipvivor_shipyard::{Design, Mounting, Protection, Ship};
 const RANGE: f32 = 300.;
 /// Metres a second the secondaries' rounds fly.
 const SECONDARY_SPEED: f32 = 240.;
-/// Inches across a secondary round, and a secondary gunhouse's.
-const SECONDARY_CALIBRE: (f32, f32) = (2.75, 4.);
 /// Inches across an enemy main round for each unit of her class's gun scale.
 const ENEMY_CALIBRE: f32 = 5.9;
 /// Share of the enemy's rounds that find her.
@@ -225,11 +223,7 @@ impl Her {
             turrets,
             secondary_rate: per_side * secondaries.barrels as f32 / secondaries.reload,
             secondary_damage: f32::from(secondaries.damage),
-            secondary_calibre: if secondaries.turrets {
-                SECONDARY_CALIBRE.1
-            } else {
-                SECONDARY_CALIBRE.0
-            },
+            secondary_calibre: secondaries.bore(),
             secondary_range: secondaries.range,
             anti_air: aa.mounts as f32 * f32::from(aa.damage) / aa.reload,
             thickness: fittings.protection(Protection::BREAKWATER).thickness,

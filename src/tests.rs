@@ -874,13 +874,15 @@ fn a_run_reaches_the_regent_through_the_helm_and_keeps_its_refits() {
     let (now, then) = (shells(run.fittings), shells(docked));
     assert!(now.0 >= then.0 && now.1 >= then.1);
     assert_eq!(run.screen(), Screen::Sailing);
+    // Her screen meets the ship first, and the Regent holds back over the horizon.
+    let battle = w.resource::<Encounter>();
+    assert!(battle.boss_ship().is_none());
     assert_eq!(
-        w.resource::<Encounter>()
-            .raiders()
-            .iter()
-            .filter(|r| r.class == shipvivor_encounter::EnemyClass::Regent)
-            .count(),
-        1
+        battle.flagship(),
+        Some(shipvivor_encounter::Sortie::Holding)
+    );
+    assert!(
+        (battle.raiders().iter()).any(|r| r.class == shipvivor_encounter::EnemyClass::Cruiser)
     );
     w.resource_mut::<Campaign>()
         .tick_sector(61., Objectives::default(), 0, true);
@@ -1319,24 +1321,46 @@ fn chart_and_telegraph_follow_the_playable_sector() {
         }
     }
     let finale = Passage::of(Stage::CrownDeep);
+    let afloat_on_open_water = |battle: &shipvivor_encounter::Battle, ship: &shipvivor_encounter::Raider| {
+        let hull = ship.class.profile().hull;
+        ship.body.pos.length() >= SPAWN_STANDOFF
+            && battle
+                .navigable_position(ship.body.pos, hull.bow)
+                .distance(ship.body.pos)
+                < 0.1
+    };
     for seed in [1, 2, 3, 83] {
         let chart = finale.chart(seed);
-        let battle = finale.battle(&chart);
-        let boss = battle
-            .raiders()
-            .iter()
-            .find(|r| r.class == shipvivor_encounter::EnemyClass::Regent)
-            .unwrap();
-        let hull = boss.class.profile().hull;
-        assert!(boss.body.pos.length() >= SPAWN_STANDOFF);
-        assert!(
-            battle
-                .navigable_position(boss.body.pos, hull.bow)
-                .distance(boss.body.pos)
-                < 0.1
+        let mut battle = finale.battle(&chart);
+        // Her screen lies on open water clear of the ship, and she holds back.
+        assert!(battle.boss_ship().is_none());
+        assert_eq!(
+            battle.flagship(),
+            Some(shipvivor_encounter::Sortie::Holding)
         );
+        for ship in battle.raiders().iter().filter(|r| !r.class.is_merchant()) {
+            assert!(afloat_on_open_water(&battle, ship), "run {seed}: {:?}", ship.class);
+        }
+        if seed > 2 {
+            continue;
+        }
+        // Left alone, she comes up the deep in the end, on open water and far off.
+        let orders = shipvivor_encounter::Orders {
+            player: Vec2::ZERO,
+            heading: 0.,
+            speed: 0.,
+            hull: shipvivor_encounter::Hull::CRUISER,
+            aim: shipvivor_encounter::Aim::Hold,
+            reload: 2.5,
+            shell: shipvivor_encounter::MainShell::STOCK,
+        };
+        for _ in 0..241 * 10 {
+            battle.step(0.1, &orders);
+        }
+        let boss = battle.boss_ship().expect("she has come up");
+        assert!(boss.body.pos.length() > 1300., "run {seed}");
+        assert!(afloat_on_open_water(&battle, boss), "run {seed}");
         assert_eq!(boss.live_guns(), 12);
-        assert!(battle.flagship().is_none());
     }
     let mut app = headless_game();
     let w = app.world_mut();
@@ -2857,6 +2881,15 @@ fn mission_clock_and_industry_bearings_remain_visible_in_the_last_minute() {
 }
 
 #[test]
+fn the_battle_mounts_every_turret_the_heaviest_hull_carries() {
+    assert_eq!(
+        shipvivor_encounter::Station::SLOTS.len(),
+        shipvivor_campaign::MOST_GUN_STATIONS
+    );
+    assert!(shipvivor_campaign::MOST_GUN_STATIONS <= crate::state::TURRETS);
+}
+
+#[test]
 fn yard_controls_take_a_mixed_battery_to_sea() {
     use shipvivor_campaign::{DeckModule, DockJob, DockModule};
 
@@ -2864,7 +2897,7 @@ fn yard_controls_take_a_mixed_battery_to_sea() {
     let w = app.world_mut();
     start_in_narrows(w);
     // Three stars, and wrecked yards enough to pay for the whole programme: two bays, two
-    // steps of beam, the wings and a bore for each turret. Cleared past the clock.
+    // classes of hull, the wings and a bore for each turret. Cleared past the clock.
     w.resource_mut::<Campaign>().elapsed = PAST_THE_CLOCK;
     w.resource_mut::<Campaign>().tick_sector(
         1.,
@@ -2872,7 +2905,7 @@ fn yard_controls_take_a_mixed_battery_to_sea() {
             kills: 4,
             destroyed_drydock: true,
             crates: 8,
-            yards: 35,
+            yards: 51,
             ..default()
         },
         0,
@@ -2888,7 +2921,7 @@ fn yard_controls_take_a_mixed_battery_to_sea() {
         w.resource::<Campaign>().screen(),
         Screen::Drydock(LegEnd::BasesDestroyed)
     );
-    assert_eq!(w.resource::<Campaign>().points(), 41);
+    assert_eq!(w.resource::<Campaign>().points(), 57);
     // With no bay to stand one on, the yard opens on the turret a split would add to, and
     // shows nothing until a refit is picked out.
     assert_eq!(w.resource::<Campaign>().dock_module, 1);
@@ -2913,7 +2946,7 @@ fn yard_controls_take_a_mixed_battery_to_sea() {
             }
         );
     }
-    assert_eq!(w.resource::<Campaign>().points(), 35);
+    assert_eq!(w.resource::<Campaign>().points(), 51);
     // Both bays are on order, listed under the sections they make.
     assert_eq!(w.query::<&dockyard::Ledger>().iter(w).count(), 2);
 
@@ -2926,13 +2959,14 @@ fn yard_controls_take_a_mixed_battery_to_sea() {
     };
     choose(w, huge);
     press(w, KeyCode::Enter);
-    assert_eq!(w.resource::<Campaign>().points(), 35);
+    assert_eq!(w.resource::<Campaign>().points(), 51);
     assert_eq!(
         w.resource::<Campaign>().fittings.round().calibre_inches(),
         4.
     );
 
-    // The hull is widened from the hull panel, one step at a time, at once.
+    // The hull is rebuilt from the hull panel, a class at a time, at once: a heavy
+    // cruiser's, then a battleship's.
     for _ in 0..2 {
         let beam = w.resource::<Campaign>().ship.design().beam();
         draft(w, DockJob::WidenBeam);
@@ -2945,7 +2979,7 @@ fn yard_controls_take_a_mixed_battery_to_sea() {
     choose(w, DockJob::Move { from: 1, to: 2 });
     press(w, KeyCode::Enter);
     assert_eq!(w.resource::<Campaign>().dock_module, 2);
-    // Two steps of beam cost eight, and the move nothing.
+    // Two classes of hull cost twenty-four, and the move nothing.
     assert_eq!(w.resource::<Campaign>().points(), 27);
     // The selection travels with the bay, ready to move it again.
     assert_eq!(

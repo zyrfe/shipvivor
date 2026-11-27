@@ -13,8 +13,8 @@ use shipvivor_artillery::{
 };
 use shipvivor_shipyard::{Component, Design, Frame, Module, Protection, Ship, StrikeCraft};
 pub use workshop::{
-    DeckModule, DockJob, MAX_GUN_STATIONS, MAX_LENGTH, MAX_SECTIONS_PER_KIND, MOST_GUN_STATIONS,
-    Refusal, deck_ranks, plane_room,
+    DeckModule, DockJob, HULL_STEP, MAX_GUN_STATIONS, MAX_LENGTH, MAX_SECTIONS_PER_KIND,
+    MOST_GUN_STATIONS, Refusal, deck_ranks, plane_room,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -625,8 +625,8 @@ pub enum Card {
     MorePlanes,
     /// Another bomb on every floatplane, dropped in a stick across its mark.
     MoreBombs,
-    /// Every wing gun rebuilt as a four-inch gunhouse that fires on its own. It wants a
-    /// capital beam under it.
+    /// Every wing gun rebuilt as a gunhouse that fires on its own: four-inch on a
+    /// battleship's hull, then six-inch on a heavy battleship's.
     SecondaryTurrets,
 }
 impl Card {
@@ -716,11 +716,31 @@ fn draw(mut pool: Vec<(Card, Rarity)>, key: u64) -> Vec<Card> {
 
 /// Metres each rangefinder card adds to the secondaries' reach.
 const WING_RANGE_STEP: f32 = 40.;
-/// What rebuilding the wing guns as four-inch gunhouses adds to each hit, to their
-/// reach in metres, and the share their reload grows by for the heavier round.
-const WING_TURRET_DAMAGE: u16 = 2;
-const WING_TURRET_REACH: f32 = 100.;
-const WING_TURRET_LOAD: f32 = 1.5;
+/// A size of gunhouse the wing guns are rebuilt as: its bore in inches, what it adds to
+/// each hit and to their reach in metres, and the share their reload grows by for the
+/// heavier round.
+struct WingHouse {
+    bore: u16,
+    damage: u16,
+    reach: f32,
+    load: f32,
+}
+/// The gunhouses the secondaries come in, a rank of [`Card::SecondaryTurrets`] each:
+/// four-inch, like the main battery's first turrets, then six-inch.
+const WING_HOUSES: [WingHouse; limits::WING_TURRETS as usize] = [
+    WingHouse {
+        bore: 4,
+        damage: 2,
+        reach: 100.,
+        load: 1.5,
+    },
+    WingHouse {
+        bore: 6,
+        damage: 5,
+        reach: 180.,
+        load: 2.25,
+    },
+];
 /// The share of a barrel's loading time each rank of loaders takes off, for the main
 /// battery, the secondaries and the AA alike. It comes off what the ranks before left,
 /// so every rank is worth the same to the crew: four ranks take it down to about half.
@@ -736,8 +756,8 @@ pub mod limits {
     /// Ranks of piercing caps: each adds a quarter, so eight treble the stock round's
     /// penetration.
     pub const CAPS: u16 = 8;
-    /// At the widest beam. A narrower hull carries fewer: see [`crate::ShipBeam::most_armor`].
-    pub const ARMOR: u16 = crate::ShipBeam::Capital.most_armor();
+    /// On the heaviest hull. A lighter one carries fewer: see [`crate::ShipBeam::most_armor`].
+    pub const ARMOR: u16 = crate::ShipBeam::BROADEST.most_armor();
     pub const HARDENING: u16 = 4;
     /// Secondaries past the stock pair a side, as far as any deck has room. Her own deck
     /// usually has room for fewer: see `Run::wing_room`.
@@ -760,17 +780,18 @@ pub mod limits {
     pub const MISSILES: u16 = 4;
     pub const PLANES: u16 = 5;
     pub const BOMBS: u16 = 4;
-    pub const WING_TURRETS: u16 = 1;
+    /// Sizes of gunhouse for the secondaries: four-inch, then six-inch.
+    pub const WING_TURRETS: u16 = 2;
     /// Catapults on one plane section.
     pub const PLANES_A_SECTION: u16 = 3;
 }
 /// Each rank of pumps adds this share of the stock pumping.
 const PUMP_STEP: f32 = 0.5;
 /// Each rank of armor plate adds this share of stock strength to every panel, and
-/// this many inches to its thickness. On sound plate the stock beam's four ranks turn
+/// this many inches to its thickness. On sound plate an escort's four ranks turn
 /// the enemy's secondaries and aircraft guns, then patrol boats and destroyers. A
-/// cruiser's beam adds cruisers, then battleships and shore guns, and a capital beam
-/// the Parliament's guns. Nothing turns the Regent's.
+/// heavy cruiser's hull adds cruisers, then battleships and shore guns, and a
+/// battleship's the Parliament's guns. Nothing turns the Regent's.
 const ARMOR_PLATE: f32 = 0.25;
 const ARMOR_INCHES: f32 = 1.5;
 /// Each rank of hardening adds this share of stock strength to every deck fitting.
@@ -901,16 +922,14 @@ impl Fittings {
     /// The close-range battery: the stock guns on the bow and the beam and one more gun a
     /// beam per mounting card, one more damage a hit per heavier round, quick loaders
     /// working as they do for the main battery, 40 m more reach per rangefinder and a
-    /// second barrel on every gun once twinned. Rebuilt as four-inch gunhouses, each
-    /// gun hits harder and reaches farther, and loads more slowly.
+    /// second barrel on every gun once twinned. Rebuilt as gunhouses, four-inch and then
+    /// six-inch, each gun hits harder and reaches farther, and loads more slowly.
     pub fn secondaries(&self) -> Secondaries {
         let stock = Secondaries::STOCK.per_side;
-        let turrets = self.wing_turrets > 0;
-        let (damage, reach, load) = if turrets {
-            (WING_TURRET_DAMAGE, WING_TURRET_REACH, WING_TURRET_LOAD)
-        } else {
-            (0, 0., 1.)
-        };
+        let house = usize::from(self.wing_turrets.min(limits::WING_TURRETS))
+            .checked_sub(1)
+            .map(|rank| &WING_HOUSES[rank]);
+        let (damage, reach, load) = house.map_or((0, 0., 1.), |h| (h.damage, h.reach, h.load));
         Secondaries {
             per_side: (stock + usize::from(self.wing_mounts)).min(Secondaries::MOST_PER_SIDE),
             damage: (Secondaries::STOCK.damage)
@@ -923,8 +942,15 @@ impl Fittings {
                 + WING_RANGE_STEP * f32::from(self.wing_range.min(limits::WING_RANGE))
                 + reach,
             barrels: 1 + usize::from(self.wing_twin.min(limits::WING_BARRELS)),
-            turrets,
+            gunhouse: house.map(|h| h.bore),
         }
+    }
+    /// The bore, in inches, of the next size of gunhouse her secondaries could be
+    /// rebuilt as, or `None` once they are the biggest the yard makes.
+    pub fn next_secondary_bore(&self) -> Option<u16> {
+        WING_HOUSES
+            .get(usize::from(self.wing_turrets))
+            .map(|h| h.bore)
     }
     /// The strike craft: a launcher on each missile rack and another per launcher card,
     /// the stock salvo and another missile per missile card, a plane and another per
@@ -1007,10 +1033,11 @@ impl Fittings {
             MoreMissiles => self.missiles < limits::MISSILES,
             MorePlanes => self.planes < limits::PLANES,
             MoreBombs => self.bombs < limits::BOMBS,
-            // A gunhouse at every wing station wants the room of a capital beam.
-            SecondaryTurrets => {
-                self.wing_turrets < limits::WING_TURRETS && self.beam >= ShipBeam::Capital
-            }
+            // A gunhouse at every wing station wants the room of a battleship's deck,
+            // and a six-inch one a heavy battleship's.
+            SecondaryTurrets => self
+                .next_secondary_bore()
+                .is_some_and(|bore| self.beam.secondary_bore() >= Some(bore)),
             // The yard rebores and rearms each turret on its own: see `DockJob::Calibre`
             // and `DockJob::Barrels`.
             TripleTurrets | QuadTurrets => false,
@@ -1714,7 +1741,7 @@ mod tests {
         for (rank, pair) in CALIBRES.windows(2).enumerate() {
             let now = Fittings {
                 shells: rank as u16,
-                beam: ShipBeam::Capital,
+                beam: ShipBeam::Battleship,
                 ..stock
             };
             let step =
@@ -1732,7 +1759,7 @@ mod tests {
         assert!((thirty.load_seconds() - 30.).abs() < 1e-3);
         let eight = Fittings {
             shells: 2,
-            beam: ShipBeam::Cruiser,
+            beam: ShipBeam::HeavyCruiser,
             ..stock
         };
         assert!((5.5..6.5).contains(&eight.reload()), "{}", eight.reload());
@@ -1804,7 +1831,7 @@ mod tests {
         use Card::*;
         // The broadest hull carries the most plate.
         let stock = Fittings {
-            beam: ShipBeam::Capital,
+            beam: ShipBeam::Battleship,
             ..Fittings::default()
         };
         for card in [
@@ -1857,7 +1884,7 @@ mod tests {
         // A larger bore trains more slowly, and training gear wins it back.
         let heavy = Fittings {
             shells: 2,
-            beam: ShipBeam::Cruiser,
+            beam: ShipBeam::HeavyCruiser,
             ..stock
         };
         assert!((stock.traverse() - 18.).abs() < 1e-4);
@@ -2014,7 +2041,7 @@ mod tests {
         for fit in [
             Fittings::default(),
             Fittings {
-                beam: ShipBeam::Capital,
+                beam: ShipBeam::Battleship,
                 ..Fittings::default()
             },
             Fittings::default().with(TripleTurrets),
@@ -2096,8 +2123,8 @@ mod tests {
         };
         // Twice the ranks of half the plate each: the same thickness at each beam.
         assert_eq!(most(ShipBeam::Escort), (4, 7.));
-        assert_eq!(most(ShipBeam::Cruiser), (8, 13.));
-        assert_eq!(most(ShipBeam::Capital), (limits::ARMOR, 19.));
+        assert_eq!(most(ShipBeam::HeavyCruiser), (8, 13.));
+        assert_eq!(most(ShipBeam::Battleship), (limits::ARMOR, 19.));
         // On her stock beam she can turn a destroyer's round, but not a cruiser's.
         let mut run = Run::default();
         while run.fittings.can_fit(Card::Armor) {

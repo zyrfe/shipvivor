@@ -31,20 +31,23 @@ pub fn deck_ranks(card: Card, design: &Design) -> Option<u16> {
     };
     Some(room as u16)
 }
-/// The most main turrets a hull of her stock or a cruiser's beam carries. A capital
-/// beam carries more: see [`ShipBeam::most_turrets`].
+/// The most main turrets an escort's hull or a heavy cruiser's carries. A battleship
+/// carries more: see [`ShipBeam::most_turrets`].
 pub const MAX_GUN_STATIONS: usize = 4;
-/// The most main turrets any hull carries, on the broadest beam.
-pub const MOST_GUN_STATIONS: usize = ShipBeam::Capital.most_turrets();
-/// The basin takes a hull this long and no longer: the most modules the broadest beam
+/// The most main turrets any hull carries: a heavy battleship's.
+pub const MOST_GUN_STATIONS: usize = ShipBeam::BROADEST.most_turrets();
+/// The basin takes a hull this long and no longer: the most modules the broadest hull
 /// may run to.
-pub const MAX_LENGTH: f32 = 5. * ShipBeam::Capital.most_modules() as f32;
+pub const MAX_LENGTH: f32 = 5. * ShipBeam::BROADEST.most_modules() as f32;
+/// Yard points to rebuild her hull as the next class up. It is the biggest job the yard
+/// does, and usually more than one leg pays for.
+pub const HULL_STEP: u16 = 12;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DeckModule {
     CentreBattery,
     WingBattery,
-    /// Two full-size turrets abreast, on a capital beam.
+    /// Two full-size turrets abreast, on a battleship's hull.
     DoubleBattery,
     Reserve,
 }
@@ -71,10 +74,10 @@ impl DeckModule {
             Self::Reserve => DockModule::Reserve.build(),
         }
     }
-    /// The narrowest beam with room for it.
+    /// The lightest class of hull with room for it.
     pub fn beam(self) -> ShipBeam {
         match self {
-            Self::DoubleBattery => ShipBeam::Capital,
+            Self::DoubleBattery => ShipBeam::Battleship,
             _ => ShipBeam::Escort,
         }
     }
@@ -124,10 +127,11 @@ impl DockModule {
             Self::Turret => MAX_GUN_STATIONS,
         }
     }
-    /// The narrowest beam that has room for it. Missile magazines need a cruiser's.
+    /// The lightest class of hull that has room for it. Missile magazines need a heavy
+    /// cruiser's.
     pub fn beam(self) -> ShipBeam {
         match self {
-            Self::Missiles => ShipBeam::Cruiser,
+            Self::Missiles => ShipBeam::HeavyCruiser,
             _ => ShipBeam::Escort,
         }
     }
@@ -138,7 +142,7 @@ impl DockModule {
 pub enum Refusal {
     /// The hull already carries the most of these it can.
     Full(usize),
-    /// The hull must first be widened to this beam.
+    /// The hull must first be rebuilt to this class.
     Beam(ShipBeam),
     /// The hull must first be lengthened to this many metres.
     Length(u16),
@@ -147,7 +151,7 @@ pub enum Refusal {
 
     /// The basin takes no longer hull.
     Longest,
-    /// The beam is as wide as the yard builds.
+    /// She is the heaviest class of hull the yard builds.
     Widest,
 }
 
@@ -159,6 +163,8 @@ pub enum DockJob {
         module: DockModule,
     },
     Fitting(Card),
+    /// Rebuild her hull as the next class up: a heavy cruiser's, then a battleship's,
+    /// then a heavy battleship's.
     WidenBeam,
     /// Rebore the main turrets on module `at` from `from` inches to `to`. A wing pair is
     /// rebored alike.
@@ -219,10 +225,10 @@ impl Run {
         }
         let mut jobs = Vec::new();
         if !self.module_locked(at) {
-            // Double turrets are offered from a cruiser's beam, to show what the next
-            // step of beam brings.
+            // Double turrets are offered from a heavy cruiser's hull, to show what a
+            // battleship's brings.
             let doubles =
-                (self.beam_class() >= ShipBeam::Cruiser).then_some(DeckModule::DoubleBattery);
+                (self.beam_class() >= ShipBeam::HeavyCruiser).then_some(DeckModule::DoubleBattery);
             for with in [
                 Some(DeckModule::CentreBattery),
                 Some(DeckModule::WingBattery),
@@ -331,7 +337,7 @@ impl Run {
             module.most()
         };
         if fitted >= most {
-            // A broader beam carries more turrets.
+            // A heavier hull carries more turrets.
             let broader = ShipBeam::ALL
                 .into_iter()
                 .find(|&beam| turrets && beam > self.beam_class() && beam.most_turrets() > fitted);
@@ -341,29 +347,35 @@ impl Run {
         } else if design.modules().len() >= self.beam_class().most_modules()
             || design.length() + Frame::Straight.spec().length * design.scale > MAX_LENGTH
         {
-            // A longer hull waits for a broader beam, up to the longest the basin takes.
-            Some(
-                self.beam_class()
-                    .next()
-                    .map_or(Refusal::Longest, Refusal::Beam),
-            )
+            // A longer hull waits for a heavier class, up to the longest the basin takes.
+            let roomier = ShipBeam::ALL.into_iter().find(|&beam| {
+                beam > self.beam_class() && beam.most_modules() > design.modules().len()
+            });
+            Some(roomier.map_or(Refusal::Longest, Refusal::Beam))
         } else {
             None
         }
     }
 
-    /// Why the hull cannot be widened another step, if it cannot.
+    /// Why the hull cannot be rebuilt as the next class up, if it cannot.
     pub fn widen_refusal(&self) -> Option<Refusal> {
         let next = self.beam_class().next()?;
         (self.ship.design().length() < next.min_length())
             .then_some(Refusal::Length(next.min_length() as u16))
     }
 
-    /// Why the hull cannot take another rank of armor plate until she is broader, if
-    /// that is why. At the widest beam her last rank is simply her last.
+    /// Why the hull cannot take another rank of armor plate until she is a heavier
+    /// class, if that is why. On a hull no heavier class out-plates, her last rank is
+    /// simply her last.
     pub fn armor_refusal(&self) -> Option<Refusal> {
-        let next = self.beam_class().next()?;
-        (self.fittings.armor >= self.beam_class().most_armor()).then_some(Refusal::Beam(next))
+        let class = self.beam_class();
+        if self.fittings.armor < class.most_armor() {
+            return None;
+        }
+        ShipBeam::ALL
+            .into_iter()
+            .find(|&beam| beam > class && beam.most_armor() > class.most_armor())
+            .map(Refusal::Beam)
     }
 
     /// Secondaries a side her deck has room for: two on each open section, so a
@@ -455,46 +467,52 @@ impl Run {
         }
     }
 
-    /// The narrowest beam this job can be done on.
+    /// The lightest class of hull this job can be done on.
     fn beam_wanted(&self, job: DockJob) -> ShipBeam {
         match job {
-            DockJob::Fitting(Card::SecondaryTurrets) => ShipBeam::Capital,
+            // The next size of gunhouse for her secondaries, on the first hull that
+            // carries it.
+            DockJob::Fitting(Card::SecondaryTurrets) => {
+                let next = self.fittings.next_secondary_bore();
+                ShipBeam::ALL
+                    .into_iter()
+                    .find(|beam| next.is_some_and(|bore| beam.secondary_bore() >= Some(bore)))
+                    .unwrap_or(ShipBeam::BROADEST)
+            }
             DockJob::Replace { with, .. } => with.beam(),
             DockJob::Insert { module, .. } => module.beam(),
             _ => ShipBeam::Escort,
         }
     }
 
-    /// The centreline turret on module `at` is masked ahead or astern by a turret
-    /// standing as high as itself, so a step of barbette would let it fire over that one.
-    /// The turret need not be beside it: a wing gallery between them leaves the
-    /// centreline clear, so a turret beyond it masks just the same. A bridge or funnel
-    /// masks it at any height. Double turrets stand across the centreline, so a
-    /// centreline turret beside them is overlooked too, but they are never raised
-    /// themselves.
+    /// The centreline turret on module `at` is masked by something that raising it as
+    /// far as it goes would let it fire over: a turret ahead or astern standing as high
+    /// as itself, or the funnels. The turret need not be beside it: a wing gallery
+    /// between them leaves the centreline clear, so a turret beyond it masks just the
+    /// same. A bridge masks it at any height. Double turrets stand across the
+    /// centreline, so a centreline turret beside them is overlooked too, but they are
+    /// never raised themselves.
     pub fn overlooked(&self, at: usize) -> bool {
         let design = self.ship.design();
-        let modules = design.modules();
-        let main = |m: &Module| m.fit.contains(&Component::MainGun);
-        let Some(own) = modules.get(at).filter(|m| !m.frame.abreast() && main(m)) else {
+        let Some(own) = design
+            .modules()
+            .get(at)
+            .filter(|m| !m.frame.abreast() && m.fit.contains(&Component::MainGun))
+        else {
             return false;
         };
-        own.gunhouse.tier < MOST_TIER
-            && design
-                .masking(at, own.gunhouse.tier)
-                .into_iter()
-                .flatten()
-                .any(|i| main(&modules[i]))
+        let tier = own.gunhouse.tier;
+        tier < MOST_TIER && design.masking(at, tier) != design.masking(at, MOST_TIER)
     }
 
     /// The biggest bore the turrets on module `at` could carry with these barrels, on
-    /// her beam now.
+    /// her hull as it is now.
     pub fn cradle_at(&self, at: usize, barrels: TurretLayout) -> u16 {
         cradle(self.beam_class(), self.gallery(at), barrels)
     }
 
-    /// The narrowest beam on which the turrets on module `at` could carry `bore` with
-    /// these barrels, if any beam could.
+    /// The lightest class of hull on which the turrets on module `at` could carry `bore`
+    /// with these barrels, if any could.
     pub fn beam_for(&self, at: usize, barrels: TurretLayout, bore: u16) -> Option<ShipBeam> {
         let paired = self.gallery(at);
         ShipBeam::ALL
@@ -518,7 +536,7 @@ impl DockJob {
         match self {
             Self::Insert { module, .. } => module.cost(),
             Self::Move { .. } => 0,
-            Self::WidenBeam => 4,
+            Self::WidenBeam => HULL_STEP,
             Self::Fitting(Card::TripleTurrets) => 3,
             Self::Fitting(Card::QuadTurrets) => 4,
             // Another light gun bolted to the deck is the smallest job the yard does, so a
@@ -562,7 +580,7 @@ impl Run {
         self.fittings.beam
     }
 
-    /// The next step of beam, once the hull is long enough to carry it.
+    /// The next class of hull up, once she is long enough to be rebuilt as one.
     pub fn next_beam(&self) -> Option<ShipBeam> {
         self.beam_class()
             .next()
@@ -922,7 +940,8 @@ mod tests {
             [3, 3, 4, 4, 5]
         );
         for (job, price) in [
-            (DockJob::WidenBeam, 4),
+            // A new class of hull is the dearest thing the yard builds.
+            (DockJob::WidenBeam, 12),
             (
                 DockJob::Calibre {
                     at: 1,
@@ -1016,26 +1035,40 @@ mod tests {
     }
 
     #[test]
-    fn the_beam_widens_one_step_at_a_time_and_only_on_a_hull_long_enough_for_it() {
-        // At her built length she cannot be widened, whatever she can pay.
-        let mut run = docked(20);
+    fn the_hull_is_rebuilt_a_class_at_a_time_and_only_once_she_is_long_enough_for_it() {
+        // At her built length she cannot be rebuilt, whatever she can pay.
+        let mut run = docked(60);
         assert_eq!(run.ship.design().length(), 30.);
         assert_eq!(run.widen_refusal(), Some(Refusal::Length(35)));
         assert!(!DockJob::WidenBeam.fits(&run) && !run.refit_in_dock(DockJob::WidenBeam));
 
-        // Two bays bring her to 40 m, long enough to widen twice.
+        // Two bays bring her to 40 m, long enough for a heavy cruiser's hull and then a
+        // battleship's.
         lengthen(&mut run);
         lengthen(&mut run);
-        assert_eq!((run.ship.design().length(), run.points()), (40., 14));
+        assert_eq!((run.ship.design().length(), run.points()), (40., 54));
         assert_eq!(
             run.projected_design(DockJob::WidenBeam).unwrap().beam(),
-            ShipBeam::Cruiser.metres()
+            ShipBeam::HeavyCruiser.metres()
         );
         assert!(run.refit_in_dock(DockJob::WidenBeam));
-        assert_eq!(run.beam_class(), ShipBeam::Cruiser);
+        assert_eq!(run.beam_class(), ShipBeam::HeavyCruiser);
         assert!(run.refit_in_dock(DockJob::WidenBeam));
-        assert_eq!(run.beam_class(), ShipBeam::Capital);
-        assert_eq!(run.points(), 6);
+        assert_eq!(run.beam_class(), ShipBeam::Battleship);
+        // Each class costs twelve points.
+        assert_eq!(run.points(), 30);
+        // A heavy battleship's hull wants 50 m under it: two more sections.
+        assert_eq!(run.refusal(DockJob::WidenBeam), Some(Refusal::Length(50)));
+        for _ in 0..2 {
+            assert!(run.refit_in_dock(DockJob::Insert {
+                at: run.default_gap(),
+                module: DockModule::Floatplane,
+            }));
+        }
+        assert!(run.refit_in_dock(DockJob::WidenBeam));
+        assert_eq!(run.beam_class(), ShipBeam::HeavyBattleship);
+        assert!((run.ship.design().beam() - 11.5).abs() < 1e-3);
+        assert_eq!(run.points(), 12);
         assert_eq!(run.refusal(DockJob::WidenBeam), Some(Refusal::Widest));
         // Every step keeps her more than four beams long.
         let design = run.ship.design();
@@ -1062,7 +1095,10 @@ mod tests {
         let mut run = docked(20);
         run.fittings.armor = ShipBeam::Escort.most_armor();
         let armor = DockJob::Fitting(Card::Armor);
-        assert_eq!(run.refusal(armor), Some(Refusal::Beam(ShipBeam::Cruiser)));
+        assert_eq!(
+            run.refusal(armor),
+            Some(Refusal::Beam(ShipBeam::HeavyCruiser))
+        );
         assert!(!run.refit_in_dock(armor));
         assert_eq!(run.refusal(DockJob::WidenBeam), Some(Refusal::Length(35)));
 
@@ -1087,10 +1123,10 @@ mod tests {
         };
         assert_eq!(
             run.stock_refusal(DockModule::EngineRoom),
-            Some(Refusal::Beam(ShipBeam::Cruiser))
+            Some(Refusal::Beam(ShipBeam::HeavyCruiser))
         );
         assert!(!run.refit_in_dock(bay));
-        // Widened, she may run to eleven, then fourteen on a capital beam.
+        // A heavy cruiser's hull may run to eleven, then a battleship's to fourteen.
         assert!(run.refit_in_dock(DockJob::WidenBeam));
         for module in [
             DockModule::EngineRoom,
@@ -1112,15 +1148,31 @@ mod tests {
         assert_eq!(run.ship.design().modules().len(), 11);
         assert_eq!(
             run.stock_refusal(DockModule::Missiles),
-            Some(Refusal::Beam(ShipBeam::Capital))
+            Some(Refusal::Beam(ShipBeam::Battleship))
         );
         assert!(run.refit_in_dock(DockJob::WidenBeam));
         assert_eq!(run.stock_refusal(DockModule::Missiles), None);
         assert_eq!(MAX_LENGTH, 70.);
+        // Fourteen fill the basin, so no heavier hull runs longer.
+        for module in [
+            DockModule::Turret,
+            DockModule::Turret,
+            DockModule::Floatplane,
+        ] {
+            assert!(run.refit_in_dock(DockJob::Insert {
+                at: run.default_gap(),
+                module
+            }));
+        }
+        assert_eq!(run.ship.design().modules().len(), 14);
+        assert_eq!(
+            run.stock_refusal(DockModule::Missiles),
+            Some(Refusal::Longest)
+        );
     }
 
     #[test]
-    fn a_section_bought_in_the_yard_lengthens_her_enough_to_widen() {
+    fn a_section_bought_in_the_yard_lengthens_her_enough_for_a_hull_she_must_save_for() {
         // Three stars and four yards pay ten points.
         let mut run = clear_sector(2);
         assert_eq!((run.ship.design().length(), run.points()), (30., 10));
@@ -1130,13 +1182,17 @@ mod tests {
             module: DockModule::Reserve,
         };
         assert!(run.refit_in_dock(bay));
+        // She is long enough now, but one leg's points do not pay for a new hull.
+        assert_eq!((run.widen_refusal(), run.points()), (None, 7));
+        assert!(DockJob::WidenBeam.fits(&run) && !run.refit_in_dock(DockJob::WidenBeam));
+        // Banked, with the next leg's, they do.
+        run.points += 8;
         assert!(run.refit_in_dock(DockJob::WidenBeam));
+        assert_eq!(run.beam_class(), ShipBeam::HeavyCruiser);
         assert_eq!(run.widen_refusal(), Some(Refusal::Length(40)));
         assert!(run.refit_in_dock(bay));
         assert_eq!(run.ship.design().length(), 40.);
-        assert_eq!(run.widen_refusal(), None);
-        // The second step of beam waits for another yard.
-        assert_eq!(run.points(), 0);
+        assert_eq!((run.widen_refusal(), run.points()), (None, 0));
         assert!(!run.refit_in_dock(DockJob::WidenBeam));
     }
 
@@ -1261,13 +1317,48 @@ mod tests {
             (1, shipvivor_shipyard::BARBETTE)
         );
         assert!(blind(&raised) < before, "it fires over the lower turret");
-        // Two steps would stand it over nothing more.
+        // A second step stands it over the funnels beyond that turret too, and none
+        // goes higher.
+        assert!(run.overlooked(at));
+        assert!(run.refit_in_dock(DockJob::Barbette { at, from: 1, to: 2 }));
         assert!(!run.overlooked(at));
-        assert!(!run.refit_in_dock(DockJob::Barbette { at, from: 1, to: 2 }));
         // Lowering it again is free.
         let left = run.points();
-        assert!(run.refit_in_dock(DockJob::Barbette { at, from: 1, to: 0 }));
+        assert!(run.refit_in_dock(DockJob::Barbette { at, from: 2, to: 0 }));
         assert_eq!(run.points(), left);
+    }
+
+    #[test]
+    fn the_after_turret_is_raised_two_steps_to_fire_over_the_funnels() {
+        let mut run = docked(30);
+        let at = run.ship.design().modules().len() - 2;
+        let modules = run.ship.design().modules();
+        assert!(modules[at].fit.contains(&Component::MainGun));
+        assert!(modules[at - 1].fit.contains(&Component::Engine));
+        // Thirty-five degrees off the bow, across the funnels.
+        let over = |run: &Run| {
+            run.ship
+                .design()
+                .gun_stations()
+                .into_iter()
+                .find(|g| g.berth.module == at)
+                .unwrap()
+                .bears(35_f32.to_radians())
+        };
+        let raise = |from| DockJob::Barbette {
+            at,
+            from,
+            to: from + 1,
+        };
+        assert!(!over(&run), "the funnels mask it");
+        assert!(run.section_jobs(at).contains(&raise(0)));
+        assert!(run.refit_in_dock(raise(0)));
+        assert!(!over(&run), "one step stands it level with the funnel tops");
+        assert!(run.section_jobs(at).contains(&raise(1)));
+        assert!(run.refit_in_dock(raise(1)));
+        assert!(over(&run), "two steps fire over the funnels");
+        // Only the bridge masks it now, and no barbette clears a bridge.
+        assert!(!run.overlooked(at));
     }
 
     #[test]
@@ -1335,9 +1426,9 @@ mod tests {
         // A wing gallery's cradles stop at eight inches.
         assert!(!rebore(&mut run, 1, 12));
         assert!(rebore(&mut run, 1, 8));
-        // Six for the bays, eight for the beam, twenty for the eighteen-inch bore, two for
-        // the wings and five for their eight-inch bore.
-        assert_eq!(run.points(), 60 - 41);
+        // Six for the bays, twenty-four for the two classes of hull, twenty for the
+        // eighteen-inch bore, two for the wings and five for their eight-inch bore.
+        assert_eq!(run.points(), 60 - 57);
         let ship = run.ship.design();
         let guns = ship.gun_stations();
         assert_eq!(guns.len(), 3);
@@ -1522,7 +1613,7 @@ mod tests {
     }
 
     #[test]
-    fn a_capital_beam_takes_double_turrets_abreast_and_six_turrets_in_all() {
+    fn a_battleship_takes_double_turrets_abreast_and_six_turrets_in_all() {
         use shipvivor_shipyard::Mounting;
         let mut run = docked(80);
         lengthen(&mut run);
@@ -1532,17 +1623,17 @@ mod tests {
             with: DeckModule::DoubleBattery,
         };
         let bay = reserve_bay(&run);
-        // On her stock beam the yard does not offer them.
+        // On an escort's hull the yard does not offer them.
         assert!(!run.section_jobs(bay).contains(&double(bay)));
         assert!(run.refit_in_dock(DockJob::WidenBeam));
-        // A cruiser's beam shows them, waiting on a capital beam.
+        // A heavy cruiser's hull shows them, waiting on a battleship's.
         assert!(run.section_jobs(bay).contains(&double(bay)));
         assert!(!double(bay).fits(&run) && !run.refit_in_dock(double(bay)));
         assert_eq!(
             run.refusal(double(bay)),
-            Some(Refusal::Beam(ShipBeam::Capital))
+            Some(Refusal::Beam(ShipBeam::Battleship))
         );
-        // Four turrets fill a cruiser's beam, and a capital beam takes more.
+        // Four turrets fill a heavy cruiser, and a battleship takes more.
         assert!(run.refit_in_dock(DockJob::Replace {
             at: bay,
             with: DeckModule::WingBattery,
@@ -1550,7 +1641,7 @@ mod tests {
         assert_eq!(run.main_turrets(), 4);
         assert_eq!(
             run.stock_refusal(DockModule::Turret),
-            Some(Refusal::Beam(ShipBeam::Capital))
+            Some(Refusal::Beam(ShipBeam::Battleship))
         );
         assert!(run.refit_in_dock(DockJob::WidenBeam));
         // Doubling the wing pair costs twice an exchange.
@@ -1571,7 +1662,7 @@ mod tests {
         let guns = run.ship.design().gun_stations();
         let big = guns.iter().find(|g| g.berth.module == bay).unwrap();
         assert_eq!(run.fittings.for_station(big).calibre(), 18);
-        // A second pair on the other bay brings her to six, the most she carries.
+        // A second pair on the other bay brings her to six, the most a battleship carries.
         let other = reserve_bay(&run);
         assert!(run.refit_in_dock(double(other)));
         assert_eq!(run.main_turrets(), 6);
@@ -1579,9 +1670,10 @@ mod tests {
         let aft = run.ship.design().modules().len() - 2;
         assert_eq!(aft, other + 1);
         assert!(!run.overlooked(other) && run.overlooked(aft));
+        // A heavy battleship carries two more.
         assert_eq!(
             run.stock_refusal(DockModule::Turret),
-            Some(Refusal::Full(6))
+            Some(Refusal::Beam(ShipBeam::HeavyBattleship))
         );
         assert!(!run.refit_in_dock(DockJob::Replace {
             at: 1,
@@ -1644,29 +1736,93 @@ mod tests {
     }
 
     #[test]
-    fn the_wing_guns_are_rebuilt_as_gunhouses_only_on_a_capital_beam() {
-        let mut run = docked(40);
+    fn the_wing_guns_are_rebuilt_as_gunhouses_on_a_battleship_and_bigger_on_a_heavy_one() {
+        let mut run = docked(80);
         let bridge = 2;
         assert_eq!(run.module_name(bridge), "Bridge");
         let turrets = DockJob::Fitting(Card::SecondaryTurrets);
         assert!(run.section_jobs(bridge).contains(&turrets));
         assert!(!turrets.fits(&run));
-        assert_eq!(run.refusal(turrets), Some(Refusal::Beam(ShipBeam::Capital)));
+        assert_eq!(
+            run.refusal(turrets),
+            Some(Refusal::Beam(ShipBeam::Battleship))
+        );
         lengthen(&mut run);
         lengthen(&mut run);
         assert!(run.refit_in_dock(DockJob::WidenBeam));
-        assert_eq!(run.refusal(turrets), Some(Refusal::Beam(ShipBeam::Capital)));
+        assert_eq!(
+            run.refusal(turrets),
+            Some(Refusal::Beam(ShipBeam::Battleship))
+        );
         assert!(run.refit_in_dock(DockJob::WidenBeam));
         assert_eq!(run.refusal(turrets), None);
         let before = run.fittings.secondaries();
         assert!(run.refit_in_dock(turrets));
         let after = run.fittings.secondaries();
-        assert!(after.turrets && !before.turrets);
+        assert_eq!((before.gunhouse, after.gunhouse), (None, Some(4)));
         // A four-inch round hits harder and carries farther, and loads more slowly.
         assert!(after.damage > before.damage && after.range > before.range);
         assert!(after.reload > before.reload);
         assert_eq!(after.per_side, before.per_side);
+        // Six-inch gunhouses wait for a heavy battleship's deck, which wants 50 m.
         assert!(!turrets.fits(&run));
+        assert_eq!(
+            run.refusal(turrets),
+            Some(Refusal::Beam(ShipBeam::HeavyBattleship))
+        );
+        for _ in 0..2 {
+            assert!(run.refit_in_dock(DockJob::Insert {
+                at: run.default_gap(),
+                module: DockModule::Floatplane,
+            }));
+        }
+        assert!(run.refit_in_dock(DockJob::WidenBeam));
+        assert_eq!(run.refusal(turrets), None);
+        assert!(run.refit_in_dock(turrets));
+        let six = run.fittings.secondaries();
+        assert_eq!((six.gunhouse, six.bore()), (Some(6), 6.));
+        assert!(six.damage > after.damage && six.range > after.range);
+        assert!(six.reload > after.reload);
+        // Twin mounts go in gunhouses of either size.
+        let twin = DockJob::Fitting(Card::TwinSecondaries);
+        assert!(run.refit_in_dock(twin));
+        assert_eq!(run.fittings.secondaries().barrels, 2);
+        // Six inches is the biggest the yard makes them.
+        assert!(!turrets.fits(&run));
+        assert_eq!(run.refusal(turrets), None);
+    }
+
+    #[test]
+    fn a_heavy_battleship_carries_eight_turrets_and_heavier_cradles() {
+        use ShipBeam::*;
+        assert_eq!(
+            ShipBeam::ALL.map(ShipBeam::most_turrets),
+            [4, 4, 6, MOST_GUN_STATIONS]
+        );
+        assert_eq!(MOST_GUN_STATIONS, 8);
+        // Three eighteen-inch barrels a turret, where a battleship carries two, and
+        // twelve-inch guns in her wing galleries.
+        assert_eq!(cradle(Battleship, false, TurretLayout::Triple), 15);
+        assert_eq!(cradle(HeavyBattleship, false, TurretLayout::Triple), 18);
+        assert_eq!(cradle(HeavyBattleship, false, TurretLayout::Quad), 15);
+        assert_eq!(cradle(HeavyBattleship, true, TurretLayout::Twin), 12);
+        // Every class carries at least what the class below it does.
+        for pair in ShipBeam::ALL.windows(2) {
+            for paired in [false, true] {
+                for barrels in TurretLayout::ALL {
+                    assert!(cradle(pair[1], paired, barrels) >= cradle(pair[0], paired, barrels));
+                }
+            }
+            assert!(pair[1].metres() > pair[0].metres());
+            assert!(pair[1].min_length() / pair[1].metres() >= 4.2);
+            assert!(pair[1].most_armor() >= pair[0].most_armor());
+        }
+        // She plates no thicker than a battleship, so once that is on, armor is done.
+        let mut run = docked(0);
+        run.fittings.beam = Battleship;
+        run.fittings.armor = Battleship.most_armor();
+        assert_eq!(run.refusal(DockJob::Fitting(Card::Armor)), None);
+        assert!(!DockJob::Fitting(Card::Armor).fits(&run));
     }
 
     #[test]

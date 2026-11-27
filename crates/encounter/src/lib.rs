@@ -262,16 +262,46 @@ const COMBATANT_LIMIT: usize = 16;
 /// close order on the heaviest and in line of battle once they have her in reach (see
 /// `formation`).
 const GARRISON: [EnemyClass; 1] = [EnemyClass::Patrol];
-/// Metres off at the least that the Regent lies when she enters Crown Deep: past the
-/// reach of her fleet's guns and her own, and inside her lookout's sight.
+/// Metres off at the least that the Regent's screen lies when the ship enters Crown
+/// Deep: past the reach of its guns, and inside its lookouts' sight.
 const REGENT_RANGE: f32 = 800.;
-/// The Regent's battle fleet at Crown Deep, which forms its line on her.
+/// The Regent's screen at Crown Deep, which meets the ship first while the Regent and her
+/// battleships hold back over the horizon. It forms its line on its leading cruiser.
 #[rustfmt::skip]
-const REGENT_FLEET: [EnemyClass; 12] = {
+const REGENT_SCREEN: [EnemyClass; 9] = {
     use EnemyClass::*;
-    [Battleship, Battleship, Battleship, Cruiser, Cruiser, Cruiser, Cruiser,
-     Destroyer, Destroyer, Destroyer, Destroyer, Destroyer]
+    [Cruiser, Cruiser, Cruiser, Cruiser, Destroyer, Destroyer, Destroyer, Destroyer, Destroyer]
 };
+/// The battle line that comes up the deep with the Regent and forms on her.
+const REGENT_LINE: [EnemyClass; 3] = [EnemyClass::Battleship; 3];
+/// Ships of her screen still afloat when the Regent comes up: two in three of it sunk.
+const REGENT_SCREEN_LEFT: usize = 3;
+/// Seconds into Crown Deep after which she comes up whatever is left of her screen.
+const REGENT_PATIENCE: f32 = 240.;
+/// Metres off the ship at which the Regent comes over the horizon, as far up the deep as
+/// she finds room for her line: past the reach of every gun on either side, and well
+/// into the haze.
+const REGENT_SIGHTING: (f32, f32) = (1400., 2400.);
+/// Hull points a second, with every round landing, of the main battery the Regent was
+/// built to meet. A heavier battery finds her built up against it, though not quite in
+/// step, so a ship that brings more guns still finishes her sooner (see
+/// [`regent_hardening`]).
+pub const REGENT_MATCH: f32 = 2.5;
+/// The most main battery rounds a second a ship is reckoned to put out, however quick her
+/// loaders: past it her barrels wait to bear, and a held trigger walks them one at a time,
+/// the smallest gun that can hurt her first.
+pub const MOST_ROUNDS_A_SECOND: f32 = 20.;
+/// How closely her build follows the weight of fire she meets: 1 would make every fight
+/// with her as long as the one against [`REGENT_MATCH`].
+const REGENT_MATCH_EXPONENT: f32 = 0.85;
+
+/// How many times as stout as designed the Regent comes up the deep, against a main
+/// battery of `weight_of_fire` hull points a second: never less than designed.
+pub fn regent_hardening(weight_of_fire: f32) -> f32 {
+    (weight_of_fire / REGENT_MATCH)
+        .max(1.)
+        .powf(REGENT_MATCH_EXPONENT)
+}
 /// Seconds a base stays at alert after the base before it up the channel collapses: its
 /// lookout and radio keep its squadron, its batteries and its torpedo boats on her.
 pub const SCRAMBLE_ALERT: f32 = 60.;
@@ -366,6 +396,18 @@ pub enum Sortie {
     Due(f32),
     /// She put to sea from this port this many seconds into the sector.
     Sailed { port: usize, at: f32 },
+    /// The Regent and her battle line, holding back over the horizon at Crown Deep while
+    /// her screen comes on. She comes up once most of it is sunk.
+    Holding,
+    /// The Regent came over the horizon this many seconds into the sector.
+    Sighted { at: f32 },
+}
+
+/// The Regent waiting over the horizon at Crown Deep.
+#[derive(Clone, Debug)]
+struct Holding {
+    /// The screen she sent on ahead, by id.
+    screen: Vec<u64>,
 }
 /// Seconds between barrels while the trigger is held, for guns that load slower than
 /// this per barrel. `ripple` closes it up for guns that load faster.
@@ -504,6 +546,8 @@ pub struct Battle {
     flagship: Option<Sortie>,
     /// The class that sails as this sector's boss.
     boss: EnemyClass,
+    /// The Regent holding back at Crown Deep until her screen is broken.
+    regent: Option<Holding>,
     /// The current, and the ice it carries.
     floe: iceberg::Floe,
     /// Each base's torpedo boats: where they moor and when it sends them out. Empty in
@@ -658,6 +702,7 @@ impl Battle {
             next_dock: 0,
             flagship: None,
             boss: EnemyClass::Parliament,
+            regent: None,
             floe: iceberg::Floe::slack(),
             flotillas: Vec::new(),
             warplanes: Vec::new(),
@@ -783,55 +828,159 @@ impl Battle {
     fn flagship_due(&self) -> f32 {
         (FLAGSHIP_SORTIE - self.escalation).max(FLAGSHIP_EARLIEST)
     }
-    /// The Regent is already at sea with her battle fleet, bearing down on her from
-    /// beyond the reach of its guns but in sight of her, so she sees its line form before
-    /// the first salvo. Find water wide enough for every hull of it, even on a chart
-    /// whose first gate points straight at a headland.
+    /// Crown Deep. The Regent's screen of cruisers and destroyers is at sea, bearing down
+    /// on her from beyond the reach of its guns but in sight of her, so she sees its line
+    /// form before the first salvo. The Regent and her battleships hold back over the
+    /// horizon until it is broken (see [`Sortie::Holding`]).
     pub fn regent_encounter(wave_interval: f32, chart: &Chart) -> Self {
         let mut battle = Self::chart_sector(wave_interval, chart);
         let approach = chart.gates[0].normalize_or(Vec2::NEG_Y);
-        let class = EnemyClass::Regent;
-        let hull = class.profile().hull;
-        // Her battle fleet lies in close order on her, to form its line on her.
-        let hulls: Vec<Hull> = std::iter::once(class)
-            .chain(REGENT_FLEET)
-            .map(|c| c.profile().hull)
-            .collect();
-        let screen: Vec<(EnemyClass, (f32, f32))> =
-            REGENT_FLEET.into_iter().zip(close_order(&hulls)).collect();
-        let place = |at: Vec2, axis: Vec2, (ahead, starboard): (f32, f32)| {
-            let forward = -axis;
-            at + forward * ahead + forward.perp() * starboard
+        let (at, axis) =
+            battle.fleet_station(&REGENT_SCREEN, Vec2::ZERO, &[], approach, REGENT_RANGE);
+        let screen = battle.put_fleet_to_sea(&REGENT_SCREEN, at, axis);
+        // Her scouts have reported the ship coming in: the screen comes on to meet her.
+        for ship in battle
+            .raiders
+            .iter_mut()
+            .filter(|r| screen.contains(&r.body.id))
+        {
+            ship.last_sighting = Some(Vec2::ZERO);
+        }
+        battle.boss = EnemyClass::Regent;
+        battle.flagship = Some(Sortie::Holding);
+        battle.regent = Some(Holding { screen });
+        battle.with_heavy_battery(chart).with_sea(chart)
+    }
+    /// Where a fleet of `classes` in close order on the first of them lies off `centre`,
+    /// facing it, and the way from `centre` out to it: the first of `preferred` with
+    /// clear water for every hull of it, or else the nearest clear water `range` metres
+    /// or more off along one of twelve bearings, those nearest `ahead` first. Every ship
+    /// of it lies at least [`SPAWN_STANDOFF`] off `centre`. Found even on a chart whose
+    /// first gate points straight at a headland.
+    fn fleet_station(
+        &self,
+        classes: &[EnemyClass],
+        centre: Vec2,
+        preferred: &[Vec2],
+        ahead: Vec2,
+        mut range: f32,
+    ) -> (Vec2, Vec2) {
+        let offsets = fleet_offsets(classes);
+        let fits = |at: Vec2, axis: Vec2| {
+            classes.iter().zip(&offsets).all(|(class, &offset)| {
+                let spot = close_order_spot(at, axis, offset);
+                let room = class.profile().hull.bow;
+                spot.distance(centre) >= SPAWN_STANDOFF
+                    && self.navigable_position(spot, room).distance_squared(spot) < 0.01
+            })
         };
-        let mut range = REGENT_RANGE;
-        let station = 'search: loop {
+        for &at in preferred {
+            let axis = (at - centre).normalize_or(ahead);
+            if fits(at, axis) {
+                return (at, axis);
+            }
+        }
+        loop {
             for sector in [0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6] {
                 let axis =
-                    Vec2::from_angle(sector as f32 * std::f32::consts::TAU / 12.).rotate(approach);
-                let at = axis * range;
-                let clear =
-                    |pos, room| battle.navigable_position(pos, room).distance_squared(pos) < 0.01;
-                if clear(at, hull.bow)
-                    && screen.iter().all(|&(escort, offset)| {
-                        let spot = place(at, axis, offset);
-                        spot.length() >= SPAWN_STANDOFF && clear(spot, escort.profile().hull.bow)
-                    })
-                {
-                    break 'search at;
+                    Vec2::from_angle(sector as f32 * std::f32::consts::TAU / 12.).rotate(ahead);
+                let at = centre + axis * range;
+                if fits(at, axis) {
+                    return (at, axis);
                 }
             }
-            range += hull.bow;
-        };
-        let axis = station.normalize();
-        battle.spawn(class, station, station - axis);
-        let mut fleet = vec![battle.serial];
-        for (escort, offset) in screen {
-            let at = place(station, axis, offset);
-            battle.spawn(escort, at, at - axis);
-            fleet.push(battle.serial);
+            range += classes[0].profile().hull.bow;
         }
-        battle.form_squadron(fleet);
-        battle.with_heavy_battery(chart).with_sea(chart)
+    }
+    /// A fleet of `classes` put to sea in close order on the first of them at `at`,
+    /// facing back along `axis`, and formed into one squadron. Their ids, the guide's
+    /// first.
+    fn put_fleet_to_sea(&mut self, classes: &[EnemyClass], at: Vec2, axis: Vec2) -> Vec<u64> {
+        let mut fleet = Vec::new();
+        for (&class, offset) in classes.iter().zip(fleet_offsets(classes)) {
+            let spot = close_order_spot(at, axis, offset);
+            self.spawn(class, spot, spot - axis);
+            fleet.push(self.serial);
+        }
+        self.form_squadron(fleet.clone());
+        fleet
+    }
+    /// At Crown Deep the Regent holds back over the horizon until all but
+    /// [`REGENT_SCREEN_LEFT`] of her screen are sunk, or she has waited
+    /// [`REGENT_PATIENCE`]. Then she comes up the deep with her battle line, beyond the
+    /// reach of every gun, built up against the weight of fire the ship carries.
+    fn bring_up_regent(&mut self, orders: &Orders) {
+        let Some(holding) = &self.regent else {
+            return;
+        };
+        let afloat = |id: &u64| self.raiders.iter().any(|r| r.body.id == *id && r.afloat());
+        let left = holding.screen.iter().filter(|id| afloat(id)).count();
+        if left > REGENT_SCREEN_LEFT && self.at_sea < REGENT_PATIENCE {
+            return;
+        }
+        let player = orders.player;
+        let classes: Vec<EnemyClass> = std::iter::once(EnemyClass::Regent)
+            .chain(REGENT_LINE)
+            .collect();
+        let (nearest, farthest) = REGENT_SIGHTING;
+        // As far up the deep as she has room, inside her sighting range.
+        let mut preferred = Vec::new();
+        let length: f32 = self.fairway.windows(2).map(|w| w[0].distance(w[1])).sum();
+        let here = fairway_run(&self.fairway, player);
+        let mut run = length;
+        while run > here {
+            let at = fairway_point(&self.fairway, run);
+            if (nearest..=farthest).contains(&at.distance(player)) {
+                preferred.push(at);
+            }
+            run -= 40.;
+        }
+        let ahead = match self.fairway.last() {
+            Some(&head) if self.fairway.len() >= 2 => head - player,
+            _ => self.patrol_center - player,
+        }
+        .normalize_or(Vec2::NEG_Y);
+        let (at, axis) = self.fleet_station(&classes, player, &preferred, ahead, nearest);
+        let factor = regent_hardening(self.weight_of_fire(orders));
+        let fleet = self.put_fleet_to_sea(&classes, at, axis);
+        for ship in self
+            .raiders
+            .iter_mut()
+            .filter(|r| fleet.contains(&r.body.id))
+        {
+            // Her screen has reported the ship: she comes on knowing where to find her.
+            ship.last_sighting = Some(player);
+            if ship.class == EnemyClass::Regent {
+                ship.harden(factor);
+            }
+        }
+        self.flagship = Some(Sortie::Sighted { at: self.at_sea });
+        self.regent = None;
+    }
+    /// While the Regent holds back at Crown Deep, how many more of her screen must be
+    /// sunk before she comes up.
+    pub fn regent_screen(&self) -> Option<usize> {
+        let holding = self.regent.as_ref()?;
+        let afloat = (holding.screen.iter())
+            .filter(|&&id| self.raiders.iter().any(|r| r.body.id == id && r.afloat()))
+            .count();
+        Some(afloat.saturating_sub(REGENT_SCREEN_LEFT))
+    }
+    /// How many times as stout as her class was designed `ship` came into the fight: more
+    /// than one for a Regent built up against the battery she met.
+    pub fn built_up(ship: &Raider) -> f32 {
+        ship.vessel().design().structure() / ship.class.design().structure()
+    }
+    /// Hull points a second her main battery would put into a ship with every round
+    /// landing: each barrel's breach force over its reload, every barrel aboard, but no
+    /// more than [`MOST_ROUNDS_A_SECOND`] rounds a second between them.
+    pub fn weight_of_fire(&self, orders: &Orders) -> f32 {
+        let (rounds, weight) = (self.main_mounts.iter()).fold((0., 0.), |(rounds, weight), m| {
+            let rate = m.layout().count() as f32 / m.reload(orders);
+            let force = f32::from(m.round(orders.shell).breach_force());
+            (rounds + rate, weight + rate * force)
+        });
+        weight * (MOST_ROUNDS_A_SECOND / rounds).min(1.)
     }
 
     /// Warships under way. A garrison at anchor off a sleeping base is not yet one.
@@ -1431,6 +1580,7 @@ impl Battle {
             self.reinforce(orders.player);
         }
         self.sortie(orders.player);
+        self.bring_up_regent(orders);
         self.send_convoys(dt, orders.player);
         self.ply_coasters(dt, orders.player);
         self.update_lookouts(dt, orders.player);
@@ -1663,6 +1813,7 @@ impl Battle {
                         continue;
                     };
                     path.offset_muzzle((barrel as f32 - (barrels - 1) as f32 * 0.5) * 0.36);
+                    path.rebore(self.secondaries.bore());
                     path.launch(
                         &mut self.shots,
                         &mut self.effects,
@@ -1787,6 +1938,18 @@ fn fairway_run(fairway: &[Vec2], p: Vec2) -> f32 {
     best.0
 }
 
+/// Each ship's place in close order in a fleet of `classes` in line order, the guide's
+/// first at her own station: metres ahead of the guide and to her starboard.
+fn fleet_offsets(classes: &[EnemyClass]) -> Vec<(f32, f32)> {
+    let hulls: Vec<Hull> = classes.iter().map(|c| c.profile().hull).collect();
+    std::iter::once((0., 0.)).chain(close_order(&hulls)).collect()
+}
+/// Where a ship `(ahead, starboard)` of a guide at `at` lies, the guide facing back
+/// along `axis`.
+fn close_order_spot(at: Vec2, axis: Vec2, (ahead, starboard): (f32, f32)) -> Vec2 {
+    let forward = -axis;
+    at + forward * ahead + forward.perp() * starboard
+}
 /// The point `run` metres along a fairway, held to its ends.
 fn fairway_point(fairway: &[Vec2], mut run: f32) -> Vec2 {
     for pair in fairway.windows(2) {

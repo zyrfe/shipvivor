@@ -161,7 +161,8 @@ pub struct WingBarrel {
     barrels: usize,
     turret: bool,
 }
-/// The shielded mount of a wing gun, or the four-inch gunhouse it is rebuilt as.
+/// The shielded mount of a wing gun, or the gunhouse it is rebuilt as, which is drawn
+/// to the size of its bore.
 #[derive(Component)]
 pub struct WingHouse {
     turret: bool,
@@ -172,6 +173,15 @@ pub struct WingHouse {
 /// deck edge: a little more than its ring's radius.
 const WING_TURRET_SCALE: f32 = 0.75;
 const WING_HOUSE_CLEARANCE: f32 = 0.72;
+/// The size a wing gun's gunhouse of this bore, in inches, is drawn at: half a six-inch
+/// main turret's at four inches, and three quarters of it at six.
+fn wing_house_scale(bore: u16) -> f32 {
+    let round = shipvivor_encounter::MainShell {
+        bore: bore.saturating_sub(4),
+        ..shipvivor_encounter::MainShell::STOCK
+    };
+    round.mount_scale() * WING_TURRET_SCALE
+}
 
 /// The rangefinder tower raised on the bridge roof: a tier for each rangefinder
 /// fitted, and the spotting top that rides on the highest.
@@ -285,7 +295,10 @@ pub fn place_wing_guns(
     battle: Res<Encounter>,
     mut guns: Query<(&WingPosition, &mut Transform, &mut Visibility)>,
     mut barrels: Query<(&WingBarrel, &mut Visibility), (Without<WingPosition>, Without<WingHouse>)>,
-    mut houses: Query<(&WingHouse, &mut Visibility), (Without<WingPosition>, Without<WingBarrel>)>,
+    mut houses: Query<
+        (&WingHouse, &mut Transform, &mut Visibility),
+        (Without<WingPosition>, Without<WingBarrel>),
+    >,
 ) {
     let yard = matches!(run.screen(), crate::state::Screen::Drydock(_));
     let secondaries = run.display_fittings().secondaries();
@@ -296,18 +309,26 @@ pub fn place_wing_guns(
     } else {
         battle.secondaries()
     };
-    for (house, mut shown) in &mut houses {
-        shown.set_if_neq(if house.turret == fitted.turrets {
+    let gunhouses = fitted.gunhouse.is_some();
+    for (house, mut pose, mut shown) in &mut houses {
+        shown.set_if_neq(if house.turret == gunhouses {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         });
+        // A six-inch gunhouse is the four-inch one drawn half as big again.
+        if let Some(bore) = fitted.gunhouse.filter(|_| house.turret) {
+            let scale = Vec3::splat(wing_house_scale(bore));
+            if pose.scale != scale {
+                pose.scale = scale;
+            }
+        }
     }
     // A gunhouse is broader than a shielded mount, so where the hull narrows it is drawn
     // inboard of the gun's station, far enough to stand on her deck.
     let beam = design.beam_factor();
     let inset = |fore: f32, x: f32| {
-        if fitted.turrets {
+        if gunhouses {
             let edge = (design.deck_edge(fore) - WING_HOUSE_CLEARANCE) * beam;
             x.signum() * x.abs().min(edge)
         } else {
@@ -347,7 +368,7 @@ pub fn place_wing_guns(
     }
     for (barrel, mut shown) in &mut barrels {
         shown.set_if_neq(
-            if barrel.barrels == fitted.barrels && barrel.turret == fitted.turrets {
+            if barrel.barrels == fitted.barrels && barrel.turret == gunhouses {
                 Visibility::Inherited
             } else {
                 Visibility::Hidden
@@ -1093,9 +1114,10 @@ pub fn setup(
                 ChildOf(wing),
             ));
         }
-        // Rebuilt as a four-inch gunhouse, the main battery's first turret drawn a size
-        // smaller to fit the deck edge, its ring let into the deck.
-        let scale = shipvivor_encounter::MainShell::STOCK.mount_scale() * WING_TURRET_SCALE;
+        // Rebuilt as a gunhouse, the main battery's first turret drawn a size smaller to
+        // fit the deck edge, its ring let into the deck. It is built four-inch, and
+        // `place_wing_guns` draws it to the bore fitted.
+        let scale = wing_house_scale(4);
         let gunhouse = commands
             .spawn((
                 WingHouse { turret: true },

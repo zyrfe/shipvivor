@@ -939,6 +939,19 @@ impl RunLog {
                 format!("the {boss} sailed from base {}", port + 1),
             );
         }
+        if let Some(Sortie::Sighted { .. }) = flagship
+            && flagship != self.waters.flagship
+            && let Some(ship) = battle.boss_ship()
+        {
+            let place = whereabouts(helm, ship.body.pos);
+            let built = shipvivor_encounter::Battle::built_up(ship);
+            self.write(
+                "flagship",
+                format!(
+                    "the {boss} came over the horizon {place}, built {built:.1} times as stout against her battery"
+                ),
+            );
+        }
         for r in battle.raiders() {
             let was = self.waters.helmless.contains(&r.body.id);
             let lost = r.helm_lost();

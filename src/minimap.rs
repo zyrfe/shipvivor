@@ -365,7 +365,7 @@ impl Chart<'_> {
         };
         let p = self.keep_on_chart(self.project(ship.body.pos), 9);
         let fresh = match battle.flagship() {
-            Some(Sortie::Sailed { at, .. }) => {
+            Some(Sortie::Sailed { at, .. } | Sortie::Sighted { at }) => {
                 Some(battle.at_sea() - at).filter(|&age| age < crate::flagship_hud::HERALD_SECONDS)
             }
             _ => None,

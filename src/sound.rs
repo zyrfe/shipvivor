@@ -727,9 +727,9 @@ pub fn report(
         });
         *before = now;
     }
-    // A boss sounds her horn as she puts out, or as the leg opens if she is at sea
-    // already, as the Regent is. The horn goes with her, and a longer ship's is
-    // deeper. Sunk, her last blast is left to cross the water from where she was.
+    // A boss sounds her horn as she puts out, or as she comes over the horizon, as the
+    // Regent does once her screen is broken. The horn goes with her, and a longer
+    // ship's is deeper. Sunk, her last blast is left to cross the water from where she was.
     if let Some(ship) = battle.raiders().iter().find(|r| r.class.is_boss()) {
         let hull = ship.class.profile().hull;
         let blow = around.boss != Some(ship.body.id);

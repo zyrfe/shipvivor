@@ -211,7 +211,7 @@ pub(super) fn details(
     match job {
         DockJob::WidenBeam => {
             let Some(next) = run.beam_class().next() else {
-                note(cmd, spec, art, "Widest beam fitted");
+                note(cmd, spec, art, "Heaviest hull built");
                 return;
             };
             if let Some(why) = run.widen_refusal() {
@@ -280,7 +280,7 @@ pub(super) fn details(
                 };
                 let beam = ShipBeam::ALL.into_iter().find(|&b| at_beam(b, barrels));
                 let why = match (beam, station.paired()) {
-                    (Some(b), _) => format!("Needs {} beam, {:.1} m", b.name(), b.metres()),
+                    (Some(b), _) => format!("Needs {} hull", b.name().to_lowercase()),
                     _ if ShipBeam::ALL
                         .into_iter()
                         .any(|b| at_beam(b, TurretLayout::Single)) =>
@@ -569,14 +569,14 @@ pub(super) fn refusal(cmd: &mut Commands, spec: Entity, art: &Insignia, why: Ref
         Refusal::Full(most) => (None, format!("{most} at most")),
         Refusal::Beam(beam) => (
             Some(art.beam.clone()),
-            format!("Needs {:.1} m", beam.metres()),
+            format!("Needs {} hull", beam.name().to_lowercase()),
         ),
         Refusal::Length(metres) => (Some(art.length.clone()), format!("Needs {metres} m")),
         Refusal::Longest => (
             Some(art.length.clone()),
             format!("{:.0} m at most", shipvivor_campaign::MAX_LENGTH),
         ),
-        Refusal::Widest => (None, "Widest beam fitted".to_string()),
+        Refusal::Widest => (None, "Heaviest hull built".to_string()),
         Refusal::Section(module) => (
             Some(super::catalog::stock_art(module, art)),
             "Needs another".to_string(),

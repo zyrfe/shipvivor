@@ -11,86 +11,125 @@ fn shells_for(inches: u16) -> u16 {
     CALIBRES.iter().rposition(|&c| c <= inches).unwrap_or(0) as u16
 }
 
-/// The biggest bore a turret with these barrels can carry on this beam, in a wing
-/// gallery or on the centreline. Zero is a cradle too heavy for the beam even at four
+/// The biggest bore a turret with these barrels can carry on this hull, in a wing
+/// gallery or on the centreline. Zero is a cradle too heavy for the hull even at four
 /// inches. A single gun carries no more than a twin.
 pub fn cradle(beam: ShipBeam, paired: bool, barrels: TurretLayout) -> u16 {
     let limits = match (beam, paired) {
         (ShipBeam::Escort, false) => [6, 6, 4, 4],
         (ShipBeam::Escort, true) => [4, 4, 0, 0],
-        (ShipBeam::Cruiser, false) => [12, 12, 8, 6],
-        (ShipBeam::Cruiser, true) => [6, 6, 4, 4],
-        (ShipBeam::Capital, false) => [18, 18, 15, 12],
-        (ShipBeam::Capital, true) => [8, 8, 8, 6],
+        (ShipBeam::HeavyCruiser, false) => [12, 12, 8, 6],
+        (ShipBeam::HeavyCruiser, true) => [6, 6, 4, 4],
+        (ShipBeam::Battleship, false) => [18, 18, 15, 12],
+        (ShipBeam::Battleship, true) => [8, 8, 8, 6],
+        (ShipBeam::HeavyBattleship, false) => [18, 18, 18, 15],
+        (ShipBeam::HeavyBattleship, true) => [12, 12, 8, 8],
     };
     limits[barrels.count() - 1]
 }
 
-/// Classes of beam, narrowest first.
+/// The classes of hull the yard builds, narrowest first. She is built an escort, and the
+/// yard rebuilds her a class at a time: each is broader in the beam than the last, and
+/// carries heavier guns, thicker plate and more of everything.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ShipBeam {
     #[default]
     Escort,
-    Cruiser,
-    Capital,
+    HeavyCruiser,
+    Battleship,
+    HeavyBattleship,
 }
 
 impl ShipBeam {
-    pub const ALL: [Self; 3] = [Self::Escort, Self::Cruiser, Self::Capital];
+    pub const ALL: [Self; 4] = [
+        Self::Escort,
+        Self::HeavyCruiser,
+        Self::Battleship,
+        Self::HeavyBattleship,
+    ];
+    /// The broadest hull the yard builds.
+    pub const BROADEST: Self = Self::HeavyBattleship;
     pub fn metres(self) -> f32 {
         match self {
             Self::Escort => 5.5,
-            Self::Cruiser => 7.5,
-            Self::Capital => 9.5,
+            Self::HeavyCruiser => 7.5,
+            Self::Battleship => 9.5,
+            Self::HeavyBattleship => 11.5,
         }
     }
-    /// The shortest hull that may carry this beam. Each keeps her at least 4.2 beams
-    /// long, so her bow stays fine enough to part the water at speed.
+    /// The shortest hull that may be rebuilt to this class. Each keeps her at least 4.2
+    /// beams long, so her bow stays fine enough to part the water at speed.
     pub fn min_length(self) -> f32 {
         match self {
             Self::Escort => 0.,
-            Self::Cruiser => 35.,
-            Self::Capital => 40.,
+            Self::HeavyCruiser => 35.,
+            Self::Battleship => 40.,
+            Self::HeavyBattleship => 50.,
         }
     }
-    /// The most modules, bow and stern included, a hull this broad may run to. She
-    /// is widened before she is lengthened further, so she never grows long and thin.
+    /// The most modules, bow and stern included, a hull of this class may run to. She
+    /// is rebuilt broader before she is lengthened further, so she never grows long and
+    /// thin. A battleship already fills the basin, so a heavy battleship is no longer.
     pub const fn most_modules(self) -> usize {
         match self {
             Self::Escort => 8,
-            Self::Cruiser => 11,
-            Self::Capital => 14,
+            Self::HeavyCruiser => 11,
+            Self::Battleship | Self::HeavyBattleship => 14,
         }
     }
-    /// The most main turrets a hull this broad carries. A capital beam has room for
-    /// double turrets abreast, and the stability for two more turrets in all.
+    /// The most main turrets a hull of this class carries. A battleship has room for
+    /// double turrets abreast and the stability for two more turrets in all, and a heavy
+    /// battleship for two more again.
     pub const fn most_turrets(self) -> usize {
         match self {
-            Self::Escort | Self::Cruiser => crate::MAX_GUN_STATIONS,
-            Self::Capital => 6,
+            Self::Escort | Self::HeavyCruiser => crate::MAX_GUN_STATIONS,
+            Self::Battleship => 6,
+            Self::HeavyBattleship => 8,
         }
     }
-    /// The most ranks of armor plate a hull this broad can carry. Each step of beam
-    /// gives her the stability for four more ranks of heavier side plate.
+    /// The most ranks of armor plate a hull of this class can carry. Each step up to a
+    /// battleship gives her the stability for four more ranks of heavier side plate. A
+    /// heavy battleship carries a battleship's plate: nothing may turn the Regent's guns.
     pub const fn most_armor(self) -> u16 {
         match self {
             Self::Escort => 4,
-            Self::Cruiser => 8,
-            Self::Capital => 12,
+            Self::HeavyCruiser => 8,
+            Self::Battleship | Self::HeavyBattleship => 12,
         }
     }
+    /// The biggest bore the secondaries' gunhouses come in on a hull of this class, in
+    /// inches, or `None` on one too narrow to carry gunhouses along her deck edge.
+    pub const fn secondary_bore(self) -> Option<u16> {
+        match self {
+            Self::Escort | Self::HeavyCruiser => None,
+            Self::Battleship => Some(4),
+            Self::HeavyBattleship => Some(6),
+        }
+    }
+    /// The class as the yard names her hull.
     pub fn name(self) -> &'static str {
         match self {
             Self::Escort => "Escort",
-            Self::Cruiser => "Cruiser",
-            Self::Capital => "Capital",
+            Self::HeavyCruiser => "Heavy cruiser",
+            Self::Battleship => "Battleship",
+            Self::HeavyBattleship => "Heavy battleship",
+        }
+    }
+    /// The class in a word or two, for a tile's caption.
+    pub fn short_name(self) -> &'static str {
+        match self {
+            Self::Escort => "Escort",
+            Self::HeavyCruiser => "Hvy cruiser",
+            Self::Battleship => "Battleship",
+            Self::HeavyBattleship => "Hvy b'ship",
         }
     }
     pub fn next(self) -> Option<Self> {
         match self {
-            Self::Escort => Some(Self::Cruiser),
-            Self::Cruiser => Some(Self::Capital),
-            Self::Capital => None,
+            Self::Escort => Some(Self::HeavyCruiser),
+            Self::HeavyCruiser => Some(Self::Battleship),
+            Self::Battleship => Some(Self::HeavyBattleship),
+            Self::HeavyBattleship => None,
         }
     }
 }

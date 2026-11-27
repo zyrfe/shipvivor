@@ -36,18 +36,22 @@ pub enum Station {
     Fourth,
     Fifth,
     Sixth,
+    Seventh,
+    Eighth,
 }
 impl Station {
     /// The two stations on a stock Breakwater.
     pub const ALL: [Self; 2] = [Self::Bow, Self::Stern];
-    /// Every main turret a hull can carry, as many as a capital beam takes.
-    pub const SLOTS: [Self; 6] = [
+    /// Every main turret a hull can carry, as many as a heavy battleship takes.
+    pub const SLOTS: [Self; 8] = [
         Self::Bow,
         Self::Stern,
         Self::Third,
         Self::Fourth,
         Self::Fifth,
         Self::Sixth,
+        Self::Seventh,
+        Self::Eighth,
     ];
     pub fn index(self) -> usize {
         self as usize
@@ -440,8 +444,8 @@ impl DeckOffsets {
 }
 
 /// Metres round a shielded secondary that its neighbours' fire keeps clear of, and round
-/// one rebuilt as a gunhouse, which is broader.
-const WING_BERTH: (f32, f32) = (1.5, 1.75);
+/// one rebuilt as a four-inch gunhouse and as a six-inch one, each broader than the last.
+const WING_BERTH: (f32, f32, f32) = (1.5, 1.75, 1.9);
 /// Metres round a main turret that the secondaries' fire keeps clear of, for a six-inch
 /// gunhouse: its ring and a little over.
 const TURRET_BERTH: f32 = 1.5;
@@ -460,10 +464,10 @@ pub(super) fn wing_berths(
     fit: Secondaries,
     turrets: &[MainMount],
 ) -> Vec<WingStation> {
-    let berth = if fit.turrets {
-        WING_BERTH.1
-    } else {
-        WING_BERTH.0
+    let berth = match fit.gunhouse {
+        None => WING_BERTH.0,
+        Some(..=4) => WING_BERTH.1,
+        Some(_) => WING_BERTH.2,
     };
     let standing: Vec<Obstruction> = turrets.iter().map(MainMount::standing).collect();
     shipvivor_shipyard::clear_arcs(&stations[..count.min(stations.len())], berth, &standing)

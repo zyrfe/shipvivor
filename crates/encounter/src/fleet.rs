@@ -729,6 +729,17 @@ impl Raider {
             order: None,
         }
     }
+    /// Built `factor` times as stout before a round has touched her: every module's
+    /// structure, and with it every gun, fitting and engine on it, and every strake on
+    /// her side. A factor of one or less leaves her as designed.
+    pub(super) fn harden(&mut self, factor: f32) {
+        if factor > 1. {
+            let mut design = (**self.ship.design()).clone();
+            design.toughness *= factor;
+            self.ship = shipvivor_shipyard::Ship::new(design);
+            self.plate.harden(factor);
+        }
+    }
     /// Metres a second of way she has on through the water.
     pub(super) fn way_on(&self) -> f32 {
         self.helm.speed

@@ -219,18 +219,24 @@ fn passage(run: &Run, lanes: Lanes) -> Option<Exit> {
 }
 
 /// Spend her points at the yard as a fair player does: the next step of bore, another
-/// turret, a wider beam to carry more, more barrels, then plate and the gunnery cards,
-/// and the strike craft once the guns are seen to. She buys the most wanted job she can
-/// pay for, again and again, until nothing she wants is left in her purse.
+/// turret, a heavier class of hull to carry more, more barrels, then plate and the
+/// gunnery cards, and the strike craft once the guns are seen to. She buys the most
+/// wanted job she can pay for, again and again, until nothing she wants is left in her
+/// purse. A new hull costs more than most legs pay, so once she is long enough for one
+/// she banks what does not go on guns towards it, rather than spend it on lesser work.
 pub fn refit(run: &mut Run) -> Refit {
     let before = run.points();
     let mut plan = Plan::draw(run);
     let mut jobs = Vec::new();
+    let hull = DockJob::WidenBeam;
     // Every purchase costs a point or more, so this bound is never the one that stops her.
     for _ in 0..64 {
+        let saving = hull.fits(run) && run.points() < hull.cost();
+        let least = want(run, hull).filter(|_| saving).unwrap_or(0);
         let mut wants: Vec<(u32, DockJob)> = offered(run)
             .into_iter()
             .filter_map(|job| want(run, job).map(|w| (w, job)))
+            .filter(|&(w, _)| w >= least)
             .collect();
         wants.sort_by_key(|&(w, _)| std::cmp::Reverse(w));
         let Some(job) = wants

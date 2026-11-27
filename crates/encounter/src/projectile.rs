@@ -282,6 +282,12 @@ impl FlightPath {
         }
     }
 
+    /// Fire a round `inches` across in place of the battery's own: a secondary rebuilt
+    /// as a gunhouse fires its bore's round, which pierces as one.
+    pub fn rebore(&mut self, inches: f32) {
+        self.diameter = inches * 0.0254;
+    }
+
     pub fn offset_muzzle(&mut self, lateral: f32) {
         self.muzzle += shipvivor_compass::direction(self.heading).perp() * lateral;
     }
@@ -324,7 +330,9 @@ pub(super) fn ballistics(battery: Battery, shell: MainShell) -> (f32, f32) {
     match battery {
         Battery::Main => (shell.speed(), shell.reach()),
         Battery::AntiAir => (AA_SPEED, 2. * AA_SPEED),
-        Battery::Secondary => (240., 290.),
+        // Out past the farthest her secondaries engage: six-inch gunhouses with every
+        // rangefinder.
+        Battery::Secondary => (240., 560.),
         Battery::EnemySecondary | Battery::Aircraft => (240., 405.),
         // Out past the Regent's greatest reach.
         Battery::Raider => (245., 800.),

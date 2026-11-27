@@ -768,7 +768,7 @@ pub fn rebuild_screen(
             text(
                 &mut cmd,
                 panel,
-                "A 168-metre dreadnought is crossing the deep with her escorts. Break her twelve gold turrets to expose the hull. Change course when a turret flashes. She escapes after eight minutes.",
+                "Her screen of cruisers and destroyers meets you first. Break it, and the Regent comes up the deep with her battleships: a 168-metre dreadnought, built up against the guns you bring. Break her gold turrets to expose the hull, and change course when a turret flashes.",
                 18.,
                 ink(),
             );
@@ -1641,6 +1641,16 @@ pub fn instruments(
                         let (flooded, fatal) = ship.vessel().flooding();
                         format!(
                             "{name}    {range} m\nHull exposed  /  {flooded} / {fatal} compartments flooded"
+                        )
+                    }
+                } else if let Some(to_go) = battle.regent_screen() {
+                    if to_go > 0 {
+                        format!(
+                            "{boss}    over the horizon\nSink {to_go} more of her screen and she comes up"
+                        )
+                    } else {
+                        format!(
+                            "{boss}    over the horizon\nHer screen is broken: she is coming up"
                         )
                     }
                 } else if let Some(shipvivor_encounter::Sortie::Due(due)) = battle.flagship() {

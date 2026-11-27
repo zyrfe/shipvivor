@@ -165,6 +165,8 @@ enum News {
     Steam(f32),
     /// She has put to sea from this port.
     Sailed(usize),
+    /// The Regent has come over the horizon, her screen broken.
+    Sighted,
 }
 
 /// What the herald says and how long it has been up, while it is.
@@ -179,7 +181,11 @@ fn herald_age(battle: &Encounter) -> Option<(News, f32)> {
             let age = STEAM_WARNING - due;
             (age < HERALD_SECONDS).then_some((News::Steam(due), age))
         }
-        None => None,
+        Some(Sortie::Sighted { at }) => {
+            let age = battle.at_sea() - at;
+            (age < HERALD_SECONDS).then_some((News::Sighted, age))
+        }
+        Some(Sortie::Holding) | None => None,
     }
 }
 
@@ -248,6 +254,7 @@ pub fn update(
             let words = match (line.0, news) {
                 (0, News::Steam(_)) => "SMOKE OVER THE ENEMY YARDS".to_string(),
                 (0, News::Sailed(_)) => "ENEMY FLAGSHIP UNDER WAY".to_string(),
+                (0, News::Sighted) => "HER SCREEN IS BROKEN".to_string(),
                 (1, _) => name.clone(),
                 (_, News::Steam(due)) => {
                     let due = due.ceil() as u32;
@@ -259,6 +266,9 @@ pub fn update(
                 }
                 (_, News::Sailed(port)) => {
                     format!("puts to sea from Base {}    {whereabouts}", letter(port))
+                }
+                (_, News::Sighted) => {
+                    format!("coming up the deep with her battle line    {whereabouts}")
                 }
             };
             if text.0 != words {

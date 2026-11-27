@@ -117,7 +117,7 @@ impl Changes {
             .collect();
         let (wings, wings_then) = (now.secondaries(), then.secondaries());
         let wings_from =
-            if wings.barrels != wings_then.barrels || wings.turrets != wings_then.turrets {
+            if wings.barrels != wings_then.barrels || wings.gunhouse != wings_then.gunhouse {
                 Some(0)
             } else {
                 (wings.per_side > wings_then.per_side).then_some(2 * wings_then.per_side)

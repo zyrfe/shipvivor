@@ -240,7 +240,8 @@ fn the_next_heaviest_takes_the_lead_and_a_squadron_of_one_sails_alone() {
 }
 
 #[test]
-fn the_regent_sails_at_the_head_of_her_battle_fleet() {
+fn the_regent_sends_her_screen_ahead_and_comes_up_with_her_line_once_it_is_broken() {
+    use crate::{REGENT_SIGHTING, Sortie};
     let chart = Chart::classic([
         Vec2::new(0., -152.),
         Vec2::new(168., -424.),
@@ -248,18 +249,116 @@ fn the_regent_sails_at_the_head_of_her_battle_fleet() {
         Vec2::new(416., 76.),
         Vec2::new(72., 164.),
     ]);
-    let b = Battle::regent_encounter(14., &chart);
-    let (fleet, _) = b.squadrons().next().expect("the Regent's squadron");
-    let regent = b.raiders.iter().find(|r| r.class == Regent).unwrap();
-    assert!(fleet.contains(&regent.body.id));
-    assert_eq!(fleet.len(), 1 + super::super::REGENT_FLEET.len());
+    let mut b = Battle::regent_encounter(14., &chart);
+    // Her screen is at sea, led by a cruiser and coming on to meet the ship, none of it
+    // in reach yet. She holds back over the horizon.
+    let (screen, _) = b.squadrons().next().expect("the screen's squadron");
+    let screen = screen.to_vec();
+    assert_eq!(screen.len(), super::super::REGENT_SCREEN.len());
+    assert!(!b.raiders.iter().any(|r| r.class == Regent));
+    assert_eq!(b.flagship(), Some(Sortie::Holding));
+    assert_eq!(b.boss(), Some(Regent));
+    for r in &b.raiders {
+        assert!(
+            r.body.pos.length() > r.class.reach(),
+            "{:?} in reach",
+            r.class
+        );
+    }
+    for r in b.raiders.iter().filter(|r| screen.contains(&r.body.id)) {
+        assert_eq!(r.last_sighting, Some(Vec2::ZERO), "{:?}", r.class);
+    }
+    // She waits until two in three of it are sunk.
+    let orders = lying_still(Vec2::ZERO);
+    for sunk in 1..=6 {
+        b.raiders.retain(|r| r.body.id != screen[sunk]);
+        b.step(1. / 30., &orders);
+        assert_eq!(b.boss_ship().is_some(), sunk == 6, "{sunk} sunk");
+    }
+    let regent = b.boss_ship().unwrap();
+    assert_eq!(regent.class, Regent);
+    assert_eq!(b.flagship(), Some(Sortie::Sighted { at: b.at_sea() }));
+    // A tick under way already, from as far off as she sighted the ship.
+    assert!(regent.body.pos.length() >= REGENT_SIGHTING.0 - 1.);
+    // She comes on at the head of her battle line, knowing where the ship is, and none
+    // of it can reach her yet.
+    let (fleet, _) = (b.squadrons())
+        .find(|(ids, _)| ids.contains(&regent.body.id))
+        .expect("her battle line");
+    assert_eq!(fleet.len(), 4);
     let battleships = (b.raiders.iter())
         .filter(|r| fleet.contains(&r.body.id) && r.class == Battleship)
         .count();
     assert_eq!(battleships, 3);
-    // She is in sight of it from the start, and none of it can reach her yet.
-    assert!(regent.body.pos.length() < Regent.lookout_range());
-    for r in &b.raiders {
-        assert!(r.body.pos.length() > r.class.reach(), "{:?} in reach", r.class);
+    for r in b.raiders.iter().filter(|r| fleet.contains(&r.body.id)) {
+        assert!(
+            r.body.pos.length() > r.class.reach(),
+            "{:?} in reach",
+            r.class
+        );
+        assert_eq!(r.last_sighting, Some(Vec2::ZERO), "{:?}", r.class);
     }
+    // A ship whose battery throws little meets her as designed.
+    assert_eq!(
+        regent.vessel().design().structure(),
+        Regent.design().structure()
+    );
+}
+
+#[test]
+fn the_regent_comes_up_built_against_the_weight_of_fire_she_meets() {
+    use crate::{REGENT_MATCH, regent_hardening};
+    assert_eq!(regent_hardening(0.), 1.);
+    assert_eq!(regent_hardening(REGENT_MATCH), 1.);
+    // Built up against a heavier battery, though not quite in step with it.
+    let (single, double) = (
+        regent_hardening(10. * REGENT_MATCH),
+        regent_hardening(20. * REGENT_MATCH),
+    );
+    assert!(
+        single > 5. && double > single * 1.6 && double < single * 2.,
+        "{single} {double}"
+    );
+    let chart = Chart::classic([
+        Vec2::new(0., -152.),
+        Vec2::new(168., -424.),
+        Vec2::new(496., -300.),
+        Vec2::new(416., 76.),
+        Vec2::new(72., 164.),
+    ]);
+    let mut b = Battle::regent_encounter(14., &chart);
+    b.raiders.clear();
+    // Fifteen-inch rounds loading in a third of a second, from every barrel aboard.
+    let orders = Orders {
+        reload: 0.3,
+        shell: MainShell {
+            bore: 11,
+            ..MainShell::STOCK
+        },
+        ..lying_still(Vec2::ZERO)
+    };
+    let fire = b.weight_of_fire(&orders);
+    let barrels: usize = b.main_mounts().iter().map(|m| m.layout().count()).sum();
+    assert!((fire - barrels as f32 * 13. / 0.3).abs() < 0.01, "{fire}");
+    b.step(1. / 30., &orders);
+    let regent = b.boss_ship().expect("she has come up");
+    let factor = regent_hardening(fire);
+    // Loaders past what the trigger can walk through add nothing more.
+    let quicker = Orders {
+        reload: 0.01,
+        ..orders
+    };
+    let most = crate::MOST_ROUNDS_A_SECOND * 13.;
+    assert!((b.weight_of_fire(&quicker) - most).abs() < 0.01);
+    let built = regent.vessel().design().structure();
+    assert!((built / Regent.design().structure() - factor).abs() < 1e-3);
+    // Her turrets and her strakes are built up with her hull.
+    let turret = |ship: &shipvivor_shipyard::Ship| {
+        ship.design()
+            .strength(shipvivor_shipyard::Component::MainGun)
+            .unwrap()
+    };
+    let designed = shipvivor_shipyard::Ship::new(Regent.design());
+    assert!((turret(regent.vessel()) / turret(&designed) - factor).abs() < 1e-3);
+    assert!(regent.strakes().iter().all(|s| s.on()));
 }

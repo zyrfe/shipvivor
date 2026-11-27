@@ -77,9 +77,10 @@ pub struct Secondaries {
     pub range: f32,
     /// Barrels on each gun. A twin mount fires both together.
     pub barrels: usize,
-    /// Each gun is a four-inch gunhouse, like the main battery's first turrets, in place
-    /// of a shielded mount.
-    pub turrets: bool,
+    /// Inches across the bore of the gunhouse each gun is rebuilt as, like the main
+    /// battery's first turrets: four or six. `None` is the shielded mount she is built
+    /// with.
+    pub gunhouse: Option<u16>,
 }
 impl Secondaries {
     /// A gun each side amidships and another on the bow.
@@ -89,8 +90,14 @@ impl Secondaries {
         reload: 0.82,
         range: 160.,
         barrels: 1,
-        turrets: false,
+        gunhouse: None,
     };
+    /// Inches across the round a shielded mount fires. A gunhouse fires its own bore's.
+    pub const MOUNT_BORE: f32 = 0.07 / 0.0254;
+    /// Inches across the round each gun fires.
+    pub fn bore(&self) -> f32 {
+        self.gunhouse.map_or(Self::MOUNT_BORE, f32::from)
+    }
     /// No hull has room for more guns a side than this. Her deck room grows with her
     /// length, two a side on each open section: see `Design::wing_stations`.
     pub const MOST_PER_SIDE: usize = 24;
