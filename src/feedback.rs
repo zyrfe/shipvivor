@@ -62,6 +62,10 @@ impl Moment {
     /// The moment the screen asks about, if it asks: the yard after each round, and the
     /// report at the end of the run.
     pub fn of(run: &Campaign) -> Option<Self> {
+        // A test sortie is no round of a run.
+        if run.is_exercise() {
+            return None;
+        }
         match run.screen() {
             Screen::Drydock(_) => Some(Self::Round(run.stage.round())),
             Screen::Won(_) | Screen::Lost => Some(Self::Run),

@@ -622,8 +622,12 @@ impl Run {
             })
     }
 
-    /// The yard points this job leaves, if they cover it.
+    /// The yard points this job leaves, if they cover it. Test mode's yard charges
+    /// nothing, so there every job is covered and leaves what there was.
     pub fn points_after(&self, job: DockJob) -> Option<u16> {
+        if self.exercise {
+            return Some(self.points);
+        }
         self.points.checked_sub(job.cost())
     }
 
@@ -636,18 +640,27 @@ impl Run {
                 module: DockModule::Reserve,
                 ..
             }
-        ) && self.points_after(job).is_some_and(|left| left < EXCHANGE)
+        ) && !self.exercise
+            && self.points_after(job).is_some_and(|left| left < EXCHANGE)
     }
 
     /// Sail from the yard once every level-up hand owed is taken: for the chart after
     /// every patrol but the last, and to intercept the Regent after that. Points left over
-    /// carry to the next yard. She stays in dock until she is sailed.
+    /// carry to the next yard. She stays in dock until she is sailed. Test mode's yard
+    /// sails her straight into the sea it stands before, on a leg begun afresh.
     pub fn leave_dock(&mut self) -> bool {
         let Phase::Drydock(reason) = self.phase else {
             return false;
         };
         if self.pending_cards > 0 {
             return false;
+        }
+        if self.exercise {
+            self.new_leg();
+            self.cargo_carried = 0.;
+            self.elapsed = 0.;
+            self.phase = Phase::Sailing;
+            return true;
         }
         self.phase = if self.stage.is_last_patrol() {
             Phase::Intercept(reason)
@@ -800,11 +813,11 @@ impl Run {
 
     /// Commit a complete legal yard order, preserving damage to every retained compartment.
     /// The yard opens once the level-up hands owed are taken, and its work is paid for in
-    /// points.
+    /// points, except in test mode, where it is only counted: see [`Run::spent`].
     pub fn refit_in_dock(&mut self, job: DockJob) -> bool {
         if !matches!(self.phase, Phase::Drydock(_))
             || self.pending_cards > 0
-            || self.points < job.cost()
+            || self.points_after(job).is_none()
             || !job.fits(self)
         {
             return false;
@@ -831,7 +844,10 @@ impl Run {
         }
         self.fittings = fit;
         self.refit_protection();
-        self.points -= job.cost();
+        if !self.exercise {
+            self.points -= job.cost();
+        }
+        self.spent = self.spent.saturating_add(job.cost());
         true
     }
 }

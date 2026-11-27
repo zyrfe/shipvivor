@@ -140,7 +140,7 @@ impl Plugin for GamePlugin {
                     camera::setup,
                     (|mut helm: ResMut<PlayerHelm>| *helm = PlayerHelm::cruising())
                         .run_if(|run: Res<Campaign>| run.mode == Mode::Title),
-                    battle_view::setup,
+                    battle_view::setup.after(scene::setup),
                     damage_fx::setup,
                     fire_control::setup,
                     insignia::setup,
@@ -372,6 +372,34 @@ fn apply_action(In(action): In<Option<ui::Action>>, mut run: ResMut<Campaign>, m
             run.seed = voyage.seeds.peek();
         }
         (Screen::Departure, Action::Title) => run.title_page = state::TitlePage::Menu,
+        // Test mode: its list of seas opens from the title, and from its own yard with
+        // the ship built there kept for the next sea.
+        (Screen::Title, Action::TestMode) => run.title_page = state::TitlePage::Exercise,
+        (Screen::Drydock(_), Action::TestMode) if run.is_exercise() => {
+            run.bench = (run.stage.round(), run.grade);
+            run.mode = Mode::Title;
+            run.title_page = state::TitlePage::Exercise;
+            voyage.outfit(&mut run);
+        }
+        (Screen::Exercise, Action::TestRound(round)) => run.bench.0 = round,
+        (Screen::Exercise, Action::TestGrade(grade)) => run.bench.1 = grade,
+        (Screen::Exercise, Action::TestSea(stage)) => {
+            *run = run.exercise(stage, voyage.seeds.draw());
+            voyage.outfit(&mut run);
+        }
+        // Back at the title a ship built in test mode is given up.
+        (Screen::Exercise, Action::Title) if run.is_exercise() => {
+            *run = Campaign::default();
+            voyage.outfit(&mut run);
+        }
+        (Screen::Exercise, Action::Title) => run.title_page = state::TitlePage::Menu,
+        // A test sortie, however it ended or wherever it was broken off, goes back to
+        // its yard with the ship as she sailed.
+        (Screen::Paused | Screen::Won(_) | Screen::Lost, Action::Yard) => {
+            if run.return_to_yard() {
+                voyage.encounter.fit_player(&run);
+            }
+        }
         (Screen::Departure, Action::Depart(stage)) if stage.is_opening() => {
             *run = Campaign::new(Mode::Patrol);
             run.stage = stage;
@@ -448,7 +476,11 @@ fn apply_action(In(action): In<Option<ui::Action>>, mut run: ResMut<Campaign>, m
         (Screen::Drydock(_), Action::Sail) if run.plan().is_some() => {
             finalize_refit(&mut run, &mut voyage);
         }
-        (Screen::Drydock(_), Action::Sail) => run.sail_from_dock(),
+        (Screen::Drydock(_), Action::Sail) => {
+            if run.sail_from_dock() {
+                voyage.outfit(&mut run);
+            }
+        }
         (Screen::Intercept(_), Action::Engage) if run.engage_regent() => voyage.outfit(&mut run),
         (Screen::Chart, Action::Depart(next)) if run.depart(next) => voyage.outfit(&mut run),
         _ => {}

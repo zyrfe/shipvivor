@@ -1118,6 +1118,11 @@ pub struct Run {
     cargo_carried: f32,
     /// The patrol just sailed finished with time still on its clock.
     beat_clock: bool,
+    /// Yard points of work ordered for her over the run, whatever paid for it.
+    spent: u16,
+    /// Test mode: one sea sailed on its own from a yard that charges nothing. See
+    /// [`Run::exercise`].
+    exercise: bool,
 }
 impl Default for Run {
     fn default() -> Self {
@@ -1140,9 +1145,73 @@ impl Default for Run {
             points: 0,
             cargo_carried: 0.,
             beat_clock: false,
+            spent: 0,
+            exercise: false,
         }
     }
 }
+
+/// Test mode: one sea of the run sailed on its own, as often as she likes, from a yard
+/// that prices its work and charges nothing for it.
+impl Run {
+    /// A stock ship in the yard before `stage`, to be fitted out and sailed there at
+    /// `grade`. She starts at `level`, the one a run has usually reached by that round,
+    /// so the fittings the fight deals her come as often as they do in a run. Clearing
+    /// the sea brings her back to the same yard, and nothing charts her on from it.
+    pub fn exercise(stage: Stage, grade: Grade, seed: u64, level: u32) -> Self {
+        let mut run = Self {
+            exercise: true,
+            ..Self::default()
+        };
+        run.restage(stage, grade, seed, level);
+        run
+    }
+    /// She is on a test sortie, or in the yard before one.
+    pub fn is_exercise(&self) -> bool {
+        self.exercise
+    }
+    /// Take her as she is built to the yard before another sea, or the same sea at
+    /// another grade or on another chart. Only a ship of [`Run::exercise`] is moved.
+    pub fn restage(&mut self, stage: Stage, grade: Grade, seed: u64, level: u32) {
+        if !self.exercise {
+            return;
+        }
+        self.stage = stage;
+        // An anchorage is sailed the same whatever the grade.
+        self.grade = if stage.is_opening() {
+            Grade::Moderate
+        } else {
+            grade
+        };
+        // She came by this sea's own passage, or to Crown Deep by a last patrol's, so the
+        // air cover of a tough grade flies as it does in a run. Past the first round
+        // she came from an anchorage, as every run does, so the chart has a course to
+        // draw from one fix to another.
+        self.origin = if stage.is_opening() {
+            stage
+        } else {
+            POOLS[0][0]
+        };
+        self.course = match stage {
+            Stage::CrownDeep => vec![POOLS[PATROLS - 1][0]],
+            _ if stage.is_passage() => vec![stage],
+            _ => Vec::new(),
+        };
+        self.seed = seed;
+        self.level = level.max(1);
+        self.experience = 0;
+        self.pending_cards = 0;
+        self.hands = 0;
+        self.previous_stars = 0;
+        self.points = 0;
+        self.cargo_carried = 0.;
+        self.objectives = Objectives::default();
+        self.beat_clock = false;
+        self.elapsed = 0.;
+        self.phase = Phase::Drydock(LegEnd::BasesDestroyed);
+    }
+}
+
 /// A default run is a fresh ship at the start of the first leg.
 impl Run {
     pub fn phase(&self) -> Phase {
@@ -1278,6 +1347,11 @@ impl Run {
     /// Yard points to spend, earned on every leg and kept until they are spent.
     pub fn points(&self) -> u16 {
         self.points
+    }
+    /// Yard points of work ordered for her over the run: what she has spent, or in test
+    /// mode, where the yard charges nothing, what her work would have cost.
+    pub fn spent(&self) -> u16 {
+        self.spent
     }
 
     /// Every patrol ends in the yard, which repairs her. Level-ups still owed are dealt as
@@ -2626,5 +2700,78 @@ mod tests {
         run.tick(1., Objectives::default(), 0);
         assert_eq!(run.leg_points(), 3);
         assert_eq!(run.points(), banked);
+    }
+
+    #[test]
+    fn test_mode_fits_her_out_free_and_sails_one_sea_from_its_own_yard() {
+        let sea = Stage::BastionCut;
+        let mut run = Run::exercise(sea, Grade::Tough, 7, 36);
+        assert!(run.is_exercise());
+        assert_eq!(run.phase(), Phase::Drydock(LegEnd::BasesDestroyed));
+        assert_eq!((run.stage, run.grade, run.level), (sea, Grade::Tough, 36));
+        assert!(run.under_air_cover());
+        // Her course on the chart runs from an anchorage to the sea, never from a fix
+        // to itself.
+        assert!(run.origin.is_opening());
+        assert_eq!(run.course, [sea]);
+        // With no points at all the yard makes whatever the hull can take, and counts
+        // what it would have cost.
+        let mut plan = Plan::draw(&run);
+        let bay = DockJob::Insert {
+            at: run.default_gap(),
+            module: DockModule::Turret,
+        };
+        let loader = DockJob::Fitting(Card::Loader);
+        assert_eq!((run.points(), run.points_after(bay)), (0, Some(0)));
+        assert!(plan.order(&mut run, bay, None));
+        assert!(plan.order(&mut run, loader, None));
+        assert_eq!((run.points(), run.spent()), (0, bay.cost() + loader.cost()));
+        assert_eq!(run.main_turrets(), 3);
+        // Taking an order back takes its price off the count.
+        plan.undo(&mut run, 1);
+        assert_eq!(run.spent(), bay.cost());
+        // Work the hull has no room for is still turned down.
+        let missiles = DockJob::Insert {
+            at: run.default_gap(),
+            module: DockModule::Missiles,
+        };
+        assert!(!plan.order(&mut run, missiles, None));
+        assert_eq!(run.spent(), bay.cost());
+
+        // She sails straight into her sea, and clearing it brings her back to the yard.
+        assert!(run.leave_dock());
+        assert_eq!(
+            (run.phase(), run.stage, run.elapsed),
+            (Phase::Sailing, sea, 0.)
+        );
+        run.clear();
+        assert_eq!(run.phase(), Phase::Drydock(LegEnd::BasesDestroyed));
+        assert!(run.leave_dock());
+        assert_eq!((run.phase(), run.stage), (Phase::Sailing, sea));
+        assert_eq!(run.stars(), 0, "a leg begun afresh");
+
+        // Moved to another sea she keeps her ship and what it cost. An anchorage is
+        // sailed moderate whatever was asked, and the Regent's air follows the grade.
+        run.clear();
+        run.restage(Stage::LanternBay, Grade::Tough, 8, 1);
+        assert_eq!((run.grade, run.level, run.seed), (Grade::Moderate, 1, 8));
+        assert_eq!((run.main_turrets(), run.spent()), (3, bay.cost()));
+        assert!(!run.under_air_cover());
+        run.restage(Stage::CrownDeep, Grade::Tough, 8, 42);
+        assert!(run.under_air_cover());
+        run.restage(Stage::CrownDeep, Grade::Moderate, 8, 42);
+        assert!(!run.under_air_cover());
+
+        // A run proper pays for its work, and is not moved about.
+        let mut run = Run::default();
+        run.clear();
+        let left = run.points();
+        assert!(run.refit_in_dock(loader));
+        assert_eq!(
+            (run.points(), run.spent()),
+            (left - loader.cost(), loader.cost())
+        );
+        run.restage(sea, Grade::Tough, 9, 30);
+        assert_eq!((run.stage, run.level), (Stage::IronNarrows, 1));
     }
 }

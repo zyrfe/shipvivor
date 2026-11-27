@@ -115,15 +115,25 @@ impl Logbook {
     /// Compare the game with the last look and write down what changed.
     fn observe(&mut self, run: &Campaign, battle: &Encounter, helm: &PlayerHelm) {
         let live = matches!(run.mode, Mode::Patrol | Mode::Paused);
+        // Test mode: each sortie is a log of its own, from the moment she sails to the
+        // moment it is won, lost or broken off. Her yard is not logged, and a sortie
+        // still open with her back in it as she sailed was broken off.
+        let test = run.is_exercise();
+        let berthed = test && matches!(run.phase(), Phase::Drydock(_)) && run.elapsed == 0.;
         if let Some(log) = self.run.as_mut().filter(|r| !r.over) {
             // Going back to the title gives the run up. A new seed is a new run.
-            if !live || log.seed != run.seed {
-                log.close("given up: back to the title");
+            if !live || log.seed != run.seed || berthed {
+                log.close(if berthed {
+                    "broken off: back to the test yard"
+                } else {
+                    "given up: back to the title"
+                });
                 self.toasts
                     .push(format!("Run {} logged   /recap {}", log.code, log.code));
             }
         }
-        if live && self.run.as_ref().is_none_or(|r| r.seed != run.seed) {
+        let fresh = (self.run.as_ref()).is_none_or(|r| r.seed != run.seed || (r.over && test));
+        if live && fresh && (!test || run.phase() == Phase::Sailing) {
             self.open(run, battle);
         }
         let Some(log) = self.run.as_mut().filter(|r| !r.over) else {
@@ -147,6 +157,20 @@ impl Logbook {
         };
         let mut log = RunLog::new(code, run, battle, out);
         let (_, started) = timestamp(SystemTime::now());
+        // A test sortie says so, and what ship it tried.
+        let test = run.is_exercise().then(|| {
+            let par = run.par();
+            format!(
+                "# test mode: one sea sailed on its own from a yard that charges nothing, with \
+                 {} points of work in her against a par of {} for the round ({} yard points \
+                 and {} fittings, level {})",
+                run.spent(),
+                par.worth(),
+                par.points,
+                par.fittings,
+                par.level
+            )
+        });
         for header in [
             format!("# Shipvivor run {}", log.code),
             format!("# started: {started}"),
@@ -168,8 +192,11 @@ impl Logbook {
                  pulse can show more hits than rounds fired. Damage is hull points lost. Hits taken \
                  are counted from shell bursts on the hull, so two in one step count as one."
             ),
-            String::new(),
-        ] {
+        ]
+        .into_iter()
+        .chain(test)
+        .chain([String::new()])
+        {
             log.out.line(&header);
         }
         log.begin_leg(run, battle);
@@ -1375,6 +1402,11 @@ impl RunLog {
         match phase {
             Phase::Drydock(end) | Phase::Intercept(end) if was == Phase::Sailing => {
                 self.end_leg(run, leg_end(end));
+                // A test sortie is the whole of its log.
+                if run.is_exercise() {
+                    self.finish("test sortie cleared");
+                    return;
+                }
                 let next = if matches!(phase, Phase::Drydock(_)) {
                     "into the drydock"
                 } else {
@@ -1695,6 +1727,67 @@ mod tests {
             .filter(|line| line.get(17..).is_some_and(|rest| rest.starts_with(tag)))
             .cloned()
             .collect()
+    }
+
+    #[test]
+    fn each_test_sortie_is_a_log_of_its_own_and_its_yard_is_not_logged() {
+        use crate::ui::Action;
+        let mut app = game();
+        let w = app.world_mut();
+        let act = |w: &mut World, action: Action| {
+            w.run_system_cached_with(crate::apply_action, Some(action))
+                .unwrap();
+            w.run_schedule(Update);
+        };
+        act(w, Action::TestMode);
+        act(w, Action::TestSea(Stage::IronNarrows));
+        sail(w, 1.);
+        assert!(
+            w.resource::<Logbook>().code().is_none(),
+            "the test yard is not a run"
+        );
+        // She sails: a log opens, saying it is a test and what ship it tried.
+        act(w, Action::Sail);
+        sail(w, 2.);
+        let first = w.resource::<Logbook>().code().unwrap().to_owned();
+        let lines = w.resource::<Logbook>().lines();
+        assert!(lines[0].starts_with("# Shipvivor run"), "{}", lines[0]);
+        assert!(
+            lines.iter().any(|l| l.starts_with("# test mode:")
+                && l.contains("0 points of work")
+                && l.contains("par of 0")),
+            "{lines:?}"
+        );
+        assert_eq!(logged(w, "leg  ").len(), 1);
+        // Cleared, the sortie's log is closed as won, and the yard it comes back to is
+        // not logged.
+        w.resource_mut::<Campaign>()
+            .tick_sector(1., Objectives::default(), 0, true);
+        sail(w, 0.1);
+        let end = logged(w, "run-end");
+        assert!(
+            end[0].contains("test sortie cleared after 1 leg"),
+            "{end:?}"
+        );
+        w.run_schedule(Update);
+        sail(w, 1.);
+        assert_eq!(w.resource::<Logbook>().code(), Some(first.as_str()));
+        // The next sortie is another log, and breaking it off closes that one.
+        act(w, Action::Sail);
+        sail(w, 2.);
+        let second = w.resource::<Logbook>().code().unwrap().to_owned();
+        assert_ne!(first, second);
+        assert!(logged(w, "run-end").is_empty());
+        act(w, Action::Pause);
+        act(w, Action::Yard);
+        sail(w, 0.1);
+        let end = logged(w, "end  ");
+        assert!(
+            end[0].contains("broken off: back to the test yard"),
+            "{end:?}"
+        );
+        sail(w, 1.);
+        assert_eq!(w.resource::<Logbook>().code(), Some(second.as_str()));
     }
 
     #[test]

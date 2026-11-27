@@ -281,6 +281,19 @@ fn describe(
             run.points()
         );
     }
+    if run.is_exercise() {
+        let par = run.par();
+        let _ = writeln!(
+            s,
+            "- Test mode: {} points of work in her, par {} for round {} ({} yard points, {} fittings, level {})",
+            run.spent(),
+            par.worth(),
+            par.round,
+            par.points,
+            par.fittings,
+            par.level
+        );
+    }
     let _ = writeln!(
         s,
         "- Helm: {} {:+.1} kn, heading {:03} deg, rudder {:+.2}, position ({:.0}, {:.0})",

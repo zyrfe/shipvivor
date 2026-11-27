@@ -91,7 +91,10 @@ pub fn wind(
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let (figure, handle, mut visibility) = captain.into_inner();
-    if !matches!(run.screen(), Screen::Title | Screen::Options) {
+    if !matches!(
+        run.screen(),
+        Screen::Title | Screen::Options | Screen::Exercise
+    ) {
         visibility.set_if_neq(Visibility::Hidden);
         return;
     }

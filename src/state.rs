@@ -1,7 +1,7 @@
 //! Game state shared by every module. `main` advances it and the views read it.
 use crate::passage::Passage;
 use bevy::prelude::*;
-use shipvivor_campaign::{DockJob, Fittings, LegEnd, Phase, Plan, Run, Stage};
+use shipvivor_campaign::{DockJob, Fittings, Grade, LegEnd, Phase, Plan, Run, Stage};
 use shipvivor_encounter::{Battle, Control, Volley};
 use shipvivor_navigation::{Course, Helm};
 use shipvivor_shipyard::Design;
@@ -106,6 +106,7 @@ pub enum TitlePage {
     Customise,
     Options,
     Departure,
+    Exercise,
 }
 
 /// What the player is looking at: the mode, refined by the run's phase while on patrol.
@@ -118,6 +119,9 @@ pub enum Screen {
     Options,
     /// Choose the first patrol before the campaign clock starts.
     Departure,
+    /// Test mode's list of seas, opened from the title or from its yard: choose a round,
+    /// a grade and a sea to try a ship against.
+    Exercise,
     Trial,
     Sailing,
     Secured,
@@ -152,6 +156,14 @@ pub struct Campaign {
     /// Counts every change to the plan, so views of the ship know to refit.
     pub dock_revision: u32,
     pub title_page: TitlePage,
+    /// Test mode's list of seas: the round whose seas it shows, and the grade it sails
+    /// them at.
+    pub bench: (usize, Grade),
+    /// Test mode: the run as she lay in the yard when she last sailed from it, which the
+    /// sortie comes back to however it ends.
+    berth: Option<Run>,
+    /// Test mode: how the last sortie went, for the yard to show.
+    pub debrief: Option<String>,
     pub hits: u32,
     pub sunk: u32,
     pub mode: Mode,
@@ -204,6 +216,9 @@ impl Campaign {
             dock_plan: None,
             dock_revision: 0,
             title_page: TitlePage::Menu,
+            bench: (1, Grade::Tough),
+            berth: None,
+            debrief: None,
             hits: 0,
             sunk: 0,
             run: Run::default(),
@@ -221,9 +236,76 @@ impl Campaign {
     pub fn dock_jobs(&self) -> Vec<DockJob> {
         self.section_jobs(self.dock_module)
     }
+    /// Test mode's yard before `stage`, at the grade its list of seas is set to, with the
+    /// ship she has built there already or, coming from the title, a stock one. She
+    /// starts at the level a run has usually reached by that round.
+    pub fn exercise(&self, stage: Stage, seed: u64) -> Self {
+        let grade = self.bench.1;
+        let level = shipvivor_sim::Par::of(stage, grade).level;
+        let run = if self.run.is_exercise() {
+            let mut run = self.run.clone();
+            run.restage(stage, grade, seed, level);
+            run
+        } else {
+            Run::exercise(stage, grade, seed, level)
+        };
+        Self {
+            bench: self.bench,
+            ..Self::with_run(Mode::Patrol, run)
+        }
+    }
+    /// What a run usually brings to the round test mode's yard stands before.
+    pub fn par(&self) -> shipvivor_sim::Par {
+        shipvivor_sim::Par::of(self.stage, self.grade)
+    }
+    /// Test mode: bring her back to the yard as she lay when she sailed, whether the
+    /// sortie was won, lost or broken off, and note how it went. `false` with no sortie
+    /// to come back from.
+    pub fn return_to_yard(&mut self) -> bool {
+        let Some(berth) = self.berth.take() else {
+            return false;
+        };
+        let debrief = self.sortie_report();
+        *self = Self {
+            bench: self.bench,
+            debrief: Some(debrief),
+            ..Self::with_run(Mode::Patrol, berth)
+        };
+        true
+    }
+    /// How the sortie under way stands, in a line: how it ended and when, the stars it
+    /// earned and the hull it left her.
+    fn sortie_report(&self) -> String {
+        let run = &self.run;
+        let sailed = run.elapsed.max(0.) as u32;
+        let clock = format!("{}:{:02}", sailed / 60, sailed % 60);
+        let stars = match run.stars() {
+            _ if run.stage == Stage::CrownDeep => String::new(),
+            1 => ", 1 star".to_string(),
+            n => format!(", {n} stars"),
+        };
+        match run.phase() {
+            Phase::Drydock(_) | Phase::Intercept(_) => format!(
+                "Cleared in {clock}{stars}, {}, hull {}%",
+                if run.beat_clock() {
+                    "inside the clock"
+                } else {
+                    "past the clock"
+                },
+                run.hull_percent()
+            ),
+            Phase::Won(_) => format!("Regent sunk in {clock}, hull {}%", run.hull_percent()),
+            Phase::Lost => format!("Sunk after {clock}{stars}"),
+            _ => format!(
+                "Broken off after {clock}{stars}, hull {}%",
+                run.hull_percent()
+            ),
+        }
+    }
     /// The yard opens on the first bay that can take another turret, with nothing
-    /// ordered.
+    /// ordered. A test sortie that cleared its sea comes back to its yard as it sailed.
     pub fn open_dock(&mut self) {
+        self.return_to_yard();
         self.dock_plan = None;
         self.dock_revision += 1;
         let bay = self.turret_bay().unwrap_or(1);
@@ -255,7 +337,7 @@ impl Campaign {
         let mut plan = self.dock_plan.clone().unwrap_or_else(|| Plan::draw(&run));
         let was = plan.orders().to_vec();
         (plan.order(&mut run, job, self.listed_under(job)) && plan.orders() != was.as_slice())
-            .then(|| i32::from(self.points()) - i32::from(run.points()))
+            .then(|| i32::from(run.spent()) - i32::from(self.spent()))
     }
     /// Order one of the selected section's refits.
     pub fn order_option(&mut self, index: usize) -> bool {
@@ -313,7 +395,7 @@ impl Campaign {
         self.dock_receipt = Some(Receipt {
             job,
             on_hull,
-            spent: i32::from(before.points()) - i32::from(self.points()),
+            spent: i32::from(self.spent()) - i32::from(before.spent()),
             before,
         });
         true
@@ -346,9 +428,17 @@ impl Campaign {
         self.dock_plan.as_ref()
     }
     /// Sail from the yard for the chart. Points left unspent are banked for the next yard,
-    /// so nothing is lost and one press sails.
-    pub fn sail_from_dock(&mut self) {
-        self.leave_dock();
+    /// so nothing is lost and one press sails. Test mode's yard sails her straight into
+    /// its sea, keeping her as she lies for the sortie to come back to: `true` then, for
+    /// the caller to chart the sea.
+    pub fn sail_from_dock(&mut self) -> bool {
+        let berth = self.run.is_exercise().then(|| self.run.clone());
+        if !self.leave_dock() {
+            return false;
+        }
+        self.debrief = None;
+        self.berth = berth;
+        self.berth.is_some()
     }
     /// The refit picked out, whose figures the yard shows and which Enter orders.
     pub fn dock_job(&self) -> Option<DockJob> {
@@ -375,6 +465,7 @@ impl Campaign {
                 TitlePage::Customise => Screen::Customise,
                 TitlePage::Options => Screen::Options,
                 TitlePage::Departure => Screen::Departure,
+                TitlePage::Exercise => Screen::Exercise,
             },
             Mode::Trial => Screen::Trial,
             Mode::Paused if self.chart_roll.is_some() => Screen::PassageMap,

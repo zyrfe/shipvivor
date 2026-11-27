@@ -3652,3 +3652,150 @@ fn the_spotting_top_trains_round_after_the_sight_and_lies_fore_and_aft_in_the_do
     assert_eq!(train, 0.);
     assert_eq!(rotation, Quat::IDENTITY);
 }
+
+#[test]
+fn test_mode_sails_any_sea_from_a_free_yard_and_comes_back_to_it() {
+    use shipvivor_campaign::{Card, DockJob, Grade};
+    let mut app = headless_game();
+    let w = app.world_mut();
+    let act = |w: &mut World, action: ui::Action| {
+        w.run_system_cached_with(apply_action, Some(action))
+            .unwrap();
+        w.run_schedule(Update);
+    };
+    let seas = |w: &mut World| {
+        (w.query::<&ui::Action>().iter(w))
+            .filter(|a| matches!(a, ui::Action::TestSea(_)))
+            .count()
+    };
+    let shows = |w: &mut World, words: &str| w.query::<&Text>().iter(w).any(|t| t.contains(words));
+
+    // X on the title lists the seas of a round: nine in the first, twelve in the
+    // sixth, and Crown Deep alone in the seventh. G changes the grade.
+    press(w, KeyCode::KeyX);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Exercise);
+    assert_eq!(seas(w), 9);
+    assert!(shows(w, "Par for round 1: a stock ship"));
+    press(w, KeyCode::Digit7);
+    assert_eq!(seas(w), 1);
+    press(w, KeyCode::Digit6);
+    assert_eq!(seas(w), 12);
+    press(w, KeyCode::KeyG);
+    assert_eq!(w.resource::<Campaign>().bench, (6, Grade::Moderate));
+    press(w, KeyCode::KeyG);
+    assert_eq!(w.resource::<Campaign>().bench, (6, Grade::Tough));
+    let par = shipvivor_sim::Par::at(6, Grade::Tough);
+    assert!(shows(w, &format!("about {} points of work", par.worth())));
+
+    // A sea opens its yard: a stock ship at the round's usual level, nothing to spend
+    // and nothing asked for, with par beside what her work has come to.
+    let sea = Stage::BastionCut;
+    act(w, ui::Action::TestSea(sea));
+    let run = w.resource::<Campaign>();
+    assert!(matches!(run.screen(), Screen::Drydock(_)));
+    assert!(run.is_exercise());
+    assert_eq!(
+        (run.stage, run.grade, run.level),
+        (sea, Grade::Tough, par.level)
+    );
+    assert_eq!((run.points(), run.spent()), (0, 0));
+    let armor = DockJob::Fitting(Card::Armor);
+    assert_eq!(run.quote(armor), Some(i32::from(armor.cost())));
+    assert!(shows(w, "TEST YARD"));
+    assert!(shows(
+        w,
+        &format!("Par for round 6, tough: {}", par.worth())
+    ));
+    assert!(shows(w, &format!("{} under", par.worth())));
+    assert!(!shows(w, "RATE ROUND"));
+    act(w, ui::Action::Draft(armor));
+    let run = w.resource::<Campaign>();
+    assert_eq!((run.points(), run.spent()), (0, armor.cost()));
+    assert!(shows(w, &format!("{} spent", armor.cost())));
+    assert!(shows(w, &format!("{} under", par.worth() - armor.cost())));
+
+    // Lock in, then sail: straight into the sea, at its grade, under its air cover.
+    act(w, ui::Action::Sail);
+    assert!(matches!(
+        w.resource::<Campaign>().screen(),
+        Screen::Drydock(_)
+    ));
+    act(w, ui::Action::Sail);
+    let run = w.resource::<Campaign>();
+    assert_eq!((run.screen(), run.stage), (Screen::Sailing, sea));
+    assert!(run.under_air_cover());
+    let bases = shipvivor_sim::Sector::of(sea, Grade::Tough).bases();
+    assert_eq!(w.resource::<Encounter>().ports().len(), bases);
+    assert!(w.resource::<Encounter>().air_station().is_some());
+
+    // Sunk, Enter goes back to the yard with the ship as she sailed.
+    w.resource_mut::<Campaign>()
+        .tick(30., Objectives::default(), 10_000);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Lost);
+    w.run_schedule(Update);
+    assert!(shows(w, "Back to the yard"));
+    press(w, KeyCode::Enter);
+    let run = w.resource::<Campaign>();
+    assert!(matches!(run.screen(), Screen::Drydock(_)));
+    assert!(run.ship.afloat());
+    assert_eq!((run.hull_percent(), run.elapsed), (100, 0.));
+    assert_eq!((run.fittings.armor, run.spent()), (1, armor.cost()));
+    assert_eq!(run.debrief.as_deref(), Some("Sunk after 0:30, 0 stars"));
+    assert!(shows(w, "Last sortie: Sunk after 0:30"));
+
+    // Cleared, she comes back the same way, with nothing banked and no chart.
+    act(w, ui::Action::Sail);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Sailing);
+    w.resource_mut::<Campaign>().level += 3;
+    clear_leg(&mut w.resource_mut::<Campaign>());
+    w.run_schedule(Update);
+    w.run_schedule(Update);
+    let run = w.resource::<Campaign>();
+    assert!(matches!(run.screen(), Screen::Drydock(_)));
+    assert_eq!((run.points(), run.level, run.stars()), (0, par.level, 0));
+    assert!(run.debrief.as_deref().unwrap().starts_with("Cleared in "));
+
+    // A sortie can be broken off from the pause.
+    act(w, ui::Action::Sail);
+    press(w, KeyCode::Escape);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Paused);
+    press(w, KeyCode::KeyY);
+    let run = w.resource::<Campaign>();
+    assert!(matches!(run.screen(), Screen::Drydock(_)));
+    assert!(run.debrief.as_deref().unwrap().starts_with("Broken off"));
+
+    // M goes back to the list with the ship kept, for another sea at another grade.
+    press(w, KeyCode::KeyM);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Exercise);
+    assert_eq!(w.resource::<Campaign>().bench, (6, Grade::Tough));
+    press(w, KeyCode::Digit2);
+    press(w, KeyCode::KeyG);
+    act(w, ui::Action::TestSea(Stage::OuterRoad));
+    let run = w.resource::<Campaign>();
+    assert!(matches!(run.screen(), Screen::Drydock(_)));
+    assert_eq!((run.stage, run.grade), (Stage::OuterRoad, Grade::Moderate));
+    assert_eq!(run.level, shipvivor_sim::Par::at(2, Grade::Moderate).level);
+    assert_eq!((run.fittings.armor, run.spent()), (1, armor.cost()));
+    assert!(run.debrief.is_none());
+    act(w, ui::Action::Sail);
+    let run = w.resource::<Campaign>();
+    assert_eq!(
+        (run.screen(), run.stage),
+        (Screen::Sailing, Stage::OuterRoad)
+    );
+    assert!(!run.under_air_cover());
+    assert!(w.resource::<Encounter>().air_station().is_none());
+
+    // Esc on the list gives the ship up for the title, and a run starts as it always did.
+    press(w, KeyCode::Escape);
+    press(w, KeyCode::KeyY);
+    press(w, KeyCode::KeyM);
+    press(w, KeyCode::Escape);
+    let run = w.resource::<Campaign>();
+    assert_eq!(run.screen(), Screen::Title);
+    assert!(!run.is_exercise());
+    start_in_narrows(w);
+    let run = w.resource::<Campaign>();
+    assert!(!run.is_exercise());
+    assert_eq!((run.level, run.spent()), (1, 0));
+}

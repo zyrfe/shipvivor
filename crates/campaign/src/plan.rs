@@ -34,6 +34,7 @@ struct Built {
     ship: Ship,
     fittings: Fittings,
     points: u16,
+    spent: u16,
 }
 
 /// Orders made in the yard and not yet built.
@@ -56,6 +57,7 @@ impl Plan {
                 ship: run.ship.clone(),
                 fittings: run.fittings,
                 points: run.points,
+                spent: run.spent,
             },
             orders: Vec::new(),
             ids: (0..sections).collect(),
@@ -312,6 +314,7 @@ impl Plan {
         run.ship = self.built.ship.clone();
         run.fittings = self.built.fittings;
         run.points = self.built.points;
+        run.spent = self.built.spent;
         self.ids = (0..self.built.ship.design().modules().len() as SectionId).collect();
         for order in std::mem::take(&mut self.orders) {
             if let Some(job) = self.rebase(run, &order)

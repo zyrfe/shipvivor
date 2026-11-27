@@ -149,6 +149,7 @@ pub struct Kit {
     hangars: [Handle<Mesh>; 2],
     propeller: Handle<Mesh>,
     hull: Handle<Mesh>,
+    hull_paint: Handle<StandardMaterial>,
     scars: [Handle<Mesh>; 2],
     impact_flash: Handle<Mesh>,
     streak: Handle<Mesh>,
@@ -223,11 +224,13 @@ impl Kit {
     }
 }
 pub fn setup(
+    stock_ship: Single<(&Mesh3d, &MeshMaterial3d<StandardMaterial>), With<scene::Ship>>,
     mut cmd: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut paint: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
+    let (stock_hull, hull_paint) = *stock_ship;
     let casing = paint.add(StandardMaterial {
         metallic: 0.28,
         perceptual_roughness: 0.43,
@@ -314,7 +317,8 @@ pub fn setup(
         attack_plane: meshes.add(spotter_model::raider()),
         hangars: [false, true].map(|live| meshes.add(harbour_models::hangar(live))),
         propeller: meshes.add(spotter_model::propeller()),
-        hull: meshes.add(scene::hull_mesh()),
+        hull: stock_hull.0.clone(),
+        hull_paint: hull_paint.0.clone(),
         impact_flash: meshes.add(armor_fx::flash_mesh()),
         streak: meshes.add(armor_fx::spark_mesh()),
         incandescent,
@@ -944,7 +948,7 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
             let p = class.profile();
             part(
                 &kit.hull,
-                &kit.casing,
+                &kit.hull_paint,
                 Vec3::ZERO,
                 v(p.hull.radius / 2.75, p.deck / 1.55, p.hull.bow / 16.),
             );

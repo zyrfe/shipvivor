@@ -38,6 +38,12 @@ Read each log whole. They run to a few hundred lines.
 - `#` header lines: the code, when the run started, the build (`dev` for a debug build;
   logs from before 2026-11-25 have no build line), when the game was launched, and the
   seed (`SHIPVIVOR_SEED=<seed> cargo run` sails the same waters again).
+- A `# test mode:` header line (since 2026-11-27) marks a test sortie, not a run: one
+  sea sailed on its own from the title's Test mode, in a ship fitted out free. The line
+  gives the yard points of work in her and the par for that round. Each sortie is a log
+  of its own with one leg. It ends in `run-end` (`test sortie cleared`, `won` or `lost`)
+  or in `end` (`broken off: back to the test yard`). Say which logs were tests, and
+  don't read a test's ship or points as run progression.
 - Every other line: wall clock (UTC), leg clock (m:ss sailed this leg, frozen in menus),
   an event tag, details.
 - `pulse` sums up the last 15 s of sailing: helm and speed, hull, what was fired and hit,

@@ -1,4 +1,5 @@
 pub(crate) mod customise;
+pub(crate) mod exercise;
 pub(crate) mod feedback;
 pub(crate) mod options;
 pub(crate) mod passage_chart;
@@ -112,6 +113,15 @@ pub(crate) enum Action {
     /// In the yard after a round, or on the report at a run's end: give one of the
     /// playtest scores, or take it back with a second click.
     Rate(crate::feedback::Metric, i8),
+    /// Open test mode's list of seas, from the title or from test mode's yard.
+    TestMode,
+    /// On test mode's list of seas: show a round's seas, set the grade they are sailed
+    /// at, or open the yard before one.
+    TestRound(usize),
+    TestGrade(Grade),
+    TestSea(Stage),
+    /// Leave a test sortie, won, lost or paused, for its yard, with the ship as she sailed.
+    Yard,
 }
 #[derive(Component)]
 pub struct ScreenRoot;
@@ -156,6 +166,24 @@ pub fn intent(
         Screen::Title if key(KeyCode::KeyT) => Some(Action::Trial),
         Screen::Title if key(KeyCode::KeyC) => Some(Action::Customise),
         Screen::Title if key(KeyCode::KeyO) => Some(Action::Options),
+        Screen::Title if key(KeyCode::KeyX) => Some(Action::TestMode),
+        Screen::Exercise if key(KeyCode::Escape) => Some(Action::Title),
+        Screen::Exercise if key(KeyCode::KeyG) => Some(Action::TestGrade(match run.bench.1 {
+            Grade::Moderate => Grade::Tough,
+            Grade::Tough => Grade::Moderate,
+        })),
+        Screen::Exercise => [
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
+            KeyCode::Digit6,
+            KeyCode::Digit7,
+        ]
+        .into_iter()
+        .position(key)
+        .map(|i| Action::TestRound(i + 1)),
         Screen::Options if key(KeyCode::Escape) || key(KeyCode::Enter) => Some(Action::Title),
         Screen::Options => [
             KeyCode::Digit1,
@@ -197,6 +225,7 @@ pub fn intent(
         }
         Screen::Paused if key(KeyCode::Escape) || key(KeyCode::Enter) => Some(Action::Resume),
         Screen::Paused if key(KeyCode::KeyM) => Some(Action::Title),
+        Screen::Paused if key(KeyCode::KeyY) && run.is_exercise() => Some(Action::Yard),
         Screen::Drydock(_) => {
             // The ship is the menu: a click on her selects the section under the cursor.
             let count = run.dock_jobs().len();
@@ -237,6 +266,8 @@ pub fn intent(
                     .map(Action::Undo)
             } else if key(KeyCode::Escape) {
                 Some(Action::Module(run.dock_module))
+            } else if key(KeyCode::KeyM) && run.is_exercise() {
+                Some(Action::TestMode)
             } else if key(KeyCode::BracketLeft) {
                 Some(Action::Module(run.dock_module.saturating_sub(1)))
             } else if key(KeyCode::BracketRight) {
@@ -265,6 +296,9 @@ pub fn intent(
         Screen::Refit => choice.and_then(|i| run.offers().get(i).copied().map(Action::Card)),
         Screen::Intercept(_) if key(KeyCode::Enter) => Some(Action::Engage),
         Screen::Chart => choice.and_then(|i| Some(Action::Depart(run.exits()?[i].stage))),
+        Screen::Won(_) | Screen::Lost if key(KeyCode::Enter) && run.is_exercise() => {
+            Some(Action::Yard)
+        }
         Screen::Won(_) | Screen::Lost if key(KeyCode::Enter) => Some(Action::Start),
         _ => None,
     }
@@ -289,6 +323,12 @@ pub fn scale(window: Single<&Window>, run: Res<Campaign>, mut scale: ResMut<UiSc
             .min(window.height() / 1150.)
             .max(bridge_scale)
             .min(1.6)
+    } else if screen == Screen::Exercise {
+        // Test mode's list of seas stands twelve to a round at its tallest: it shrinks
+        // to fit a small window whole and grows on a large one, as the yard does.
+        (window.width() / 1400.)
+            .min(window.height() / 800.)
+            .clamp(0.45, 1.6)
     } else if shows_chart_table(screen) {
         // Leave the table its usual side margins, and the yard's three passage cards
         // room to stand whole: no larger than the window's height allows, even where
@@ -453,7 +493,7 @@ pub fn hover(
     for (action, cursor, mut bg, chart_name) in &mut buttons {
         let desired = if matches!(
             run.screen(),
-            Screen::Title | Screen::Customise | Screen::Options
+            Screen::Title | Screen::Customise | Screen::Options | Screen::Exercise
         ) {
             title::fill(*action, cursor.cursor_over())
         } else if chart_name {
@@ -494,6 +534,8 @@ type ScreenKey = (
     Option<usize>,
     usize,
     (u32, bool),
+    // Test mode: the round and grade its list of seas shows, and a sortie reported.
+    (usize, Grade, bool),
 );
 
 pub fn rebuild_screen(
@@ -511,7 +553,8 @@ pub fn rebuild_screen(
     ),
 ) {
     let (run, battle) = patrol;
-    let ask = feedback::asking(&ask.0, ask.1.as_deref());
+    // A test sortie is no round of a run: nothing is asked of it.
+    let ask = feedback::asking(&ask.0, ask.1.as_deref()) && !run.is_exercise();
     let key = (
         run.screen(),
         run.stage,
@@ -520,6 +563,7 @@ pub fn rebuild_screen(
         run.dock_option,
         run.dock_module,
         (run.dock_revision, run.dock_receipt.is_some()),
+        (run.bench.0, run.bench.1, run.debrief.is_some()),
     );
     if *last == Some(key) {
         return;
@@ -583,6 +627,10 @@ pub fn rebuild_screen(
     }
     if run.screen() == Screen::Options {
         options::show(&mut cmd, root, &art.display_face);
+        return;
+    }
+    if run.screen() == Screen::Exercise {
+        exercise::show(&mut cmd, root, &run, &art.display_face);
         return;
     }
     cmd.entity(root)
@@ -785,7 +833,11 @@ pub fn rebuild_screen(
             text(
                 &mut cmd,
                 panel,
-                "BREAKWATER   /   AFTER-ACTION REPORT",
+                if run.is_exercise() {
+                    "TEST MODE   /   AFTER-ACTION REPORT"
+                } else {
+                    "BREAKWATER   /   AFTER-ACTION REPORT"
+                },
                 14.,
                 brass(),
             );
@@ -804,7 +856,7 @@ pub fn rebuild_screen(
             );
             // Stars out of every patrol sailed, the one she ended on included.
             let sailed = run.stage.round().min(PATROLS) as u8;
-            let tally = if run.stage.is_opening() {
+            let tally = if run.stage.is_opening() || run.is_exercise() {
                 format!("{} / {MAX_STARS} stars", run.stars())
             } else {
                 format!(
@@ -853,14 +905,25 @@ pub fn rebuild_screen(
                     .id();
                 feedback::sheet(&mut cmd, sheet, "RATE THE RUN");
             }
-            action(
-                &mut cmd,
-                panel,
-                Some(Action::Start),
-                "New run     [Enter]",
-                "",
-                false,
-            );
+            if run.is_exercise() {
+                action(
+                    &mut cmd,
+                    panel,
+                    Some(Action::Yard),
+                    "Back to the yard     [Enter]",
+                    "She is as she sailed, to refit and sail again.",
+                    false,
+                );
+            } else {
+                action(
+                    &mut cmd,
+                    panel,
+                    Some(Action::Start),
+                    "New run     [Enter]",
+                    "",
+                    false,
+                );
+            }
             action(
                 &mut cmd,
                 panel,
@@ -881,6 +944,16 @@ pub fn rebuild_screen(
                 "",
                 false,
             );
+            if run.is_exercise() {
+                action(
+                    &mut cmd,
+                    panel,
+                    Some(Action::Yard),
+                    "Back to the yard     [Y]",
+                    "",
+                    false,
+                );
+            }
             action(
                 &mut cmd,
                 panel,
@@ -896,6 +969,16 @@ pub fn rebuild_screen(
 /// Where this leg stands in the run, and what the yard after it will offer.
 fn pause_note(run: &Campaign) -> String {
     let round = run.stage.round();
+    if run.is_exercise() {
+        let grade = if run.stage.is_opening() {
+            String::new()
+        } else {
+            format!(", {}", run.grade.name().to_lowercase())
+        };
+        return format!(
+            "Test mode: round {round} of {ROUNDS}{grade}. However the sortie ends, she goes back to her yard as she sailed."
+        );
+    }
     if run.stage == Stage::CrownDeep {
         return if run.under_air_cover() {
             format!(

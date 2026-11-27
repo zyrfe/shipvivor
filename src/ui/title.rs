@@ -80,6 +80,12 @@ pub(super) fn show(cmd: &mut Commands, root: Entity, face: &Handle<Font>) {
             "Choose how the ship earns experience",
             "O",
         ),
+        (
+            Action::TestMode,
+            "Test mode",
+            "Sail any sea at any grade from a yard that charges nothing",
+            "X",
+        ),
     ] {
         let button = button(cmd, choices, action, face, label, shortcut);
         let foreground = if action == Action::Start {

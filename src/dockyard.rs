@@ -731,11 +731,15 @@ pub fn point(
     pointer.set_if_neq(next);
 }
 
-/// Arriving in the yard selects the first bay that can take another turret.
-pub fn open(mut run: ResMut<Campaign>, mut docked: Local<bool>) {
+/// Arriving in the yard selects the first bay that can take another turret. A test
+/// sortie comes back as she sailed, so her mounts are fitted again as they were then.
+pub fn open(mut run: ResMut<Campaign>, mut battle: ResMut<Encounter>, mut docked: Local<bool>) {
     let now = matches!(run.screen(), Screen::Drydock(_));
     if now && !*docked {
         run.open_dock();
+        if run.is_exercise() {
+            battle.fit_player(&run);
+        }
     }
     *docked = now;
 }
@@ -2166,7 +2170,10 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia, ask: 
         // A price the yard cannot pay is red.
         let ink = if refused.is_some() {
             rule()
-        } else if module.cost() > run.points() {
+        } else if run
+            .points_after(DockJob::Insert { at: 1, module })
+            .is_none()
+        {
             cards::Change::Cost.color()
         } else {
             brass()
@@ -2243,15 +2250,16 @@ fn finish(cmd: &mut Commands, parent: Entity, run: &Campaign, art: &Insignia, as
             .id();
         crate::ui::feedback::sheet(cmd, shelf, &format!("RATE ROUND {}", run.stage.round()));
     }
-    // The points left once the orders are built, and what the orders cost.
-    let purse = cmd
+    // The points left once the orders are built, and what the orders cost. Test mode's
+    // yard charges nothing: it shows what her work has come to, over what a run brings.
+    let shelf = cmd
         .spawn((
             Solid,
             RelativeCursorPosition::default(),
             Node {
                 padding: UiRect::axes(px(12), px(7)),
-                column_gap: px(10),
-                justify_content: JustifyContent::Center,
+                flex_direction: FlexDirection::Column,
+                row_gap: px(4),
                 align_items: AlignItems::Center,
                 border: UiRect::top(px(2)),
                 ..default()
@@ -2261,14 +2269,23 @@ fn finish(cmd: &mut Commands, parent: Entity, run: &Campaign, art: &Insignia, as
             ChildOf(stack),
         ))
         .id();
-    badge(
+    let purse = node(
         cmd,
-        purse,
-        art.order.clone(),
-        brass(),
-        format!("{points} point{}", plural(points.into())),
-        18.,
+        shelf,
+        Node {
+            column_gap: px(10),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        Color::NONE,
     );
+    let words = if run.is_exercise() {
+        format!("{} spent", run.spent())
+    } else {
+        format!("{points} point{}", plural(points.into()))
+    };
+    badge(cmd, purse, art.order.clone(), brass(), words, 18.);
     if let Some(plan) = plan {
         text(
             cmd,
@@ -2277,6 +2294,9 @@ fn finish(cmd: &mut Commands, parent: Entity, run: &Campaign, art: &Insignia, as
             13.,
             cyan(),
         );
+    }
+    if run.is_exercise() {
+        par_advisory(cmd, shelf, run);
     }
     let big = button(
         cmd,
@@ -2343,8 +2363,62 @@ fn finish(cmd: &mut Commands, parent: Entity, run: &Campaign, art: &Insignia, as
                 panel(),
             );
         }
-        text(cmd, foot, "[Enter]", 14., panel());
+        if run.is_exercise() {
+            let sea = run.stage.mission().name;
+            text(cmd, foot, format!("for {sea}   [Enter]"), 14., panel());
+        } else {
+            text(cmd, foot, "[Enter]", 14., panel());
+        }
     }
+}
+
+/// Test mode's advisory under what her work has come to: what a run usually brings to
+/// this round at this grade, how far over or under it she stands, and what par is made
+/// of. Fittings a run is dealt free are bought here like any other work, so they count
+/// at the yard's price.
+fn par_advisory(cmd: &mut Commands, shelf: Entity, run: &Campaign) {
+    let par = run.par();
+    let (spent, worth) = (run.spent(), par.worth());
+    let grade = if run.stage.is_opening() {
+        String::new()
+    } else {
+        format!(", {}", run.grade.name().to_lowercase())
+    };
+    let (standing, ink) = match spent.cmp(&worth) {
+        std::cmp::Ordering::Less => (format!("{} under", worth - spent), cyan()),
+        std::cmp::Ordering::Equal => ("on par".to_string(), cyan()),
+        std::cmp::Ordering::Greater => (
+            format!("{} over", spent - worth),
+            cards::Change::Cost.color(),
+        ),
+    };
+    let line = node(
+        cmd,
+        shelf,
+        Node {
+            column_gap: px(8),
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        Color::NONE,
+    );
+    text(
+        cmd,
+        line,
+        format!("Par for round {}{grade}: {worth}", par.round),
+        13.,
+        paper(),
+    );
+    text(cmd, line, standing, 13., ink);
+    let made_of = if worth == 0 {
+        "A run begins here with a stock ship".to_string()
+    } else {
+        format!(
+            "{} yard points + {} fittings, level {}",
+            par.points, par.fittings, par.level
+        )
+    };
+    text(cmd, shelf, made_of, 11., muted());
 }
 
 /// The train of one main turret on the selected section, laid flat on the deck.
@@ -2500,10 +2574,38 @@ fn header(
 
     // Her length and beam are on the hull panel, with the work that changes them.
     let name = column(cmd, AlignItems::Start);
-    text(cmd, name, "DRYDOCK", 27., brass());
+    let yard = if run.is_exercise() {
+        "TEST YARD"
+    } else {
+        "DRYDOCK"
+    };
+    text(cmd, name, yard, 27., brass());
     let ship = line(cmd, name);
     badge(cmd, ship, art.hull.clone(), paper(), "BREAKWATER", 14.);
     text(cmd, name, "Click the ship to refit", 12., cyan());
+
+    if run.is_exercise() {
+        let briefing = column(cmd, AlignItems::Center);
+        test_briefing(cmd, briefing, run);
+        // The way back to the list of seas, with the ship kept.
+        let seas = column(cmd, AlignItems::End);
+        let change = button(
+            cmd,
+            seas,
+            Some(Action::TestMode),
+            false,
+            false,
+            Node {
+                height: px(34),
+                padding: UiRect::axes(px(12), px(0)),
+                align_items: AlignItems::Center,
+                border: UiRect::all(px(1)),
+                ..default()
+            },
+        );
+        text(cmd, change, "Change sea   [M]", 14., paper());
+        return;
+    }
 
     let sortie = column(cmd, AlignItems::Center);
     text(cmd, sortie, leg_result(reason), 19., paper());
@@ -2587,6 +2689,50 @@ fn header(
         },
     );
     text(cmd, hull, format!("{percent}%"), 13., paper());
+}
+
+/// The middle of test mode's header: the sea she will sail and how, what holds it, and
+/// how the last sortie from this yard went.
+fn test_briefing(cmd: &mut Commands, column: Entity, run: &Campaign) {
+    let stage = run.stage;
+    let grade = if stage.is_opening() {
+        String::new()
+    } else {
+        format!("   /   {}", run.grade.name())
+    };
+    text(
+        cmd,
+        column,
+        format!(
+            "{}   /   Round {} of {}{grade}",
+            stage.mission().name,
+            stage.round(),
+            shipvivor_campaign::ROUNDS
+        ),
+        19.,
+        paper(),
+    );
+    let sector = shipvivor_sim::Sector::of(stage, run.grade);
+    let air = if run.under_air_cover() {
+        ", under air cover"
+    } else {
+        ""
+    };
+    text(
+        cmd,
+        column,
+        format!(
+            "{}, {} bases{air}. {}. Every order is free.",
+            sector.fleet().name(),
+            sector.bases(),
+            sector.note()
+        ),
+        13.,
+        muted(),
+    );
+    if let Some(debrief) = &run.debrief {
+        text(cmd, column, format!("Last sortie: {debrief}"), 13., brass());
+    }
 }
 
 fn percent_of(value: u16) -> Val {

@@ -178,6 +178,8 @@ pub(super) fn extended_hull_mesh(hull: Hull) -> Mesh {
         }
         uv.resize(mesh.positions.len(), paint::PLAIN);
     }
+    ground_tackle(&mut mesh, hull);
+    uv.resize(mesh.positions.len(), paint::PLAIN);
     let mut mesh = mesh
         .finish()
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uv);
@@ -189,6 +191,78 @@ pub(super) fn extended_hull_mesh(hull: Hull) -> Mesh {
         }
     }
     mesh
+}
+
+/// A riding chain leads from each hawse to its capstan on the raised forecastle.
+fn ground_tackle(mesh: &mut Facets, hull: Hull) {
+    let iron = Color::srgb_u8(53, 66, 70);
+    let rim = Color::srgb_u8(123, 130, 122);
+    let rust = Color::srgb_u8(99, 83, 69);
+    let outline = hull.outline();
+    // The deck is flat across each frame and rises in straight runs between frames.
+    let deck = |x: f32, z: f32| {
+        let pair = outline[..3]
+            .windows(2)
+            .find(|frames| frames[1].1 >= z)
+            .unwrap();
+        let (a, b) = (pair[0].1, pair[1].1);
+        let t = (z - a) / (b - a);
+        Vec3::new(
+            x * hull.radius / Hull::CRUISER.radius,
+            deck_height(a) * (1. - t) + deck_height(b) * t,
+            z,
+        )
+    };
+    for side in [-1., 1.] {
+        let drum = deck(side * 0.66, -10.95);
+        for (low, high, r1, r2, color) in [
+            (-0.08, 0.10, 0.32, 0.30, iron),
+            (0.10, 0.30, 0.25, 0.21, iron),
+            (0.30, 0.36, 0.21, 0.29, rim),
+            (0.36, 0.40, 0.29, 0.26, iron),
+        ] {
+            mesh.tube(drum + Vec3::Y * low, drum + Vec3::Y * high, r1, r2, color);
+        }
+        let hawse = deck(side * 0.68, -13.45);
+        mesh.tube(
+            hawse - Vec3::Y * 0.04,
+            hawse + Vec3::Y * 0.08,
+            0.22,
+            0.20,
+            rim,
+        );
+        mesh.tube(
+            hawse + Vec3::Y * 0.08,
+            hawse + Vec3::Y * 0.09,
+            0.14,
+            0.14,
+            iron,
+        );
+        // Alternate flat and upright stud links; their openings catch the light up close.
+        for link in 0..12 {
+            let t = link as f32 / 11.;
+            let center = deck(side * (0.68 + 0.22 * t), -13.45 + 2.50 * t) + Vec3::Y * 0.085;
+            let across = if link % 2 == 0 {
+                Vec3::X
+            } else {
+                Vec3::new(0.26, 0.96, 0.)
+            };
+            let at = |i: usize, inner: bool| {
+                let (sin, cos) = (i as f32 * std::f32::consts::TAU / 8.).sin_cos();
+                center
+                    + Vec3::Z * cos * if inner { 0.105 } else { 0.167 }
+                    + across * sin * if inner { 0.040 } else { 0.082 }
+            };
+            let lip = Vec3::Z.cross(across) * 0.024;
+            for i in 0..8 {
+                let (a, b) = (at(i, false), at(i + 1, false));
+                let (c, d) = (at(i + 1, true), at(i, true));
+                mesh.quad([a + lip, b + lip, c + lip, d + lip], rim);
+                mesh.quad([d - lip, c - lip, b - lip, a - lip], iron);
+                mesh.quad([a - lip, b - lip, b + lip, a + lip], rust);
+            }
+        }
+    }
 }
 
 /// Rolled metal lip around a dark recess. Both sides of the hull use an outward-facing frame.

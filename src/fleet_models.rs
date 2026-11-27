@@ -1,5 +1,5 @@
 //! Low-poly fleet fittings. Static deckwork and each moving gun use one mesh apiece.
-use crate::scene::Facets;
+use crate::scene::{Facets, fittings};
 use EnemyClass::*;
 use bevy::prelude::*;
 use shipvivor_encounter::EnemyClass;
@@ -42,6 +42,17 @@ fn bent(pivot: Vec3, axis: Vec3, angle: f32) -> bevy::math::Affine3A {
         * bevy::math::Affine3A::from_translation(-pivot)
 }
 
+const HOUSE: [(f32, f32); 8] = [
+    (-0.35, -0.5),
+    (0.35, -0.5),
+    (0.5, -0.34),
+    (0.5, 0.34),
+    (0.35, 0.5),
+    (-0.35, 0.5),
+    (-0.5, 0.34),
+    (-0.5, -0.34),
+];
+
 #[derive(Default)]
 struct Metal(Facets);
 impl Metal {
@@ -66,17 +77,7 @@ impl Metal {
         roof: Color,
         bend: bevy::math::Affine3A,
     ) {
-        let outline = [
-            (-0.35, -0.5),
-            (0.35, -0.5),
-            (0.5, -0.34),
-            (0.5, 0.34),
-            (0.35, 0.5),
-            (-0.35, 0.5),
-            (-0.5, 0.34),
-            (-0.5, -0.34),
-        ];
-        let foot = outline.map(|(x, z)| center + Vec3::new(x * size.x, 0., z * size.z));
+        let foot = HOUSE.map(|(x, z)| center + Vec3::new(x * size.x, 0., z * size.z));
         let cap = center + Vec3::Y * size.y;
         let top = foot.map(|p| bend.transform_point3(cap + (p - center) * taper));
         let (foot, cap) = (
@@ -88,6 +89,39 @@ impl Metal {
             self.0.triangle([foot[i], top[j], foot[j]], wall);
             self.0.triangle([foot[i], top[i], top[j]], wall);
             self.0.triangle([cap, top[j], top[i]], roof);
+        }
+    }
+    /// A row of distinct panes follows the splay of the bridge front and wings.
+    /// The brow reflects the sky; the sill picks up the darker deck below.
+    fn windows(&mut self, sill: Vec3, size: Vec3, burnt: f32) {
+        let frame = scorched(PALE, burnt);
+        let low = scorched(GLASS, burnt);
+        let sky = scorched(Color::srgb_u8(104, 145, 151), burnt);
+        self.tier(sill, size, 1.04, frame, IRON);
+        for i in 0..HOUSE.len() {
+            let face = |(x, z): (f32, f32)| Vec3::new(x * size.x, 0., z * size.z);
+            let a = face(HOUSE[i]);
+            let b = face(HOUSE[(i + 1) % HOUSE.len()]);
+            let out = Vec3::Y.cross(b - a).normalize() * size.y * 0.012;
+            let at = |t, h| sill + a.lerp(b, t) * (1. + 0.04 * h) + Vec3::Y * size.y * h + out;
+            let panes = if i % 2 == 0 { 3 } else { 1 };
+            let margin = (0.055 * size.y / (b - a).length()).min(0.08);
+            for pane in 0..panes {
+                let left = pane as f32 / panes as f32 + margin;
+                let right = (pane + 1) as f32 / panes as f32 - margin;
+                let [a, b, c, d] = [
+                    at(left, 0.11),
+                    at(left, 0.90),
+                    at(right, 0.90),
+                    at(right, 0.11),
+                ];
+                if burnt > 0. && (pane + i) % 3 != 0 {
+                    self.0.quad([a, b, c, d], SOOT);
+                    continue;
+                }
+                self.0.triangle_colors([a, b, c], [low, sky, sky]);
+                self.0.triangle_colors([a, c, d], [low, sky, low]);
+            }
         }
     }
 }
@@ -223,116 +257,153 @@ fn upperworks_into(m: &mut Metal, class: EnemyClass, stage: u8) {
     let burnt = [0., 0.5, 0.85][usize::from(stage.min(2))];
     let paint = |c: Color| scorched(c, burnt);
     let crushed = if stage >= 2 { 0.6 } else { 1. };
-    // Stacked wings and a continuous dark window strip survive the distant silhouette.
+    // A patrol launch has a short cabin. On the larger ships a long bridge trunk
+    // steps up from the forward deck, with open lookout wings projecting either side.
+    let trunk = match class {
+        Patrol => 3.05,
+        Freighter => 3.65,
+        _ => 4.75,
+    };
     m.tier(
-        bridge(0., 0., 0.),
-        v(2.45, 1.30 * crushed, 3.1) * s,
-        0.87,
+        bridge(0., 0., -0.25),
+        v(2.50, 0.72 * crushed, trunk) * s,
+        0.97,
         paint(STEEL),
-        paint(PALE),
+        paint(IRON),
     );
-    let roof = 1.25 * crushed;
-    match stage {
-        0 => {
-            m.tier(
-                bridge(0., 1.25, -0.2),
-                v(2.1, 0.55, 2.25) * s,
-                1.,
-                GLASS,
-                IRON,
-            );
-            m.tier(
-                bridge(0., 1.8, -0.2),
-                v(2.45, 0.28, 2.55) * s,
-                0.94,
-                RED,
-                PALE,
-            );
-        }
-        1 => {
-            // The glazing blown in, and the roof over it buckled down to one side.
-            m.tier(
-                bridge(0., 1.25, -0.2),
-                v(2.1, 0.55, 2.25) * s,
-                1.,
-                SOOT,
-                IRON,
-            );
-            let buckle = bent(bridge(-1.2, 1.8, 0.), Vec3::Z, 0.2);
-            m.tier_bent(
-                bridge(0., 1.8, -0.2),
-                v(2.45, 0.28, 2.55) * s,
-                0.94,
-                paint(RED),
-                paint(PALE),
-                buckle,
-            );
-        }
-        _ => {
-            // A torn sheet of her roof, tipped up off the stump.
-            let torn = bent(bridge(0.8, roof, 0.), v(0.4, 0., 1.), -0.55);
-            m.tier_bent(
-                bridge(0.3, roof, 0.3),
-                v(1.5, 0.12, 1.6) * s,
-                1.,
-                SOOT,
-                paint(RED),
-                torn,
-            );
+    m.tier(
+        bridge(0., 0.70 * crushed, -0.25),
+        v(2.56, 0.12 * crushed, trunk + 0.10) * s,
+        1.,
+        paint(PALE),
+        paint(STEEL),
+    );
+    m.tier(
+        bridge(0., 0.82 * crushed, -0.27),
+        v(2.24, 0.45 * crushed, 2.78) * s,
+        0.94,
+        paint(STEEL),
+        paint(IRON),
+    );
+    // Watertight doors and the slats of the intake grilles give the crew deck scale.
+    for side in [-1., 1.] {
+        let wall = |y, z, relief| {
+            bridge(
+                side * (1.25 * (1. - 0.03 * y / 0.72) + relief),
+                y * crushed,
+                z,
+            )
+        };
+        let panel = |y, top, z: f32, wide: f32, r| {
+            let mut q = [
+                wall(y, z - wide, r),
+                wall(top, z - wide, r),
+                wall(top, z + wide, r),
+                wall(y, z + wide, r),
+            ];
+            if side < 0. {
+                q.reverse();
+            }
+            q
+        };
+        m.0.quad(panel(0.015, 0.65, -0.74, 0.22, 0.010), paint(IRON));
+        m.0.quad(panel(0.045, 0.62, -0.74, 0.18, 0.019), paint(STEEL));
+        m.0.quad(panel(0.31, 0.35, -0.80, 0.065, 0.024), paint(PALE));
+        m.0.quad(panel(0.21, 0.59, 0.52, 0.35, 0.012), paint(IRON));
+        for i in 0..4 {
+            let y = 0.24 + 0.088 * i as f32;
+            m.0.quad(panel(y, y + 0.034, 0.52, 0.32, 0.023), paint(STEEL));
         }
     }
-    if class == Patrol {
-        // A patrol boat has no mast over her bridge.
-    } else if stage == 0 {
+    let roof = 1.25 * crushed;
+    if stage < 2 {
+        // Solid splinter screens at the wing ends, open to the rear.
+        let span = if class == Patrol { 1.40 } else { 1.61 };
         m.tier(
-            bridge(0., 2.07, -0.2),
-            v(1.5, 0.52, 1.55) * s,
-            0.80,
-            STEEL,
-            PALE,
+            bridge(0., 1.25, -0.22),
+            v(span * 2., 0.10, 2.46) * s,
+            0.99,
+            paint(PALE),
+            paint(IRON),
         );
-        m.tier(
-            bridge(0., 2.58, -0.2),
-            v(0.16, 2., 0.17) * s,
-            0.6,
-            IRON,
-            IRON,
+        for side in [-1., 1.] {
+            m.tier(
+                bridge(side * (span - 0.06), 1.35, -0.28),
+                v(0.12, 0.25, 1.61) * s,
+                0.95,
+                paint(STEEL),
+                paint(PALE),
+            );
+        }
+        m.windows(bridge(0., 1.35, -0.32), v(2.18, 0.53, 2.31) * s, burnt);
+        let buckle = if stage == 1 {
+            bent(bridge(-1.2, 1.88, 0.), Vec3::Z, 0.2)
+        } else {
+            bevy::math::Affine3A::IDENTITY
+        };
+        m.tier_bent(
+            bridge(0., 1.88, -0.32),
+            v(2.52, 0.19, 2.64) * s,
+            0.94,
+            paint(RED),
+            paint(PALE),
+            buckle,
         );
-        m.tier(
-            bridge(0., 3.7, -0.2),
-            v(2.15, 0.12, 0.15) * s,
+    } else {
+        let torn = bent(bridge(0.8, roof, 0.), v(0.4, 0., 1.), -0.55);
+        m.tier_bent(
+            bridge(0.3, roof, 0.3),
+            v(1.5, 0.12, 1.6) * s,
             1.,
-            PALE,
-            PALE,
+            SOOT,
+            paint(RED),
+            torn,
         );
-    } else if stage == 1 {
-        // The upper tier knocked askew, and the mast leaning over it, its yard with it.
-        let askew = bent(bridge(0.7, 2.07, -0.2), Vec3::Z, -0.22);
+    }
+    if class == Patrol {
+        // Her ensign flies from the stern staff.
+    } else if stage < 2 {
+        let (platform, mast) = if stage == 1 {
+            (
+                bent(bridge(0.7, 2.07, -0.2), Vec3::Z, -0.22),
+                bent(bridge(0., 2.58, -0.2), v(1., 0., 0.4), 0.75),
+            )
+        } else {
+            (
+                bevy::math::Affine3A::IDENTITY,
+                bevy::math::Affine3A::IDENTITY,
+            )
+        };
         m.tier_bent(
             bridge(0., 2.07, -0.2),
-            v(1.5, 0.52, 1.55) * s,
-            0.80,
+            v(1.5, 0.50, 1.55) * s,
+            0.78,
             paint(STEEL),
             paint(PALE),
-            askew,
+            platform,
         );
-        let lean = bent(bridge(0., 2.58, -0.2), v(1., 0., 0.4), 0.75);
-        m.tier_bent(
-            bridge(0., 2.58, -0.2),
-            v(0.16, 2., 0.17) * s,
-            0.6,
-            IRON,
-            IRON,
-            lean,
+        let at = |x, y, z| mast.transform_point3(bridge(x, y, z));
+        m.0.tube(
+            at(0., 2.55, -0.2),
+            at(0., 4.58, -0.2),
+            0.11 * s,
+            0.041 * s,
+            paint(IRON),
         );
-        m.tier_bent(
-            bridge(0., 3.7, -0.2),
-            v(2.15, 0.12, 0.15) * s,
-            1.,
-            PALE,
-            PALE,
-            lean,
-        );
+        for side in [-1., 1.] {
+            let yard = at(side * 1.24, 3.80, -0.2);
+            m.0.tube(at(0., 3.75, -0.2), yard, 0.070 * s, 0.039 * s, paint(PALE));
+            if stage == 0 {
+                m.0.tube(
+                    bridge(side * 0.91, 2.00, 0.76),
+                    at(0., 3.53, -0.2),
+                    0.065 * s,
+                    0.048 * s,
+                    STEEL,
+                );
+                m.0.tube(at(0., 4.31, -0.2), yard, 0.022 * s, 0.022 * s, IRON);
+            }
+        }
     } else {
         // The broken foot of her mast.
         let snapped = bent(bridge(0., roof, -0.2), Vec3::X, 0.3);
@@ -374,14 +445,7 @@ fn flagship_works(m: &mut Metal, class: EnemyClass, stage: u8) {
     if stage >= 2 {
         return;
     }
-    let glass = if stage == 0 { GLASS } else { SOOT };
-    m.tier(
-        bridge(0., 2.82, 0.),
-        v(2.85, 0.48, 3.05) * s,
-        0.96,
-        glass,
-        IRON,
-    );
+    m.windows(bridge(0., 2.82, 0.), v(2.85, 0.48, 3.05) * s, burnt);
     let sag = if stage == 0 {
         bevy::math::Affine3A::IDENTITY
     } else {
@@ -451,8 +515,7 @@ fn regent_works(m: &mut Metal, stage: u8) {
             IRON,
         );
         if stage < 2 {
-            let glass = if stage == 0 { GLASS } else { SOOT };
-            m.tier(v(0., d + 5., z), v(9.3, 2., 8.), 0.91, glass, paint(PALE));
+            m.windows(v(0., d + 5., z), v(9.3, 2., 8.), burnt);
             m.tier(v(0., d + 7., z), v(10., 0.9, 8.8), 0.97, paint(GOLD), PALE);
         }
     }
@@ -493,6 +556,31 @@ fn regent_works(m: &mut Metal, stage: u8) {
     }
 }
 
+/// Quarterdeck guardwires follow the narrowing stern. Their height stays close to
+/// a sailor's waist even on the Regent, giving the eye a scale for the larger hulls.
+fn quarterdeck(m: &mut Metal, class: EnemyClass) {
+    let p = class.profile();
+    let size = (p.hull.radius / 2.75).clamp(0.55, 1.20);
+    for side in [-1., 1.] {
+        let edge = |(x, z): (f32, f32)| {
+            Vec3::new(
+                x * (side * 0.97 * p.hull.radius / 2.75),
+                p.deck,
+                z * p.hull.bow / 16.,
+            )
+        };
+        // Cross only half the transom here; the other side meets it on centreline.
+        let outline = shipvivor_encounter::HULL_OUTLINE;
+        let points = [
+            edge(outline[3]),
+            edge(outline[4]),
+            edge(outline[5]),
+            edge((0., outline[5].1)),
+        ];
+        fittings::guardwires(&mut m.0, &points, size, PALE);
+    }
+}
+
 fn deckwork_into(m: &mut Metal, class: EnemyClass) {
     let p = class.profile();
     let v = Vec3::new;
@@ -503,37 +591,41 @@ fn deckwork_into(m: &mut Metal, class: EnemyClass) {
         m.tier(v(0., d, aft), v(0.13, height, 0.13), 0.7, IRON, PALE);
     }
     for &z in stacks(class) {
-        // The flagship has split, flared scarlet funnel caps.
-        let w = if class.is_flagship() { 1.42 } else { 1.2 };
-        let foot = v(0., d, z);
-        let height = stack_height(class, z);
-        m.tier(foot, v(w * s, height, 1.48 * s), 0.89, STEEL, IRON);
-        // A boss's funnels are banded in pale paint.
-        if class.is_boss() {
-            for y in [0.32, 0.78] {
-                m.tier(
-                    foot + Vec3::Y * height * y,
-                    v(w * s, 0.14 * s, 1.48 * s),
-                    1.,
-                    PALE,
-                    IRON,
-                );
-            }
-        }
-        m.tier(
-            foot + Vec3::Y * height,
-            v(w * s, 0.38 * s, 1.5 * s),
-            1.10,
+        let width = if class.is_flagship() { 1.42 } else { 1.2 };
+        let height = stack_height(class, z) + 0.52 * s;
+        fittings::funnel(
+            &mut m.0,
+            v(0., d, z),
+            v(width * s, height, 1.52 * s),
             RED,
-            IRON,
+            class.is_boss(),
         );
+    }
+    quarterdeck(m, class);
+    if matches!(class, Destroyer | Cruiser | Battleship | Commodore) {
+        // The boat deck sits between the bridge and the after battery. The boats are
+        // kept inboard of the secondary mounts on the larger hulls.
+        let after = *stacks(class).last().unwrap();
+        let beam = p.hull.radius;
         m.tier(
-            foot + Vec3::Y * (height + 0.38 * s),
-            v(0.9 * w * s, 0.14 * s, 1.2 * s),
-            1.,
-            IRON,
+            v(0., d, after * 0.5),
+            v(beam * 1.36, 0.30 * s, after + 1.7 * s),
+            0.96,
+            STEEL,
             IRON,
         );
+        let z = if class == Destroyer {
+            1.96
+        } else {
+            after * 0.59
+        };
+        for side in [-1., 1.] {
+            fittings::ship_boat(
+                &mut m.0,
+                v(side * beam * 0.55, d + 0.30 * s, z),
+                v(0.63 * s, 0.56 * s, 2.55 * s),
+            );
+        }
     }
     // A capital ship's deck-edge armour hangs in strakes of its own (see `strake`),
     // which can be shot off her.
@@ -623,12 +715,11 @@ fn coaster() -> Mesh {
     }
     // The wheelhouse aft: steel walls, a band of windows and a red roof.
     m.tier(v(0., d, 1.8), v(1.55, 0.72, 1.15), 0.94, STEEL, PALE);
-    m.tier(v(0., d + 0.72, 1.8), v(1.4, 0.27, 1.02), 1., GLASS, IRON);
+    m.windows(v(0., d + 0.72, 1.8), v(1.4, 0.27, 1.02), 0.);
     m.tier(v(0., d + 0.99, 1.8), v(1.66, 0.11, 1.26), 0.95, RED, PALE);
     // A stubby funnel behind it, with a red band under the cap.
-    m.tier(v(0., d, 2.8), v(0.44, 0.92, 0.5), 0.92, STEEL, IRON);
-    m.tier(v(0., d + 0.92, 2.8), v(0.42, 0.22, 0.48), 1.06, RED, IRON);
-    m.tier(v(0., d + 1.14, 2.8), v(0.4, 0.07, 0.45), 1., IRON, IRON);
+    fittings::funnel(&mut m.0, v(0., d, 2.8), v(0.44, 1.21, 0.5), RED, false);
+    quarterdeck(&mut m, Coaster);
     m.0.finish()
 }
 
@@ -644,12 +735,10 @@ fn torpedo_boat() -> Mesh {
     m.tier(v(0., d - 0.1, -4.), v(1.5, 0.34, 3.), 0.7, STEEL, PALE);
     // The bridge: steel walls, a band of windows and a red roof.
     m.tier(v(0., d, -1.7), v(1.45, 0.7, 1.35), 0.92, STEEL, PALE);
-    m.tier(v(0., d + 0.7, -1.7), v(1.3, 0.26, 1.2), 1., GLASS, IRON);
+    m.windows(v(0., d + 0.7, -1.7), v(1.3, 0.26, 1.2), 0.);
     m.tier(v(0., d + 0.96, -1.7), v(1.55, 0.1, 1.45), 0.95, RED, PALE);
     // A raked funnel abaft it with a red band under the cap.
-    m.tier(v(0., d, 0.3), v(0.62, 1.05, 0.8), 0.86, STEEL, IRON);
-    m.tier(v(0., d + 1.05, 0.38), v(0.56, 0.24, 0.72), 1.04, RED, IRON);
-    m.tier(v(0., d + 1.29, 0.42), v(0.52, 0.07, 0.66), 1., IRON, IRON);
+    fittings::funnel(&mut m.0, v(0., d, 0.42), v(0.62, 1.36, 0.80), RED, false);
     // The tube on its turntable, its muzzle forward and its breech over the stern.
     m.tier(v(0., d, 2.9), v(0.95, 0.32, 0.95), 0.9, IRON, PALE);
     m.0.tube(v(0., d + 0.5, 1.1), v(0., d + 0.5, 4.7), 0.25, 0.25, IRON);
@@ -666,16 +755,31 @@ pub fn gun(class: EnemyClass, barrels: u8) -> Mesh {
     let v = Vec3::new;
     // A boss's turrets carry gold bands, the rest red.
     let stripe = if class.is_boss() { GOLD } else { RED };
-    m.tier(Vec3::ZERO, v(2.3, 0.24, 2.3), 1., IRON, IRON);
-    m.tier(v(0., 0.22, 0.), v(2.22, 0.72, 2.05), 0.88, STEEL, PALE);
-    m.tier(v(0., 0.92, 0.), v(1.98, 0.31, 1.86), 0.86, stripe, stripe);
-    m.tier(v(0., 1.22, 0.), v(1.67, 0.14, 1.57), 0.92, PALE, PALE);
+    m.0.tube(Vec3::ZERO, Vec3::Y * 0.26, 1.09, 1.09, IRON);
+    // The deep mantlet sits low on the sloping face. The roof sweeps back above
+    // it, while the rear wall stands nearly plumb over the turntable.
+    let lower = HOUSE.map(|(x, z)| v(x * 2.27, 0.24, z * 2.24));
+    let roof = HOUSE.map(|(x, z)| {
+        v(
+            x * 1.85,
+            1.28 + 0.08 * z,
+            if z < 0. { z * 1.33 } else { z * 2.13 },
+        )
+    });
+    for i in 0..HOUSE.len() {
+        let j = (i + 1) % HOUSE.len();
+        let at = |k: usize, t| lower[k].lerp(roof[k], t);
+        for (lo, hi, paint) in [(0., 0.72, STEEL), (0.72, 0.82, stripe), (0.82, 1., STEEL)] {
+            m.0.quad([at(i, lo), at(i, hi), at(j, hi), at(j, lo)], paint);
+        }
+        m.0.triangle([v(0., 1.28, 0.), roof[j], roof[i]], PALE);
+    }
+    m.tier(v(0.38, 1.29, 0.43), v(0.48, 0.06, 0.45), 0.93, IRON, STEEL);
+    let width = 0.42 + 0.55 * f32::from(barrels.saturating_sub(1));
+    m.tier(v(0., 0.50, -0.91), v(width, 0.45, 0.30), 0.98, IRON, STEEL);
     for i in 0..barrels {
         let x = (f32::from(i) - f32::from(barrels - 1) * 0.5) * 0.55;
-        m.tier(v(x, 0.58, -1.9), v(0.26, 0.27, 2.6), 1., IRON, STEEL);
-        m.tier(v(x, 0.53, -1.24), v(0.40, 0.39, 1.15), 0.95, STEEL, PALE);
-        m.tier(v(x, 0.56, -3.05), v(0.32, 0.32, 0.31), 1., PALE, PALE);
-        m.tier(v(x, 0.62, -3.205), v(0.20, 0.18, 0.04), 1., IRON, IRON);
+        fittings::gun_tube(&mut m.0, v(x, 0.73, -0.85), 2.37, 0.21);
     }
     m.0.finish()
 }

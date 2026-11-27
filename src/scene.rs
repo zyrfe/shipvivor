@@ -1,4 +1,5 @@
 mod bridge;
+pub(crate) mod fittings;
 mod hull;
 mod paint;
 pub(crate) mod spray;
@@ -20,6 +21,8 @@ pub(crate) struct Masthead;
 #[derive(Clone, Copy)]
 enum Anchor {
     Hull,
+    /// Spans the frames and widens with the hull.
+    HullWidth,
     Bridge,
     Machinery,
 }
@@ -32,7 +35,7 @@ pub struct DeckFitting {
 impl DeckFitting {
     /// Fitted along the hull itself, rather than on the bridge or the machinery.
     pub(crate) fn on_hull(&self) -> bool {
-        matches!(self.anchor, Anchor::Hull)
+        matches!(self.anchor, Anchor::Hull | Anchor::HullWidth)
     }
 }
 #[derive(Component)]
@@ -93,8 +96,11 @@ pub fn refit_hull(
         pose.translation.z = match fitting.anchor {
             Anchor::Bridge => fitting.z + offsets.bridge_z,
             Anchor::Machinery => fitting.z + offsets.machinery_z,
-            Anchor::Hull => Hull::deck_z(fitting.z, hull.extension()),
+            Anchor::Hull | Anchor::HullWidth => Hull::deck_z(fitting.z, hull.extension()),
         };
+        if matches!(fitting.anchor, Anchor::HullWidth) {
+            pose.scale.x = offsets.beam_scale;
+        }
         if !matches!(fitting.anchor, Anchor::Bridge) {
             pose.translation.x = fitting.x * offsets.beam_scale;
         }
@@ -601,55 +607,38 @@ pub fn setup(
             1.,
         );
     }
-    let funnel = meshes.add(Cylinder::new(0.5, 1.).mesh().resolution(24));
+    let gunmetal = materials.add(StandardMaterial {
+        metallic: 0.15,
+        perceptual_roughness: 0.56,
+        ..default()
+    });
+    let mut stack = Facets::default();
+    fittings::funnel(
+        &mut stack,
+        Vec3::ZERO,
+        Vec3::new(1.73, 3.01, 1.98),
+        Color::srgb_u8(195, 139, 67),
+        false,
+    );
+    let funnel = meshes.add(stack.finish());
     for z in [0.5, 2.75] {
         fitting(
             Anchor::Machinery,
             &funnel,
-            &steel,
+            &gunmetal,
             0.,
-            2.45,
+            1.55,
             z,
-            1.75,
-            2.0,
-            2.3,
-        );
-        fitting(
-            Anchor::Machinery,
-            &funnel,
-            &brass,
-            0.,
-            3.72,
-            z,
-            1.75,
-            0.65,
-            2.3,
-        );
-        fitting(
-            Anchor::Machinery,
-            &funnel,
-            &iron,
-            0.,
-            4.28,
-            z,
-            1.85,
-            0.55,
-            2.4,
+            1.,
+            1.,
+            1.,
         );
     }
-    // Paired covered launches alongside the aft stack.
-    for x in [-1.9, 1.9] {
-        fitting(
-            Anchor::Machinery,
-            &drum,
-            &ivory,
-            x,
-            1.83,
-            2.9,
-            0.9,
-            0.45,
-            3.5,
-        );
+    let mut boat = Facets::default();
+    fittings::ship_boat(&mut boat, Vec3::ZERO, Vec3::new(0.94, 0.76, 3.35));
+    let launch = meshes.add(boat.finish());
+    for x in [-1.84, 1.84] {
+        fitting(Anchor::Hull, &launch, &gunmetal, x, 1.56, 4.9, 1., 1., 1.);
     }
     // Deck fittings and rail stanchions keep the silhouette readable in the gunsight.
     for side in [-1., 1.] {
@@ -693,17 +682,6 @@ pub fn setup(
         }
         fitting(
             Anchor::Hull,
-            &drum,
-            &iron,
-            side * 1.2,
-            hull::deck_height(-11.6) + 0.30,
-            -11.6,
-            0.45,
-            0.65,
-            0.45,
-        );
-        fitting(
-            Anchor::Hull,
             &cube,
             &steel,
             side * 1.38,
@@ -715,17 +693,16 @@ pub fn setup(
         );
     }
     fitting(
-        Anchor::Hull,
-        &drum,
-        &iron,
+        Anchor::HullWidth,
+        &meshes.add(fittings::quarterdeck()),
+        &gunmetal,
         0.,
-        hull::deck_height(-12.5) + 0.19,
-        -12.5,
-        1.15,
-        0.4,
-        1.15,
+        1.55,
+        8.1,
+        1.,
+        1.,
+        1.,
     );
-    fitting(Anchor::Hull, &cube, &pale, 0., 1.8, 12., 1.4, 0.35, 1.1);
     // Compact deck-edge tubes on both sides of the aft funnel.
     for side in [-1., 1.] {
         fitting(
@@ -1005,7 +982,9 @@ pub fn setup(
         }
     }
     let house = meshes.add(crate::ordnance::cruiser_gunhouse());
-    let gunmetal = materials.add(StandardMaterial::default());
+    let mut barrel = Facets::default();
+    fittings::gun_tube(&mut barrel, Vec3::new(0., 0., -0.90), 3.18, 0.23);
+    let main_tube = meshes.add(barrel.finish());
     let ring = meshes.add(Cylinder::new(0.5, 1.).mesh().resolution(20));
     for station in Station::SLOTS {
         commands.spawn((
@@ -1054,28 +1033,14 @@ pub fn setup(
             ));
         }
         for tube in 0..TurretLayout::Quad.count() {
-            let tubes = commands
-                .spawn((
-                    GunTubes { station, tube },
-                    Transform::from_xyz(0., 0.63, 0.),
-                    Visibility::Hidden,
-                    ChildOf(mount),
-                ))
-                .id();
-            for (depth, width, length, mat) in [
-                (-1.72, 0.43, 1.58, &steel),
-                (-2.95, 0.29, 2.15, &iron),
-                (-3.99, 0.34, 0.18, &pale),
-            ] {
-                commands.spawn((
-                    Mesh3d(drum.clone()),
-                    MeshMaterial3d(mat.clone()),
-                    Transform::from_xyz(0., 0., depth)
-                        .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
-                        .with_scale(Vec3::new(width, length, width)),
-                    ChildOf(tubes),
-                ));
-            }
+            commands.spawn((
+                GunTubes { station, tube },
+                Mesh3d(main_tube.clone()),
+                MeshMaterial3d(gunmetal.clone()),
+                Transform::from_xyz(0., 0.63, 0.),
+                Visibility::Hidden,
+                ChildOf(mount),
+            ));
         }
     }
 
