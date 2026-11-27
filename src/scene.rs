@@ -189,8 +189,20 @@ fn wing_house_scale(bore: u16) -> f32 {
 pub struct RangeTower;
 #[derive(Component)]
 pub struct TowerTier(u16);
-#[derive(Component)]
-pub struct SpottingTop;
+#[derive(Component, Default)]
+pub struct SpottingTop {
+    /// Where the top is trained, in radians clockwise from the bow.
+    train: f32,
+}
+impl SpottingTop {
+    #[cfg(test)]
+    pub(crate) fn train(&self) -> f32 {
+        self.train
+    }
+}
+/// How fast the spotting top trains round after the sight, in radians a second: half
+/// a turn in a second, so a snap of the sight is seen to swing it.
+const TOP_TRAIN_RATE: f32 = std::f32::consts::PI;
 /// Height of the bridge roof the tower stands on, and of the top of each tier.
 const BRIDGE_ROOF: f32 = 4.57;
 const TIER_TOPS: [f32; 5] = [5.55, 6.85, 8.0, 9.0, 9.85];
@@ -198,13 +210,19 @@ const TIER_TOPS: [f32; 5] = [5.55, 6.85, 8.0, 9.0, 9.85];
 const TIER_WIDTHS: [f32; 5] = [1.9, 1.45, 1.15, 0.9, 0.72];
 
 /// The tower stands as many tiers high as rangefinders are fitted, with the spotting
-/// top on the highest.
+/// top on the highest. At sea the top trains round after the sight, its arms square to
+/// the line the player is looking along. In the dock it lies fore and aft.
 pub fn place_tower(
     run: Res<Campaign>,
+    helm: Res<PlayerHelm>,
+    view: Res<crate::camera::ShipView>,
+    time: Res<Time>,
     mut towers: Query<&mut Visibility, With<RangeTower>>,
     mut tiers: Query<(&TowerTier, &mut Visibility), Without<RangeTower>>,
-    mut tops: Query<&mut Transform, With<SpottingTop>>,
+    mut tops: Query<(&mut SpottingTop, &mut Transform)>,
 ) {
+    use crate::state::{Mode, Screen};
+    use std::f32::consts::{PI, TAU};
     let ranks = run
         .display_fittings()
         .wing_range
@@ -225,8 +243,25 @@ pub fn place_tower(
         });
     }
     let top = TIER_TOPS[usize::from(ranks.max(1)) - 1];
-    for mut pose in &mut tops {
+    // The sight is the player's only where the camera rides the ship's own view.
+    let yard = matches!(run.screen(), Screen::Drydock(_));
+    let sighting = !yard && run.mode != Mode::Title && run.screen() != Screen::Customise;
+    let wanted = if sighting {
+        view.bearing - helm.heading
+    } else {
+        0.
+    };
+    // In the dock it is simply found fore and aft; at sea it swings round at its rate.
+    let step = if yard {
+        TAU
+    } else {
+        TOP_TRAIN_RATE * time.delta_secs()
+    };
+    for (mut spotting, mut pose) in &mut tops {
         pose.translation.y = top;
+        let turn = (wanted - spotting.train + PI).rem_euclid(TAU) - PI;
+        spotting.train = (spotting.train + turn.clamp(-step, step)).rem_euclid(TAU);
+        pose.rotation = Quat::from_rotation_y(-spotting.train);
     }
 }
 
@@ -765,7 +800,7 @@ pub fn setup(
     }
     let top = commands
         .spawn((
-            SpottingTop,
+            SpottingTop::default(),
             Transform::from_xyz(0., TIER_TOPS[0], bridge_z),
             Visibility::Inherited,
             ChildOf(tower),

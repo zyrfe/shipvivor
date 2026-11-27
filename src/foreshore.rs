@@ -15,6 +15,7 @@ use std::f32::consts::TAU;
 pub(super) enum Coast {
     Yard(Harbour),
     Landmark(LandmarkKind),
+    IndustrialRock,
 }
 
 impl Coast {
@@ -33,6 +34,7 @@ impl Coast {
             Self::Landmark(LandmarkKind::Glacier) => 139,
             Self::Landmark(LandmarkKind::Mainland) => 151,
             Self::Landmark(LandmarkKind::Airfield) => 163,
+            Self::IndustrialRock => 181,
         }
     }
 
@@ -67,6 +69,9 @@ impl Coast {
 
     fn height(self, p: Vec2) -> f32 {
         let a = p.y.atan2(p.x);
+        if self == Self::IndustrialRock {
+            return industrial_profile(p.length() / ISLAND_RADIUS, a);
+        }
         let r = p.length() / self.radius(a);
         // An airfield's island is levelled nearly to its edge for the field.
         let ledge = if self == Self::Landmark(LandmarkKind::Airfield) {
@@ -77,6 +82,104 @@ impl Coast {
         let slope = ((r - ledge) / (1. - ledge)).max(0.);
         3.13 + self.crest(p) - 3.42 * slope.powf(0.79)
     }
+}
+
+// The extra headland shelves and offshore skerries are scaled to the port's land
+// volumes. The same profile determines the sea's depth and the exposed basalt face.
+const INDUSTRIAL_CREST: f32 = 10.;
+const ROCK_RINGS: usize = 6;
+
+/// Offset the shelves along the joint sets in the basalt. The summit stays level
+/// beneath the machine but the edges break into steep buttresses and talus.
+fn rock_section(ring: usize, a: f32) -> (f32, f32) {
+    let joint = (3. * a + 0.7).sin() * (5. * a - 1.6).cos();
+    let rib = (7. * a + 0.4).cos();
+    let edge = 0.98 + 0.05 * joint + 0.03 * rib;
+    match ring {
+        0 => (0., 1.),
+        1 => (0.54 + 0.11 * joint, 0.96 + 0.04 * rib),
+        2 => (0.72 + 0.12 * joint, 0.68 + 0.17 * rib),
+        3 => (0.79 + 0.11 * joint + 0.035 * rib, 0.36 + 0.16 * joint),
+        4 => (edge * 0.93, 0.12 + 0.07 * rib),
+        _ => (edge * 1.055, -0.17),
+    }
+}
+
+fn industrial_profile(r: f32, a: f32) -> f32 {
+    let mut prev = rock_section(0, a);
+    for ring in 1..ROCK_RINGS {
+        let next = rock_section(ring, a);
+        if r <= next.0 {
+            return INDUSTRIAL_CREST * prev.1.lerp(next.1, (r - prev.0) / (next.0 - prev.0));
+        }
+        prev = next;
+    }
+    -8.
+}
+
+pub(super) fn industrial_rock_scale(radius: f32, height: f32) -> Vec3 {
+    Vec3::new(
+        radius / ISLAND_RADIUS,
+        height / INDUSTRIAL_CREST,
+        radius / ISLAND_RADIUS,
+    )
+}
+
+pub(super) fn industrial_rock() -> Mesh {
+    let mut ledge = features();
+    const FACES: u32 = 23;
+    let vertex = |i: u32, ring: usize| {
+        let i = i % FACES;
+        let a = (i as f32 + 0.46 * (sample(i, ring as u32, 181) - 0.5)) * TAU / FACES as f32;
+        let (r, h) = rock_section(ring, a);
+        (Vec2::from_angle(a) * (r * ISLAND_RADIUS))
+            .extend(INDUSTRIAL_CREST * h)
+            .xzy()
+    };
+    let tone = |i, r| 0.78 + 0.32 * sample(i, r, 97);
+    for i in 0..FACES {
+        let cap = if i % 7 < 3 {
+            bright(TRODDEN, tone(i, 0))
+        } else {
+            tint([158, 155, 147], tone(i, 0))
+        };
+        ledge.face([vertex(i, 0), vertex(i + 1, 1), vertex(i, 1)], cap);
+        for ring in 1..ROCK_RINGS - 1 {
+            let [a, b, c, d] = [
+                vertex(i, ring),
+                vertex(i + 1, ring),
+                vertex(i + 1, ring + 1),
+                vertex(i, ring + 1),
+            ];
+            let k = ring as u32;
+            let base = if ring == 4 {
+                [90, 98, 98]
+            } else {
+                [140, 143, 142]
+            };
+            let seam = sample(i, k, 32);
+            let face = if ring <= 2 && seam > 0.62 {
+                bright(TRODDEN, 0.82 + 0.18 * seam)
+            } else {
+                tint(base, tone(i, k))
+            };
+            // Alternate the diagonal to break the constant circumferential band
+            // one would otherwise see from the bridge at close range.
+            if (i + k).is_multiple_of(2) {
+                ledge.face([a, b, c], face);
+                ledge.face([a, c, d], tint(base, tone(i + 2, k)));
+            } else {
+                ledge.face([a, b, d], tint(base, tone(i + 2, k)));
+                ledge.face([b, c, d], face);
+            }
+        }
+        if i % 3 != 1 {
+            let foot = vertex(i, 4) * 0.96 - Vec3::Y * 0.95;
+            let w = 1.5 + sample(i, 0, 72) * 1.4;
+            ledge.slab(foot, Vec3::new(w, w * 0.85, w * 0.74), 0.5, 181 + i);
+        }
+    }
+    surfaces::weathered_mesh(ledge.facets, 5.6)
 }
 
 fn noise(uv: Vec2, cells: i32, seed: u32) -> f32 {
@@ -447,7 +550,8 @@ pub(super) fn mesh(coast: Coast) -> Mesh {
             | LandmarkKind::Glacier
             | LandmarkKind::Mainland
             | LandmarkKind::Airfield,
-        ) => {}
+        )
+        | Coast::IndustrialRock => {}
     }
     surfaces::weathered_mesh(out.facets, 5.6)
 }
@@ -498,13 +602,24 @@ pub(crate) fn shoals(battle: &shipvivor_encounter::Battle) -> (Image, Vec4) {
                 Coast::Yard(Harbour::for_factories(p.factories().len())),
                 p.body,
                 ISLAND_RADIUS,
+                1.,
             )
         })
+        .chain(battle.ports().iter().flat_map(|port| {
+            port.industrial_rocks().map(move |(pos, radius, height)| {
+                (
+                    Coast::IndustrialRock,
+                    shipvivor_encounter::Body { pos, ..port.body },
+                    radius,
+                    height / INDUSTRIAL_CREST,
+                )
+            })
+        }))
         .chain(
             battle
                 .landmarks()
                 .iter()
-                .map(|p| (Coast::Landmark(p.kind), p.body, p.radius)),
+                .map(|p| (Coast::Landmark(p.kind), p.body, p.radius, 1.)),
         )
         .collect();
     let mainland = Coast::Landmark(LandmarkKind::Mainland);
@@ -519,7 +634,7 @@ pub(crate) fn shoals(battle: &shipvivor_encounter::Battle) -> (Image, Vec4) {
     };
     let mut lo = Vec2::splat(f32::INFINITY);
     let mut hi = Vec2::splat(f32::NEG_INFINITY);
-    for &(coast, body, radius) in &sites {
+    for &(coast, body, radius, _) in &sites {
         lo = lo.min(body.pos - reach(coast, radius) - METRES * 4.);
         hi = hi.max(body.pos + reach(coast, radius) + METRES * 4.);
     }
@@ -529,7 +644,7 @@ pub(crate) fn shoals(battle: &shipvivor_encounter::Battle) -> (Image, Vec4) {
         let pixel = &mut texels[(z * extent.x + x) as usize];
         *pixel = (*pixel).max(((height + 8.) * (255. / 12.)) as u8);
     };
-    for (coast, body, radius) in sites {
+    for (coast, body, radius, height_scale) in sites {
         let center = (body.pos - lo) / METRES;
         let pad = reach(coast, radius) / METRES;
         let first = (center - pad).floor().max(Vec2::ZERO).as_uvec2();
@@ -568,7 +683,7 @@ pub(crate) fn shoals(battle: &shipvivor_encounter::Battle) -> (Image, Vec4) {
                 let height = if inside_berth(&cut, local) {
                     -5.
                 } else {
-                    coast.height(local)
+                    coast.height(local) * height_scale
                 };
                 chart(x, z, height);
             }

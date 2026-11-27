@@ -6,7 +6,7 @@
 //! launchers on each rack, all sharing their section's gear, and give each plane a
 //! stick of bombs and each launcher a bigger salvo. The renderer reads the planes, their
 //! bombs and the missiles from here.
-use super::{Battle, Body, Effect, EffectKind, Events, ISLAND_RADIUS, bearing, body, coast, entry};
+use super::{Battle, Body, Effect, EffectKind, Events, bearing, body, coast, entry};
 use glam::{Vec2, Vec3};
 use shipvivor_compass::direction;
 use shipvivor_shipyard::{
@@ -657,7 +657,7 @@ impl Battle {
             let land = self
                 .ports
                 .iter()
-                .map(|p| (p.body.pos, ISLAND_RADIUS))
+                .flat_map(|p| p.shores())
                 .chain(self.landmarks.iter().map(|l| (l.body.pos, l.radius)))
                 .filter_map(|(at, r)| entry(from, to, at, r))
                 .min_by(f32::total_cmp);

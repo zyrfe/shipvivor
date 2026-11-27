@@ -4,7 +4,9 @@
 //! game and the simulator both sail these sectors.
 use glam::{Mat2, Vec2};
 use shipvivor_campaign::{Fleet, Grade, MAX_STARS, PATROLS, POOLS, ROUNDS, Stage, YARD_POINTS};
-use shipvivor_encounter::{Battle, Chart, Doctrine, EnemyClass, Surprise, Waters, leg_seed};
+use shipvivor_encounter::{
+    Battle, Chart, Doctrine, EnemyClass, IndustrialYard, Surprise, Waters, leg_seed,
+};
 
 /// The weather of a stage as plain numbers. The game turns them into its seascape.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -176,6 +178,8 @@ type Climate = (f32, f32, f32, f32);
 fn sea(stage: Stage) -> (Kind, Plan, Climate) {
     use Kind::*;
     use Stage::*;
+    const MILL: u8 = IndustrialYard::RedShift.works();
+    const FORGE: u8 = IndustrialYard::BellWorks.works();
     match stage {
         // The anchorages. A; B; C, or A and B together; C.
         LanternBay => (Sound, &[&[1], &[1], &[3]], (0.14, 85., 0.12, 9.5)),
@@ -223,33 +227,85 @@ fn sea(stage: Stage) -> (Kind, Plan, Climate) {
         // A clear, calm haven, and the yards there work fast.
         TernHaven => (Sound, &[&[1, 1], &[2], &[3]], (0.12, 120., 0.1, 4.8)),
         NorthlightReach => (Open, &[&[1], &[2], &[2, 3]], (0.3, 10., 0.05, 5.1)),
-        // The fifth round: five bases, with a pair to choose between on the way up.
-        LongnightRoad => (Open, &[&[1], &[1, 2], &[2, 3]], (0.6, 20., 0.8, 4.8)),
-        HollowSound => (Sound, &[&[1], &[2], &[1, 2], &[3]], (0.24, 200., 0.45, 5.2)),
-        SplinterCut => (Cut, &[&[1], &[1, 2], &[2], &[3]], (0.85, 145., 0.75, 4.7)),
-        PolarRoad => (Open, &[&[1], &[2], &[1, 4], &[3]], (0.5, 65., 0.1, 5.)),
-        SleetSound => (Sound, &[&[1, 1], &[2], &[2, 3]], (0.35, 135., 0.9, 5.)),
-        AnvilCut => (Cut, &[&[1], &[2], &[2], &[2, 3]], (0.6, 175., 0.55, 4.8)),
-        BlackwaterNarrows => (Narrows, &[&[1], &[1, 2], &[2], &[3]], (0.7, 110., 1., 4.7)),
-        RavensReach => (Open, &[&[1], &[1, 2], &[2], &[3]], (0.8, 40., 0.6, 4.7)),
-        HarrowBay => (Sound, &[&[1], &[1, 2], &[4], &[3]], (0.2, 90., 0.35, 5.2)),
-        CoffinCut => (Cut, &[&[1], &[1, 2], &[2], &[3]], (0.75, 185., 0.85, 4.8)),
-        HailstoneSound => (Sound, &[&[1], &[2], &[1, 2], &[3]], (0.45, 160., 0.8, 5.)),
-        ShroudBay => (Sound, &[&[1], &[1, 2], &[4], &[3]], (0.18, 140., 1., 4.9)),
-        // The last patrol: five bases.
-        BorealRoad => (Open, &[&[1], &[2], &[1, 2], &[3]], (0.75, 85., 0.55, 4.4)),
-        CalvingSound => (Sound, &[&[1], &[1, 2], &[2], &[3]], (0.3, 165., 0.7, 4.8)),
+        // The fifth patrol ends at the Red Shift rolling mill.
+        LongnightRoad => (Open, &[&[1], &[1, 2], &[2, MILL]], (0.6, 20., 0.8, 4.8)),
+        HollowSound => (
+            Sound,
+            &[&[1], &[2], &[1, 2], &[MILL]],
+            (0.24, 200., 0.45, 5.2),
+        ),
+        SplinterCut => (
+            Cut,
+            &[&[1], &[1, 2], &[2], &[MILL]],
+            (0.85, 145., 0.75, 4.7),
+        ),
+        PolarRoad => (Open, &[&[1], &[2], &[1, 4], &[MILL]], (0.5, 65., 0.1, 5.)),
+        SleetSound => (Sound, &[&[1, 1], &[2], &[2, MILL]], (0.35, 135., 0.9, 5.)),
+        AnvilCut => (Cut, &[&[1], &[2], &[2], &[2, MILL]], (0.6, 175., 0.55, 4.8)),
+        BlackwaterNarrows => (
+            Narrows,
+            &[&[1], &[1, 2], &[2], &[MILL]],
+            (0.7, 110., 1., 4.7),
+        ),
+        RavensReach => (Open, &[&[1], &[1, 2], &[2], &[MILL]], (0.8, 40., 0.6, 4.7)),
+        HarrowBay => (
+            Sound,
+            &[&[1], &[1, 2], &[4], &[MILL]],
+            (0.2, 90., 0.35, 5.2),
+        ),
+        CoffinCut => (
+            Cut,
+            &[&[1], &[1, 2], &[2], &[MILL]],
+            (0.75, 185., 0.85, 4.8),
+        ),
+        HailstoneSound => (
+            Sound,
+            &[&[1], &[2], &[1, 2], &[MILL]],
+            (0.45, 160., 0.8, 5.),
+        ),
+        ShroudBay => (
+            Sound,
+            &[&[1], &[1, 2], &[4], &[MILL]],
+            (0.18, 140., 1., 4.9),
+        ),
+        // The last patrol ends at the Bell Works steam forge.
+        BorealRoad => (
+            Open,
+            &[&[1], &[2], &[1, 2], &[FORGE]],
+            (0.75, 85., 0.55, 4.4),
+        ),
+        CalvingSound => (
+            Sound,
+            &[&[1], &[1, 2], &[2], &[FORGE]],
+            (0.3, 165., 0.7, 4.8),
+        ),
         // The last way through to the Regent lies through the worst of the weather.
-        RegentsGate => (Cut, &[&[1], &[2], &[2], &[2, 3]], (0.95, 135., 1., 4.2)),
-        MidwinterRoad => (Open, &[&[1], &[1, 2], &[2, 3]], (0.65, 30., 0.9, 4.4)),
-        AdmiraltySound => (Sound, &[&[1, 1], &[4], &[2, 3]], (0.4, 95., 0.5, 4.6)),
-        BastionCut => (Cut, &[&[1], &[1, 2], &[2], &[3]], (0.7, 150., 0.7, 4.3)),
-        GauntletNarrows => (Narrows, &[&[1], &[1, 2], &[2], &[3]], (0.85, 60., 0.8, 4.2)),
-        CitadelBay => (Sound, &[&[1], &[2], &[1, 4], &[3]], (0.22, 190., 0.4, 4.7)),
-        WhiteoutReach => (Open, &[&[1], &[1, 2], &[2], &[3]], (0.9, 120., 1., 4.3)),
-        DevilsThroat => (Narrows, &[&[1], &[1, 2], &[2], &[3]], (0.9, 30., 0.9, 4.3)),
-        WolfpackNarrows => (Narrows, &[&[1], &[2], &[1, 2], &[3]], (0.6, 50., 0.65, 4.3)),
-        TempestRoad => (Open, &[&[1], &[1, 4], &[2, 3]], (0.95, 115., 0.95, 4.4)),
+        RegentsGate => (Cut, &[&[1], &[2], &[2], &[2, FORGE]], (0.95, 135., 1., 4.2)),
+        MidwinterRoad => (Open, &[&[1], &[1, 2], &[2, FORGE]], (0.65, 30., 0.9, 4.4)),
+        AdmiraltySound => (Sound, &[&[1, 1], &[4], &[2, FORGE]], (0.4, 95., 0.5, 4.6)),
+        BastionCut => (Cut, &[&[1], &[1, 2], &[2], &[FORGE]], (0.7, 150., 0.7, 4.3)),
+        GauntletNarrows => (
+            Narrows,
+            &[&[1], &[1, 2], &[2], &[FORGE]],
+            (0.85, 60., 0.8, 4.2),
+        ),
+        CitadelBay => (
+            Sound,
+            &[&[1], &[2], &[1, 4], &[FORGE]],
+            (0.22, 190., 0.4, 4.7),
+        ),
+        WhiteoutReach => (Open, &[&[1], &[1, 2], &[2], &[FORGE]], (0.9, 120., 1., 4.3)),
+        DevilsThroat => (
+            Narrows,
+            &[&[1], &[1, 2], &[2], &[FORGE]],
+            (0.9, 30., 0.9, 4.3),
+        ),
+        WolfpackNarrows => (
+            Narrows,
+            &[&[1], &[2], &[1, 2], &[FORGE]],
+            (0.6, 50., 0.65, 4.3),
+        ),
+        TempestRoad => (Open, &[&[1], &[1, 4], &[2, FORGE]], (0.95, 115., 0.95, 4.4)),
         // A broad deep for the Regent, under a long swell and a clearing sky: A; B and
         // C together. Its breadth is set apart in `Sector::of`.
         CrownDeep => (Open, &[&[1], &[2, 3]], (0.48, 76., 0.24, 5.5)),
@@ -318,7 +374,8 @@ impl Sector {
 
     /// An airfield base stands somewhere up the channel.
     pub fn airfield(&self) -> bool {
-        (self.waters.stages.iter()).any(|stage| stage.contains(&shipvivor_encounter::AIRFIELD_WORKS))
+        (self.waters.stages.iter())
+            .any(|stage| stage.contains(&shipvivor_encounter::AIRFIELD_WORKS))
     }
 
     /// How often raiders put out here beside the other seas of the round's pool, whatever
@@ -436,7 +493,12 @@ impl Sector {
     /// The hand-set chart of this stage.
     pub fn classic(&self) -> Chart {
         let rotation = Mat2::from_angle(self.bearing);
-        Chart::classic(self.waypoints.map(|p| rotation * p * self.spacing))
+        let finale = self
+            .plan()
+            .last()
+            .and_then(|stage| stage.last())
+            .and_then(|&works| IndustrialYard::from_works(works));
+        Chart::classic_with_yard(self.waypoints.map(|p| rotation * p * self.spacing), finale)
     }
 
     /// The ports, islands and patrols of a chart.

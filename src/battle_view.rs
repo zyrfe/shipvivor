@@ -7,6 +7,8 @@ mod foreshore;
 mod harbour_models;
 #[path = "harbour_signals.rs"]
 mod harbour_signals;
+#[path = "industrial_view.rs"]
+mod industrial_view;
 #[path = "mainland.rs"]
 mod mainland;
 #[path = "airfield_models.rs"]
@@ -23,14 +25,14 @@ use crate::surfaces;
 use bevy::prelude::*;
 use foreshore::Coast;
 pub(crate) use foreshore::shoals;
-use harbour_models::Harbour;
+use harbour_models::{Harbour, IndustrialPart};
 pub(crate) use harbour_signals::{
     animate as animate_harbour_signals, dye as dye_ensigns, fly_pennant, stream_funnel_smoke,
 };
 pub(crate) use mainland::MainlandPlugin;
 use shipvivor_encounter::{
-    Airframe, Battery, Body, EffectKind, EnemyClass, FOOTING, FeatureKind, ISLAND_RADIUS, Landmark,
-    LandmarkKind, YardState,
+    Airframe, Battery, Body, EffectKind, EnemyClass, FOOTING, FeatureKind, ISLAND_RADIUS,
+    IndustrialYard, Landmark, LandmarkKind, YardState,
 };
 use std::collections::HashMap;
 
@@ -52,6 +54,8 @@ enum Shape {
     PlateRigging,
     SuspendedPlate,
     Factory(Harbour, u8, bool),
+    Industrial(IndustrialYard, IndustrialPart, u8),
+    IndustrialRock(u8),
     Exhaust(u8),
     GunPlatform(u8),
     SecondaryMount(u8),
@@ -103,6 +107,7 @@ enum Shape {
     FlakPuff(u8),
     Flash,
     Muzzle,
+    TankLid,
     Smoke,
     FunnelSmoke(u8),
     FoamRing,
@@ -158,6 +163,8 @@ pub struct Kit {
     gun_platform: Handle<Mesh>,
     yards: HashMap<(Harbour, YardState), Handle<Mesh>>,
     factories: HashMap<(Harbour, bool), Handle<Mesh>>,
+    industry: HashMap<(IndustrialYard, IndustrialPart), Handle<Mesh>>,
+    industrial_rock: Handle<Mesh>,
     conveyor: Handle<Mesh>,
     signals: harbour_signals::SignalKit,
     cradles: [Handle<Mesh>; 3],
@@ -323,6 +330,8 @@ pub fn setup(
         gun_platform: meshes.add(harbour_models::gun_platform()),
         yards,
         factories,
+        industry: industrial_view::meshes(&mut meshes),
+        industrial_rock: meshes.add(foreshore::industrial_rock()),
         signals,
         conveyor: meshes.add(harbour_models::conveyor()),
         cradles: [0, 1, 2].map(|progress| meshes.add(harbour_models::cradle(progress))),
@@ -849,7 +858,7 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
                         Vec3::ONE,
                     );
                 }
-                Coast::Landmark(_) => {}
+                Coast::Landmark(_) | Coast::IndustrialRock => {}
             }
         }
         Shape::Yard(harbour, state) => part(
@@ -875,6 +884,16 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
             Vec3::ZERO,
             Vec3::ONE,
         ),
+        Shape::Industrial(kind, shape, _) => {
+            // Furnace throats and instrument lamps carry their own light in fog
+            // and on the unlit side of the quay.
+            let material = match shape {
+                IndustrialPart::Heat(_) | IndustrialPart::GaugeLight => &kit.incandescent,
+                _ => &kit.construction,
+            };
+            part(&kit.industry[&(kind, shape)], material, Vec3::ZERO, Vec3::ONE);
+        }
+        Shape::IndustrialRock(_) => part(&kit.industrial_rock, &kit.ground, Vec3::ZERO, Vec3::ONE),
         Shape::Cradle(stage) => part(
             &kit.cradles[usize::from(stage)],
             &kit.construction,
@@ -1038,6 +1057,10 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
                 v(0.62, 0.56, 0.6),
             );
         }
+        Shape::TankLid => {
+            part(&kit.drum, &kit.gunmetal, Vec3::ZERO, v(11.8, 0.52, 11.8));
+            part(&kit.drum, &kit.steel, v(0., 0.44, 0.), v(2.3, 0.80, 2.3));
+        }
         Shape::Smoke | Shape::FunnelSmoke(_) | Shape::Soot(_) => {
             part(&kit.ball, &kit.smoke, Vec3::ZERO, v(1.2, 0.95, 1.1));
             part(
@@ -1170,6 +1193,47 @@ fn draw_features(wanted: &mut HashMap<Actor, Transform>, island: &Landmark, now:
         }
     }
 }
+/// Ordinary yards, including the sea-plane station and factories at an airfield.
+fn draw_factories(
+    wanted: &mut HashMap<Actor, Transform>,
+    port: &shipvivor_encounter::Port,
+    harbour: Harbour,
+    air_station: bool,
+) {
+    if harbour == Harbour::TwinMills && port.live_factories() == 2 {
+        let (a, b) = (port.factory_position(0), port.factory_position(1));
+        let center = a.midpoint(b).extend(3.2).xzy();
+        let bridge = Transform::from_translation(center)
+            .with_rotation(pose(&port.body, 3.2).rotation)
+            .with_scale(Vec3::new(1., 1., a.distance(b)));
+        wanted.insert(Actor(port.body.id, Shape::Conveyor), bridge);
+    }
+    for (index, factory) in port.factories().iter().enumerate() {
+        let mill = Body {
+            pos: port.factory_position(index),
+            ..port.body
+        };
+        let i = index as u8;
+        let live = factory.live();
+        let mut foot = pose(&mill, 3.2);
+        if let Some(field) = port.airfield() {
+            foot.rotation = field_rotation(&field.field);
+            foot.translation.y = airfield_models::LEVEL;
+        }
+        if index == 0 && air_station {
+            wanted.insert(Actor(port.body.id, Shape::Hangar(live)), foot);
+            continue;
+        }
+        wanted.insert(Actor(port.body.id, Shape::Factory(harbour, i, live)), foot);
+        if live {
+            let chimney = foot.transform_point(harbour.chimney());
+            wanted.insert(
+                Actor(port.body.id, Shape::Exhaust(i)),
+                Transform::from_translation(chimney),
+            );
+        }
+    }
+}
 pub fn sync(
     mut cmd: Commands,
     kit: Res<Kit>,
@@ -1264,6 +1328,14 @@ pub fn sync(
             } else {
                 Harbour::for_factories(port.factories().len())
             };
+            if let Some(kind) = port.industrial_yard() {
+                industrial_view::draw(&mut wanted, port, kind, battle.at_sea());
+            } else {
+                let air_station = battle
+                    .air_station()
+                    .is_some_and(|base| base.port == base_index);
+                draw_factories(&mut wanted, port, harbour, air_station);
+            }
             for (index, dock) in port.docks().iter().enumerate() {
                 let key = dock_key(port.body.id, index);
                 let yard = Body {
@@ -1272,7 +1344,14 @@ pub fn sync(
                 };
                 let state = dock.state();
                 let yard_foot = pose(&yard, 3.2);
-                wanted.insert(Actor(key, Shape::Yard(harbour, state)), yard_foot);
+                let dockhouse = port.industrial_yard().filter(|_| index == 1);
+                let shape = match dockhouse {
+                    Some(kind) => {
+                        Shape::Industrial(kind, IndustrialPart::DockHouse(state), index as u8)
+                    }
+                    None => Shape::Yard(harbour, state),
+                };
+                wanted.insert(Actor(key, shape), yard_foot);
                 if state != YardState::Ruined {
                     let hoist = yard_foot.transform_point(harbour_models::flag_hoist(state));
                     wanted.insert(
@@ -1287,7 +1366,10 @@ pub fn sync(
                         let lighter = Transform::from_translation(center.extend(heave).xzy())
                             .with_rotation(yard_foot.rotation);
                         wanted.insert(Actor(key, Shape::Lighter(progress)), lighter);
-                        if state == YardState::Working && port.live_factories() > 0 {
+                        if dockhouse.is_none()
+                            && state == YardState::Working
+                            && port.live_factories() > 0
+                        {
                             let mut crosshead = yard_foot;
                             crosshead.translation =
                                 yard_foot.transform_point(Vec3::new(0., 14.25, -3.8));
@@ -1328,43 +1410,6 @@ pub fn sync(
                     }
                 }
             }
-            if harbour == Harbour::TwinMills && port.live_factories() == 2 {
-                let (a, b) = (port.factory_position(0), port.factory_position(1));
-                let center = a.midpoint(b).extend(3.2).xzy();
-                let bridge = Transform::from_translation(center)
-                    .with_rotation(pose(&port.body, 3.2).rotation)
-                    .with_scale(Vec3::new(1., 1., a.distance(b)));
-                wanted.insert(Actor(port.body.id, Shape::Conveyor), bridge);
-            }
-            for (index, factory) in port.factories().iter().enumerate() {
-                let mill = Body {
-                    pos: port.factory_position(index),
-                    ..port.body
-                };
-                let i = index as u8;
-                let live = factory.live();
-                let mut foot = pose(&mill, 3.2);
-                if let Some(field) = port.airfield() {
-                    foot.rotation = field_rotation(&field.field);
-                    foot.translation.y = airfield_models::LEVEL;
-                }
-                if index == 0
-                    && battle
-                        .air_station()
-                        .is_some_and(|base| base.port == base_index)
-                {
-                    wanted.insert(Actor(port.body.id, Shape::Hangar(live)), foot);
-                    continue;
-                }
-                wanted.insert(Actor(port.body.id, Shape::Factory(harbour, i, live)), foot);
-                if live {
-                    let chimney = foot.transform_point(harbour.chimney());
-                    wanted.insert(
-                        Actor(port.body.id, Shape::Exhaust(i)),
-                        Transform::from_translation(chimney),
-                    );
-                }
-            }
             wanted.insert(
                 Actor(port.body.id, Shape::Coast(Coast::Yard(harbour))),
                 pose(&port.body, 0.),
@@ -1381,19 +1426,37 @@ pub fn sync(
                 let (apron, scale) = (gun.radius() / 5., gun.mount_scale());
                 wanted.insert(
                     Actor(port.body.id, Shape::GunPlatform(i)),
-                    pose(&platform, 0.).with_scale(Vec3::new(apron, 1., apron)),
+                    pose(&platform, gun.elevation()).with_scale(Vec3::new(apron, 1., apron)),
                 );
                 let mount = Body {
                     heading: gun.heading,
                     ..platform
                 };
-                let tubes = if gun.live() { gun.barrels } else { 0 };
-                let house = pose(&mount, 4.).with_scale(Vec3::splat(scale));
+                let tubes = if gun.strength() > 0 { gun.barrels } else { 0 };
+                let height = 4. + gun.elevation();
+                let mut house = pose(&mount, height).with_scale(Vec3::splat(scale));
+                if gun.cliff_battery()
+                    && let Some(kind) = port.industrial_yard()
+                {
+                    let frame = Body { pos, ..port.body };
+                    let recess = industrial_view::draw_casemate(
+                        &mut wanted,
+                        kind,
+                        &frame,
+                        i,
+                        gun.elevation(),
+                        gun.deployment(),
+                    );
+                    house.translation += recess;
+                    if gun.deployment() == 0. {
+                        continue;
+                    }
+                }
                 wanted.insert(Actor(port.body.id, Shape::ShoreGun(i, tubes)), house);
                 // Each round that struck the gunhouse and left it standing shows where
                 // it hit, the heavier the wider, so a damaged gun reads as one.
                 for (k, pock) in gun.pocks().iter().enumerate().filter(|_| gun.live()) {
-                    let toward = Vec3::new(pock.at.x, pock.at.y - 4., -pock.at.z) / scale;
+                    let toward = Vec3::new(pock.at.x, pock.at.y - height, -pock.at.z) / scale;
                     // Rounds aimed at the middle of the shield strike about it, and
                     // clear of the mantlet that stands out from it round the barrels.
                     let spread = (k as f32 * 2.39).sin();
@@ -1766,7 +1829,12 @@ pub fn sync(
                         wanted.insert(Actor(e.body.id, Shape::Shard(i)), shard);
                     }
                 }
-                EffectKind::FuelBlast { depot } => fuel_blast(&mut wanted, e, age, depot),
+                EffectKind::FuelBlast { depot } => {
+                    fuel_blast(&mut wanted, e, age, depot);
+                    if depot {
+                        industrial_view::draw_tank_lid(&mut wanted, battle.ports(), e);
+                    }
+                }
                 EffectKind::Demolition { .. } | EffectKind::Felled(_) | EffectKind::Toppled(_) => {
                     // A hangar comes down nearly as hard as a dock, a tower lighter, and a
                     // tier of rock off a sea stack lighter still.

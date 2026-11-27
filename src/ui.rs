@@ -1507,7 +1507,26 @@ pub fn instruments(
                     } else {
                         "Offline"
                     };
-                    if factory == 0
+                    if let Some(yard) = port.industrial_yard() {
+                        if factory == shipvivor_encounter::IndustrialYard::FUEL_TANK {
+                            format!(
+                                "{}  /  Fuel tank\n{}",
+                                yard.name(),
+                                if port.factories()[factory].live() {
+                                    "Intact"
+                                } else {
+                                    "Burned out"
+                                }
+                            )
+                        } else {
+                            format!(
+                                "{}  /  Governor {}\n{} of 2 governors online",
+                                yard.name(),
+                                factory + 1,
+                                port.live_factories()
+                            )
+                        }
+                    } else if factory == 0
                         && battle
                             .air_station()
                             .is_some_and(|station| station.port == base)
@@ -1527,7 +1546,9 @@ pub fn instruments(
                 } else if let Some((base, index)) = contact.shore_turret {
                     let gun = &battle.ports()[base].turrets()[index];
                     let id = crate::mission_hud::letter(base);
-                    let kind = if gun.heavy_battery() {
+                    let kind = if gun.cliff_battery() {
+                        "Cliff battery"
+                    } else if gun.heavy_battery() {
                         "Heavy battery"
                     } else {
                         "Shore turret"

@@ -396,6 +396,13 @@ impl Chart<'_> {
         self.line(p + IVec2::new(-6, 4), p + IVec2::new(6, 4), ENEMY);
     }
 
+    fn disc(&mut self, center: IVec2, radius: i32, ink: Ink) {
+        for y in -radius..=radius {
+            let w = ((radius * radius - y * y) as f32).sqrt() as i32;
+            self.line(center + IVec2::new(-w, y), center + IVec2::new(w, y), ink);
+        }
+    }
+
     fn draw(&mut self, helm: &Helm, battle: &Battle, rings: &Rings) {
         self.pixels.as_chunks_mut::<4>().0.fill(WATER);
         let origin = self.project(Vec2::ZERO);
@@ -415,10 +422,7 @@ impl Chart<'_> {
             } else {
                 LAND
             };
-            for y in -r..=r {
-                let w = ((r * r - y * y) as f32).sqrt() as i32;
-                self.line(c + IVec2::new(-w, y), c + IVec2::new(w, y), ground);
-            }
+            self.disc(c, r, ground);
             // A lighthouse shows its light until it is brought down.
             if island.kind == shipvivor_encounter::LandmarkKind::Beacon
                 && island.features.iter().all(|tower| tower.standing())
@@ -434,20 +438,18 @@ impl Chart<'_> {
         {
             let c = self.project(berg.body.pos);
             let r = (berg.radius / METRES_PER_PIXEL).round() as i32;
-            for y in -r..=r {
-                let w = ((r * r - y * y) as f32).sqrt() as i32;
-                self.line(c + IVec2::new(-w, y), c + IVec2::new(w, y), ICE);
-            }
+            self.disc(c, r, ICE);
         }
         for port in battle.ports() {
             let c = self.project(port.body.pos);
             let radius = (ISLAND_RADIUS / METRES_PER_PIXEL).ceil() as i32;
-            for y in -radius..=radius {
-                for x in -radius..=radius {
-                    if x * x + y * y <= radius * radius {
-                        self.dot(c + IVec2::new(x, y), LAND);
-                    }
-                }
+            self.disc(c, radius, LAND);
+            for (at, radius, _) in port.industrial_rocks() {
+                self.disc(
+                    self.project(at),
+                    (radius / METRES_PER_PIXEL).round() as i32,
+                    LAND,
+                );
             }
             // Grey once wrecked, red while a dock burns or lies down, white while the
             // base has no steel anywhere, and gold while it builds.

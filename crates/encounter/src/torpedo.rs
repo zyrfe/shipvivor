@@ -1,7 +1,7 @@
 //! Breakwater's arcade broadside spreads. The sight and launcher share each rack's sector.
 //! The enemy's torpedo boats fire the same torpedo, one at a time, at her.
 use super::torpedo_boat::WARHEAD;
-use super::{Battle, Blow, Body, Effect, EffectKind, Events, ISLAND_RADIUS, body, entry};
+use super::{Battle, Blow, Body, Effect, EffectKind, Events, body, entry};
 use glam::Vec2;
 use shipvivor_compass::direction;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
@@ -152,7 +152,7 @@ impl Battle {
             let land = self
                 .ports
                 .iter()
-                .map(|p| (p.body.pos, ISLAND_RADIUS))
+                .flat_map(|p| p.shores())
                 .chain(self.landmarks.iter().map(|l| (l.body.pos, l.radius)))
                 .filter_map(|(at, r)| entry(from, to, at, r))
                 .min_by(f32::total_cmp);

@@ -27,10 +27,12 @@ mod formation;
 pub use formation::{DEPLOY, LINE_RANGE, SQUADRON_PACE, close_order, line_range};
 mod flak;
 pub use flak::{AaMount, Airframe, BURST_RADIUS};
+mod industrial;
 mod mounts;
 mod pilot;
 mod plating;
 mod port;
+pub use industrial::IndustrialYard;
 pub use mounts::{Control, DeckOffsets, MainMount, MountStatus, Station, WingGun};
 pub use plating::{HULL_OUTLINE, STRAKE_RISE, STRAKES_A_SIDE, Scar, Strake, breakwater_outline};
 mod air_station;
@@ -66,9 +68,9 @@ pub use port::{
     SPAWN_STANDOFF, ShoreTurret, YARD_CAPACITY, YardState, dock_count,
 };
 pub use projectile::{SIGHT_LIMIT, Shot, Sighting, Trajectory};
-pub use ranging::{HEAVY_CALIBRE, HEAVY_DAMAGE, HEAVY_RANGE, HEAVY_RELOAD, Ranging};
 use projectile::{fire, footprint};
 pub use ram::Hull;
+pub use ranging::{HEAVY_CALIBRE, HEAVY_DAMAGE, HEAVY_RANGE, HEAVY_RELOAD, Ranging};
 pub use shipvivor_artillery::{
     AntiAir, ArmorGrade, Impact, MainShell, Round, Secondaries, TurretLayout,
 };
@@ -1525,6 +1527,9 @@ impl Battle {
     }
     /// Let effects already in flight finish while the sector clock and combat are stopped.
     pub fn advance_effects(&mut self, dt: f32) {
+        for port in &mut self.ports {
+            port.advance_collapse(dt);
+        }
         let mut landed = Vec::new();
         self.effects.retain_mut(|fx| {
             fx.age += dt;
@@ -1647,12 +1652,13 @@ impl Battle {
             Aim::Hold => None,
             Aim::Sight(p) | Aim::Track(p) => Some(p),
             Aim::At(p) => {
-                let height = if self.ports.iter().any(|port| {
+                let height = if let Some(height) = self.ports.iter().find_map(|port| {
                     port.turrets()
                         .iter()
-                        .any(|g| g.live() && g.position(&port.body).distance_squared(p) < 25.)
+                        .find(|g| g.live() && g.position(&port.body).distance_squared(p) < 25.)
+                        .map(ShoreTurret::aim_height)
                 }) {
-                    5.7
+                    height
                 } else if let Some(top) = self.ports.iter().find_map(|port| {
                     (0..port.docks().len())
                         .find(|&i| port.dock_span(i, p, p).is_some())
@@ -1662,9 +1668,9 @@ impl Battle {
                 } else if let Some(top) = self.ports.iter().find_map(|port| {
                     (0..port.factories().len())
                         .find(|&i| port.factory_span(i, p, p).is_some())
-                        .map(|i| port.factory_top(i))
+                        .map(|i| (port.factory_top(i) + port.factory_bottom(i)) * 0.5)
                 }) {
-                    (3.2 + top) * 0.5
+                    top
                 } else {
                     1.7
                 };
@@ -1677,7 +1683,7 @@ impl Battle {
                     p.turrets()
                         .iter()
                         .filter(|g| g.live())
-                        .map(|g| g.position(&p.body).extend(5.7).xzy())
+                        .map(|g| g.position(&p.body).extend(g.aim_height()).xzy())
                 }))
                 .chain(self.ports.iter().flat_map(|p| {
                     (0..p.docks().len())

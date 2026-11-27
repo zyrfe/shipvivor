@@ -86,8 +86,6 @@ const BOMBARD_RANGE: f32 = 210.;
 /// heavy yard, and a captain who keeps putting her bow on the rocks stands off instead.
 const STAND_OFF_STEP: f32 = 70.;
 const STAND_OFF_MOST: f32 = 460.;
-/// Metres up a shore gun's turret stands, where she lays on it.
-const SHORE_GUN_TOP: f32 = 11.4;
 /// How far ahead she looks for land before committing to a heading.
 const LOOKOUT: f32 = 110.;
 /// Seconds between her decisions about where to go. The sight and rudder act every step.
@@ -294,15 +292,22 @@ impl Bot {
             .flat_map(|p| {
                 let docks = (0..p.docks().len())
                     .filter(|&i| p.docks()[i].live())
-                    .map(move |i| (p, p.dock_position(i), p.dock_top(i)));
-                let factories = (0..p.factories().len())
-                    .filter(|&i| p.factories()[i].live())
-                    .map(move |i| (p, p.factory_position(i), p.factory_top(i)));
+                    .map(move |i| (p, p.dock_position(i), p.dock_top(i) * 0.5));
+                let factories = (0..p.production_works().len())
+                    .filter(|&i| p.production_works()[i].live())
+                    .map(move |i| {
+                        let height = if p.industrial_yard().is_some() {
+                            (p.factory_bottom(i) + p.factory_top(i)) * 0.5
+                        } else {
+                            p.factory_top(i) * 0.5
+                        };
+                        (p, p.factory_position(i), height)
+                    });
                 // An airfield stands until its hangars are down as well.
                 let hangars = (p.airfield().into_iter()).flat_map(move |field| {
                     (0..shipvivor_encounter::HANGARS.len())
                         .filter(|&i| field.hangar_live(i))
-                        .map(move |i| (p, field.hangar_position(i), field.hangar_top(i)))
+                        .map(move |i| (p, field.hangar_position(i), field.hangar_top(i) * 0.5))
                 });
                 docks.chain(factories).chain(hangars)
             })
@@ -315,7 +320,7 @@ impl Bot {
         let gun = yard.and_then(|(p, _, _)| {
             (p.turrets().iter())
                 .filter(|g| g.live() && !g.heavy_battery())
-                .map(|g| (p, g.position(&p.body), SHORE_GUN_TOP))
+                .map(|g| (p, g.position(&p.body), g.aim_height()))
                 .min_by(|a, b| {
                     a.1.distance_squared(at)
                         .total_cmp(&b.1.distance_squared(at))
@@ -340,9 +345,9 @@ impl Bot {
         };
         let aim = match (gun_target, yard_in_reach) {
             (Some(r), _) => Aim::Sight(self.lay(lead(r, at, shell.speed()), at, 1.)),
-            (None, Some((_, works, top))) => {
+            (None, Some((_, works, height))) => {
                 // A yard stands still, so she lays on it closer.
-                Aim::Sight(self.lay(works.extend(top * 0.5).xzy(), at, 0.5))
+                Aim::Sight(self.lay(works.extend(height).xzy(), at, 0.5))
             }
             _ => Aim::Hold,
         };

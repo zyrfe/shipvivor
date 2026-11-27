@@ -197,6 +197,10 @@ impl ShoreTurret {
         let Some(mut plot) = self.ranging else {
             return;
         };
+        if self.cliff_battery() && self.deployment() < 1. {
+            self.reload = 1.5;
+            return;
+        }
         self.reload = (self.reload - dt).max(0.);
         plot.watch(dt);
         self.ranging = Some(plot);
@@ -208,6 +212,11 @@ impl ShoreTurret {
         let Some(dir) = (ahead - at).try_normalize() else {
             return;
         };
+        // The cliff mount trains through its seaward opening. Beyond that arc the
+        // gunhouse holds its last bearing inside the casemate.
+        if self.cliff_battery() && dir.dot(base.forward()) < 0.5 {
+            return;
+        }
         let trained = train_full(&mut self.heading, bearing(dir), TRAIN.to_radians() * dt);
         if !trained || self.reload > 0. || !self.covers(base, her.at) {
             return;
@@ -222,7 +231,7 @@ impl ShoreTurret {
         for tube in 0..self.barrels {
             let offset = Self::barrel_x(self.barrels, tube) * scale;
             let muzzle = (muzzle_line + side * offset)
-                .extend(4. + 2.65 * scale)
+                .extend(self.elevation() + 4. + 2.65 * scale)
                 .xzy();
             // The two shells of a salvo fall a little apart along the line of fire, so
             // once the plot is fine one falls over her and the other short.
@@ -257,7 +266,9 @@ impl Battle {
         let heaviest = (self.ports.iter_mut().enumerate())
             .max_by_key(|(i, port)| (port.factories().len(), port.stage(), *i))
             .map(|(_, port)| port);
-        if let Some(port) = heaviest {
+        if let Some(port) = heaviest
+            && port.industrial_yard().is_none()
+        {
             port.mount_heavy_battery();
         }
         self

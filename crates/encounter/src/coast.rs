@@ -276,6 +276,11 @@ impl Landmark {
                     || harbours
                         .iter()
                         .any(|h| h.pos.distance(center) < radius + 115.)
+                    || harbours
+                        .iter()
+                        .filter_map(HarbourSite::industrial_roadstead)
+                        .flatten()
+                        .any(|(hub, room)| hub.distance(center) < radius + room)
                     || chart
                         .iter()
                         .any(|p| p.pos.distance(center) < radius + p.radius + 40.)
@@ -340,7 +345,8 @@ impl Landmark {
 pub(super) fn open_water(from: Vec2, to: Vec2, ports: &[Port], islands: &[Landmark]) -> bool {
     ports
         .iter()
-        .all(|p| super::entry(from, to, p.body.pos, super::ISLAND_RADIUS).is_none())
+        .flat_map(Port::shores)
+        .all(|(point, radius)| super::entry(from, to, point, radius).is_none())
         && islands
             .iter()
             .all(|i| super::entry(from, to, i.body.pos, i.radius).is_none())

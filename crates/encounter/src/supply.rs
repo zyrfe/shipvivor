@@ -109,7 +109,8 @@ impl Battle {
             .filter(move |&start| {
                 self.ports
                     .iter()
-                    .all(|p| entry(start, berth, p.body.pos, super::ISLAND_RADIUS + 9.).is_none())
+                    .flat_map(super::Port::shores)
+                    .all(|(point, radius)| entry(start, berth, point, radius + 9.).is_none())
                     && self
                         .landmarks
                         .iter()

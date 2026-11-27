@@ -27,7 +27,8 @@ const SHORTLIST: usize = 3;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Waters {
     /// The bases, stage by stage up the channel, each given as its number of factories:
-    /// one for a cannery, two for the twin mills, three for the heavy yard. The last base
+    /// one for a cannery, two for the twin mills, three for the heavy yard, or the
+    /// works code of an airfield or industrial yard. The last base
     /// of the last stage stands at the head of the channel. A stage stirs only once
     /// every base of the one before it is wrecked, or once it sights the ship.
     pub stages: &'static [&'static [u8]],
@@ -175,12 +176,20 @@ impl Waters {
 pub struct HarbourSite {
     pub pos: Vec2,
     pub heading: f32,
-    /// Factories: one at a cannery, two at the twin mills, three at the heavy yard.
+    /// The factory count of an ordinary harbour, or a special yard's works code.
     pub works: u8,
     /// The stage of the passage the base belongs to. The bases of stage 0 are roused
     /// when the ship arrives, and each later stage once every base of the one before
     /// it is wrecked, or as soon as one of its own lookouts sights her.
     pub stage: u8,
+}
+impl HarbourSite {
+    /// Sea room reserved for the headland and the water across its seaward face.
+    pub(super) fn industrial_roadstead(&self) -> Option<[(Vec2, f32); 2]> {
+        crate::IndustrialYard::from_works(self.works)?;
+        let ahead = shipvivor_compass::direction(self.heading);
+        Some([(self.pos, 126.), (self.pos + ahead * 175., 155.)])
+    }
 }
 
 /// A piece of ice adrift when the ship enters the sector.
@@ -244,7 +253,16 @@ impl Chart {
     /// The hand-set layout around a buoy circuit: a harbour outside gates 1, 2 and 4,
     /// and an island either side of each leg where there is room.
     pub fn classic(gates: [Vec2; 5]) -> Self {
-        let harbours = Port::classic_sites(gates).to_vec();
+        Self::classic_with_yard(gates, None)
+    }
+
+    /// The fallback circuit keeps the leg's industrial finale and its turning basin.
+    pub fn classic_with_yard(gates: [Vec2; 5], industrial: Option<crate::IndustrialYard>) -> Self {
+        let mut sites = Port::classic_sites(gates);
+        if let Some(yard) = industrial {
+            sites[2].works = yard.works();
+        }
+        let harbours = sites.to_vec();
         let islets = Landmark::classic(gates, &harbours);
         let ahead = gates[0].normalize_or(Vec2::NEG_Y);
         Self {
@@ -412,6 +430,12 @@ impl Keepout {
         let mut stations: Vec<(Vec2, f32)> = pickets.iter().map(|&p| (p, 45.)).collect();
         stations.push((Vec2::ZERO, 70.));
         let ports = Port::chart(harbours, 1., &mut 0);
+        stations.extend(
+            harbours
+                .iter()
+                .filter_map(HarbourSite::industrial_roadstead)
+                .flatten(),
+        );
         Self {
             gate_lanes,
             gates: gates.to_vec(),

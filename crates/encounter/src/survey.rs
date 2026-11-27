@@ -844,10 +844,16 @@ impl Water {
                 },
             );
         }
-        let shoals = battle
-            .ports()
-            .iter()
-            .map(|p| (p.body.pos, ISLAND_RADIUS + 50. + room));
+        let shoals = battle.ports().iter().map(|p| {
+            (
+                p.body.pos,
+                if p.industrial_yard().is_some() {
+                    120. + room
+                } else {
+                    ISLAND_RADIUS + 50. + room
+                },
+            )
+        });
         for (centre, reach) in shoals {
             water.each_cell_near(centre, reach, 1, |water, cell, at| {
                 if battle.navigable_position(at, room).distance(at) > 1e-3 {

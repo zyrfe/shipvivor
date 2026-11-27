@@ -511,9 +511,16 @@ impl super::Port {
         }
         for i in 0..self.factories().len() {
             if let Some(span) = self.factory_span(i, a, b) {
-                visit(span, 3.2, self.factory_top(i), PortPart::Factory(i));
+                let bottom = self.factory_bottom(i);
+                if bottom > 3.2 {
+                    visit(span, 3.2, bottom, PortPart::Ground);
+                }
+                visit(span, bottom, self.factory_top(i), PortPart::Factory(i));
             }
         }
+        self.industrial_contacts(a, b, |span, low, high| {
+            visit(span, low, high, PortPart::Ground)
+        });
         if let Some(field) = self.airfield() {
             field.contacts(a, b, |span, low, high, part| {
                 visit(span, low, high, PortPart::Airfield(part));
@@ -521,9 +528,12 @@ impl super::Port {
         }
         for (i, gun) in self.turrets().iter().enumerate() {
             if let Some(span) = footprint(a, b, gun.position(&self.body), gun.radius()) {
-                visit(span, 0., 3.9, PortPart::Ground);
+                let apron = 3.9 + gun.elevation();
+                visit(span, 0., apron, PortPart::Ground);
                 if gun.live() {
-                    visit(span, 3.9, gun.top(), PortPart::Gun(i));
+                    visit(span, apron, gun.top(), PortPart::Gun(i));
+                } else if gun.cliff_battery() && gun.strength() > 0 {
+                    visit(span, apron, gun.top(), PortPart::Ground);
                 }
             }
         }
@@ -624,7 +634,7 @@ impl WingGun {
                 .iter()
                 .enumerate()
                 .filter(|(_, g)| g.live())
-                .map(|(j, g)| (PortPart::Gun(j), g.position(&port.body), 5.7));
+                .map(|(j, g)| (PortPart::Gun(j), g.position(&port.body), g.aim_height()));
             let factories = port
                 .factories()
                 .iter()
@@ -634,7 +644,7 @@ impl WingGun {
                     (
                         PortPart::Factory(j),
                         port.factory_position(j),
-                        (3.2 + port.factory_top(j)) * 0.5,
+                        (port.factory_bottom(j) + port.factory_top(j)) * 0.5,
                     )
                 });
             // On an airfield, the aircraft rolling out and the trucks as well as its works.
@@ -773,7 +783,13 @@ impl Battle {
                 .flat_map(|(i, port)| {
                     (port.turrets().iter().enumerate())
                         .filter(|(_, gun)| gun.live())
-                        .map(move |(j, gun)| (i, j, gun.position(&port.body).extend(5.7).xzy()))
+                        .map(move |(j, gun)| {
+                            (
+                                i,
+                                j,
+                                gun.position(&port.body).extend(gun.aim_height()).xzy(),
+                            )
+                        })
                 })
                 .filter(|&(i, j, p)| {
                     let gun = PortPart::Gun(j);
@@ -992,12 +1008,32 @@ impl Battle {
                     }
                     Contact::Port(i, PortPart::Factory(j)) => {
                         let port = &mut self.ports[i];
-                        if port.damage_factory(j, damage) {
-                            events.recovered += self.rewards.at_once(super::FACTORY_STORES);
-                            effect_at = port.factory_position(j).extend(3.2).xzy();
-                            EffectKind::Demolition { dock: false }
-                        } else {
+                        if !port.damage_factory(j, damage) {
                             EffectKind::Burst
+                        } else if port.industrial_yard().is_some()
+                            && j == super::IndustrialYard::FUEL_TANK
+                        {
+                            let tank = port.factory_position(j);
+                            effect_at = tank.extend(8.).xzy();
+                            // A fuel fire takes the nearby quay gun with it. The outward
+                            // pickets and the protected cliff gallery are out of the blast.
+                            for gun in &mut port.turrets {
+                                if gun.live() && gun.position(&port.body).distance(tank) < 24. {
+                                    gun.strength = 0;
+                                    events.guns_silenced += 1;
+                                }
+                            }
+                            EffectKind::FuelBlast { depot: true }
+                        } else {
+                            events.recovered += self.rewards.at_once(super::FACTORY_STORES);
+                            effect_at = if port.industrial_collapse().is_some() {
+                                port.industrial_center().extend(11.).xzy()
+                            } else {
+                                port.factory_position(j)
+                                    .extend(port.factory_bottom(j))
+                                    .xzy()
+                            };
+                            EffectKind::Demolition { dock: false }
                         }
                     }
                     Contact::Port(i, PortPart::Airfield(part)) => {

@@ -940,11 +940,15 @@ pub(crate) fn shell_works(battle: &mut shipvivor_encounter::Battle, index: usize
     };
     let target = |battle: &shipvivor_encounter::Battle| {
         let port = &battle.ports()[index];
-        let (at, top) = match works {
-            Works::Dock(j) => (port.dock_position(j), port.dock_top(j)),
-            Works::Factory(j) => (port.factory_position(j), port.factory_top(j)),
+        let (at, bottom, top) = match works {
+            Works::Dock(j) => (port.dock_position(j), 3.2, port.dock_top(j)),
+            Works::Factory(j) => (
+                port.factory_position(j),
+                port.factory_bottom(j),
+                port.factory_top(j),
+            ),
         };
-        (at, at.extend((3.2 + top) * 0.5).xzy())
+        (at, at.extend((bottom + top) * 0.5).xzy())
     };
     // Open water 90 m off with a clear line to it, the bearings nearest the base's front
     // first. Looked for afresh every second, as ships come and go across the line.
@@ -3562,4 +3566,89 @@ fn every_enemy_class_has_a_hull_model_and_a_gun_model() {
         assert!(guns[0] > 0, "{class:?} has no gun");
         assert!(guns.is_sorted_by(|a, b| a < b), "{class:?}: {guns:?}");
     }
+}
+
+#[test]
+fn the_spotting_top_trains_round_after_the_sight_and_lies_fore_and_aft_in_the_dock() {
+    use std::f32::consts::{FRAC_PI_2, TAU};
+    let mut app = headless_game();
+    let w = app.world_mut();
+    start_in_narrows(w);
+    let top = |w: &mut World| {
+        let (top, pose) = w
+            .query::<(&scene::SpottingTop, &Transform)>()
+            .single(w)
+            .unwrap();
+        (top.train(), pose.rotation)
+    };
+    let tick = |w: &mut World| {
+        w.resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(100));
+        w.run_schedule(Update);
+    };
+    let heading = w.resource::<PlayerHelm>().heading;
+    w.resource_mut::<ShipView>().bearing = heading;
+    for _ in 0..25 {
+        tick(w);
+    }
+    assert!(turned(top(w).0, 0.).abs() < 1e-3);
+
+    // The sight thrown out to the starboard beam: the top swings after it, and arrives.
+    w.resource_mut::<ShipView>().bearing = heading + FRAC_PI_2;
+    tick(w);
+    let (partway, _) = top(w);
+    assert!(partway > 0.1 && partway < 1., "trained {partway} in a tick");
+    for _ in 0..10 {
+        tick(w);
+    }
+    let (train, rotation) = top(w);
+    assert!(turned(train, FRAC_PI_2).abs() < 1e-3, "trained {train}");
+    // Its slit, which faces the bow at rest, now looks out along the camera's own line.
+    let hull = w
+        .query_filtered::<&Transform, With<scene::Ship>>()
+        .single(w)
+        .unwrap()
+        .rotation;
+    let lens = w
+        .query_filtered::<&Transform, With<camera::FollowCamera>>()
+        .single(w)
+        .unwrap()
+        .forward();
+    let slit = (hull * rotation * Vec3::NEG_Z).xz().normalize();
+    let sight = lens.xz().normalize();
+    assert!(slit.dot(sight) > 0.999, "slit faces {slit}, sight {sight}");
+
+    // Across the bow to the port bow it goes the short way, not round by the stern.
+    w.resource_mut::<ShipView>().bearing = heading - 0.5;
+    tick(w);
+    let (train, _) = top(w);
+    assert!(turned(0., train) > 0. && turned(0., train) < FRAC_PI_2);
+    for _ in 0..10 {
+        tick(w);
+    }
+    assert!(turned(top(w).0, TAU - 0.5).abs() < 1e-3);
+
+    // The ship turning under a steady sight turns the top on its tower.
+    w.resource_mut::<PlayerHelm>().heading = heading - 0.5;
+    for _ in 0..5 {
+        tick(w);
+    }
+    assert!(turned(top(w).0, 0.).abs() < 1e-3);
+
+    // In the dock it is found fore and aft at once, wherever the sight was left.
+    w.resource_mut::<ShipView>().bearing = heading + 2.;
+    for _ in 0..10 {
+        tick(w);
+    }
+    assert!(turned(top(w).0, 2.5).abs() < 1e-3);
+    clear_leg(&mut w.resource_mut::<Campaign>());
+    w.run_schedule(Update);
+    assert!(matches!(
+        w.resource::<Campaign>().screen(),
+        Screen::Drydock(_)
+    ));
+    w.run_schedule(Update);
+    let (train, rotation) = top(w);
+    assert_eq!(train, 0.);
+    assert_eq!(rotation, Quat::IDENTITY);
 }

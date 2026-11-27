@@ -20,8 +20,8 @@ use EnemyClass::*;
 use shipvivor_artillery::{MainShell, OVERPENETRATED_SHARE, OVERPENETRATION, Round};
 use shipvivor_campaign::{CALIBRES, Card, Exit, Fittings, ROUNDS, Run, Stage};
 use shipvivor_encounter::{
-    AIRFIELD_WORKS, Doctrine, EnemyClass, FLAGSHIP_EARLIEST, FLAGSHIP_SORTIE, RAID_TIERS, Weight,
-    dock_count,
+    AIRFIELD_WORKS, Doctrine, EnemyClass, FLAGSHIP_EARLIEST, FLAGSHIP_SORTIE, IndustrialYard,
+    RAID_TIERS, Weight, dock_count,
 };
 use shipvivor_shipyard::{Design, Mounting, Protection, Ship};
 
@@ -319,6 +319,8 @@ struct Base {
     squadron: &'static [EnemyClass],
     docks: usize,
     factories: usize,
+    /// Industrial works have two productive governors but build the heavy yard's roster.
+    industrial: bool,
     /// Barrels in each of its shore guns, as many as the round allows.
     guns: Vec<u8>,
     /// It mounts the sector's heavy battery, which reaches out across the reach before it.
@@ -396,15 +398,18 @@ impl Sea {
                     s if s == last && factories == heaviest => 2,
                     _ => 1,
                 };
-                let guns: &[u8] = match yard {
-                    1 => &[1],
-                    2 => &[2, 2],
+                let industrial = IndustrialYard::from_works(works).is_some();
+                let guns: &[u8] = match (industrial, yard) {
+                    (true, _) => &IndustrialYard::LIGHT_GUNS,
+                    (_, 1) => &[1],
+                    (_, 2) => &[2, 2],
                     _ => &[4, 3, 3],
                 };
                 bases.push(Base {
                     squadron: doctrine.squadron(round, place),
                     docks: dock_count(yard),
-                    factories,
+                    factories: if industrial { 2 } else { factories },
+                    industrial,
                     guns: guns.iter().map(|&b| b.min(cap)).collect(),
                     heavy: place == 2,
                     stage,
@@ -445,12 +450,14 @@ impl Sea {
         let heavy_from = self
             .bases
             .iter()
-            .find(|b| b.heavy)
+            .find(|b| b.heavy && !b.industrial)
             .map_or(usize::MAX, |b| b.stage);
         for base in &self.bases {
             let raids = self.head_start + cost.seconds;
             let tier = RAID_TIERS.iter().filter(|&&t| raids >= t).count();
-            let rotation = self.doctrine.rotation(tier, base.factories);
+            let rotation = self
+                .doctrine
+                .rotation(tier, if base.industrial { 3 } else { base.factories });
             // The hulls waiting on its slips sail when it stirs, with its squadron and
             // its torpedo boats.
             let mut group: Vec<EnemyClass> = base.squadron.to_vec();
@@ -491,6 +498,9 @@ impl Sea {
             cost.shore += shore * pressure * SHORE_EXPOSURE * time;
             if base.stage + 1 >= heavy_from {
                 cost.heavy += her.heavy_fire(self.heavy) * pressure * time;
+            } else if base.industrial {
+                // The cliff mount only joins in after both governors fail.
+                cost.heavy += her.heavy_fire(self.heavy) * pressure * docks;
             }
             cost.seconds += time;
         }

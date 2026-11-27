@@ -253,7 +253,15 @@ impl Battle {
                     }
                     let at = gun.position(&port.body);
                     let (ports, land, ice) = (&self.ports, &self.landmarks, &self.floe.icebergs);
-                    let sighted = sees(at, RANGEFINDER, player, gun.reach(), ports, land, ice);
+                    let sighted = sees(
+                        at,
+                        RANGEFINDER + gun.elevation(),
+                        player,
+                        gun.reach(),
+                        ports,
+                        land,
+                        ice,
+                    );
                     let aloft = (self.spotters.iter())
                         .any(|plane| plane.reporting && in_radio(port.body.pos, plane.position));
                     let ashore = (self.ports.iter().zip(&shore_reports).enumerate()).any(

@@ -1,6 +1,6 @@
 //! Authored arcade hulls and deck stations. The sight, hit tests, gunfire and
 //! renderer all use the same station positions in the ship's rotating frame.
-use super::{Battery, Body, Effect, Hull, ISLAND_RADIUS, KNOCK_DRAG, Port, Shot, bearing};
+use super::{Battery, Body, Effect, Hull, KNOCK_DRAG, Port, Shot, bearing};
 use super::{
     mounts::{RAGGED, STAND_EASY, signed, train_full},
     pilot::{Helm, clear_course},
@@ -1093,7 +1093,7 @@ impl Raider {
             // as her destination lies to it, so she can come alongside a berth.
             let hazards = ports
                 .iter()
-                .map(|p| (p.body.pos, ISLAND_RADIUS))
+                .flat_map(|p| p.shores())
                 .chain(ports.iter().flat_map(Port::piers))
                 .chain(coast.iter().map(|p| (p.body.pos, p.radius)))
                 .chain(

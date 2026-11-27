@@ -177,3 +177,59 @@ fn shore_guns_mount_no_more_barrels_than_the_round_allows() {
         }
     }
 }
+
+#[test]
+fn rounds_five_and_six_end_at_an_industrial_yard_with_open_water() {
+    use crate::Sector;
+    use shipvivor_campaign::POOLS;
+    use shipvivor_encounter::IndustrialYard;
+    for stage in POOLS
+        .into_iter()
+        .flatten()
+        .copied()
+        .chain([Stage::CrownDeep])
+    {
+        let expected = match stage.round() {
+            5 => Some(IndustrialYard::RedShift),
+            6 => Some(IndustrialYard::BellWorks),
+            _ => None,
+        };
+        let sector = Sector::of(stage, Grade::Moderate);
+        let fallback = sector.classic();
+        let layouts = |chart: &shipvivor_encounter::Chart| {
+            chart
+                .harbours
+                .iter()
+                .map(|site| IndustrialYard::from_works(site.works))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(layouts(&fallback).last(), Some(&expected), "{stage:?}");
+        if expected.is_none() {
+            assert!(
+                sector
+                    .plan()
+                    .iter()
+                    .flat_map(|s| s.iter())
+                    .all(|&w| IndustrialYard::from_works(w).is_none())
+            );
+            continue;
+        }
+        let chart = sector.charted(40);
+        assert!(chart.score.is_some(), "{stage:?} used its fallback");
+        let yards = layouts(&chart.chart);
+        assert!(yards[..yards.len() - 1].iter().all(Option::is_none));
+        let battle = sector.battle(&chart.chart);
+        let yard = battle.ports().last().unwrap();
+        assert_eq!(yard.industrial_yard(), expected, "{stage:?}");
+        let front = yard.body.forward();
+        // Cross the mouth on either tack with sea room for a cruiser, clear of the
+        // gun skerries, the shore and any random islands added by the generator.
+        for across in (-120..=120).step_by(10) {
+            let at = yard.body.pos + front * 175. + front.perp() * across as f32;
+            assert!(
+                battle.navigable_position(at, 10.).distance(at) < 0.1,
+                "{stage:?} at {across}"
+            );
+        }
+    }
+}

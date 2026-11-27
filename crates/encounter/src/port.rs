@@ -1,3 +1,4 @@
+use super::IndustrialYard;
 use super::{
     Battery, Body, Effect, EnemyClass, HarbourSite, Shot, Vec2, bearing, body, entry,
     mounts::train_full,
@@ -156,6 +157,8 @@ pub struct Pock {
 pub struct ShoreTurret {
     // Starboard and forward of the harbour centre, in the port's rotating frame.
     station: Vec2,
+    pub(super) elevation: f32,
+    pub(super) deployment: Option<f32>,
     pub barrels: u8,
     pub heading: f32,
     pub(super) strength: u16,
@@ -194,6 +197,8 @@ impl ShoreTurret {
         Self {
             station: Vec2::new(side, fore),
             barrels,
+            elevation: 0.,
+            deployment: None,
             heading,
             strength: Self::STRENGTH_PER_BARREL * u16::from(barrels),
             reload: 2. + 1.6 * index as f32,
@@ -234,7 +239,9 @@ impl ShoreTurret {
     }
     /// Metres the mount can fire to.
     pub fn reach(&self) -> f32 {
-        if self.heavy_battery() {
+        if self.cliff_battery() {
+            375.
+        } else if self.heavy_battery() {
             HEAVY_RANGE
         } else {
             SHORE_RANGE
@@ -253,12 +260,30 @@ impl ShoreTurret {
     pub fn radius(&self) -> f32 {
         5. * self.mount_scale().sqrt()
     }
+    /// Height a gunner lays on to put a round through the gunhouse.
+    pub fn aim_height(&self) -> f32 {
+        self.elevation + 3.9 + 1.8 * self.mount_scale()
+    }
+
+    pub fn elevation(&self) -> f32 {
+        self.elevation
+    }
+
+    pub fn cliff_battery(&self) -> bool {
+        self.deployment.is_some()
+    }
+
+    pub fn deployment(&self) -> f32 {
+        self.deployment.unwrap_or(1.)
+    }
+
     pub fn top(&self) -> f32 {
-        if self.heavy_battery() {
-            3.9 + 3.6 * Self::HEAVY_SCALE
-        } else {
-            7.5
-        }
+        self.elevation
+            + if self.heavy_battery() {
+                3.9 + 3.6 * Self::HEAVY_SCALE
+            } else {
+                7.5
+            }
     }
     /// Mount no more than `most` barrels, with the strength of the smaller gunhouse.
     fn cap(&mut self, most: u8) {
@@ -279,7 +304,7 @@ impl ShoreTurret {
         each * u16::from(self.barrels)
     }
     pub fn live(&self) -> bool {
-        self.strength > 0
+        self.strength > 0 && self.deployment() >= 1.
     }
     pub fn position(&self, base: &Body) -> Vec2 {
         let f = base.forward();
@@ -291,8 +316,9 @@ impl ShoreTurret {
     }
     pub(super) fn covers(&self, base: &Body, target: Vec2) -> bool {
         let at = self.position(base);
-        at.distance_squared(target) <= self.reach() * self.reach()
-            && entry(at, target, base.pos, ISLAND_RADIUS).is_none()
+        self.live()
+            && at.distance_squared(target) <= self.reach() * self.reach()
+            && (self.elevation > 0. || entry(at, target, base.pos, ISLAND_RADIUS).is_none())
     }
     fn fire(
         &mut self,
@@ -337,7 +363,9 @@ impl ShoreTurret {
             + side * grow(Self::LAY_ACROSS) * spread(1);
         for tube in 0..self.barrels {
             let offset = Self::barrel_x(self.barrels, tube);
-            let muzzle = (muzzle_line + side * offset).extend(6.65).xzy();
+            let muzzle = (muzzle_line + side * offset)
+                .extend(6.65 + self.elevation)
+                .xzy();
             // Outer rounds bracket the contact, leaving space to manoeuvre between them.
             let draw = 2 + 2 * u64::from(tube);
             let stray = dir * Self::STRAY.0 * reach * spread(draw)
@@ -354,6 +382,8 @@ impl ShoreTurret {
 }
 
 pub struct Port {
+    pub(super) industry: Option<IndustrialYard>,
+    pub(super) collapse: Option<f32>,
     pub has_contact: bool,
     /// Steel in the storehouse, beyond what is laid into the hulls on the slips.
     pub stock: u8,
@@ -420,7 +450,12 @@ impl Port {
                     // An airfield's harbour is laid out as a cannery's: one dock and one
                     // gun. Its two factories stand on the airfield, with its other guns.
                     let field = works == super::AIRFIELD_WORKS;
-                    let built = if field { 2 } else { usize::from(works.clamp(1, 3)) };
+                    let industry = IndustrialYard::from_works(works);
+                    let built = if field {
+                        2
+                    } else {
+                        usize::from(works.clamp(1, 3))
+                    };
                     let works = if field { 1 } else { built };
                     let convoy_clock =
                         [25., 38., 64.][works - 1] + 7. * f32::from(kindred[works - 1]);
@@ -440,13 +475,25 @@ impl Port {
                         .collect();
                     Self {
                         body: body(serial, pos, heading),
-                        turrets: stations
-                            .iter()
-                            .enumerate()
-                            .map(|(i, &(side, fore, barrels))| {
-                                ShoreTurret::new(side, fore, barrels, heading + side.atan2(fore), i)
-                            })
-                            .collect(),
+                        industry,
+                        collapse: None,
+                        turrets: if industry.is_some() {
+                            super::industrial::batteries(heading)
+                        } else {
+                            stations
+                                .iter()
+                                .enumerate()
+                                .map(|(i, &(side, fore, barrels))| {
+                                    ShoreTurret::new(
+                                        side,
+                                        fore,
+                                        barrels,
+                                        heading + side.atan2(fore),
+                                        i,
+                                    )
+                                })
+                                .collect()
+                        },
                         has_contact: false,
                         stock: 2,
                         factories: (0..built)
@@ -495,7 +542,7 @@ impl Port {
     }
 
     /// A point in the port's rotating frame: starboard and forward of the centre.
-    fn local(&self, station: Vec2) -> Vec2 {
+    pub(super) fn local(&self, station: Vec2) -> Vec2 {
         let f = self.body.forward();
         self.body.pos + f.perp() * station.x + f * station.y
     }
@@ -534,7 +581,7 @@ impl Port {
         let docks = (0..self.docks.len())
             .filter(|&i| self.docks[i].live())
             .map(|i| (self.dock_position(i), self.dock_top(i)));
-        let factories = (0..self.factories.len())
+        let factories = (0..self.production_works().len())
             .filter(|&i| self.factories[i].live())
             .map(|i| (self.factory_position(i), self.factory_top(i)));
         let guns = (self.turrets.iter())
@@ -549,8 +596,18 @@ impl Port {
     pub fn factories(&self) -> &[Factory] {
         &self.factories
     }
+    /// The portion of the factory target list that keeps this base operating.
+    pub fn production_works(&self) -> &[Factory] {
+        if self.industry.is_some() {
+            &self.factories[..IndustrialYard::FUEL_TANK]
+        } else {
+            &self.factories
+        }
+    }
+    /// Working factories or governors that can supply steel and raise a lost dock.
+    /// Fuel storage is a separate target and makes no steel.
     pub fn live_factories(&self) -> usize {
-        self.factories
+        self.production_works()
             .iter()
             .filter(|factory| factory.live())
             .count()
@@ -558,6 +615,9 @@ impl Port {
     pub fn factory_position(&self, index: usize) -> Vec2 {
         // The twin mills occupy the same shingle bank, with a conveyor between them.
         // At the heavy yard the three furnace halls take separate faces of the shore.
+        if let Some(industry) = self.industry {
+            return self.local(industry.factory_station(index));
+        }
         if let Some(field) = &self.airfield {
             return field.factory_position(index);
         }
@@ -570,7 +630,29 @@ impl Port {
         let f = self.body.forward();
         self.body.pos + f.perp() * side - f * aft
     }
+    pub fn factory_bottom(&self, index: usize) -> f32 {
+        if self.industry.is_some()
+            && index < IndustrialYard::FUEL_TANK
+            && self.factories[index].live()
+        {
+            6.
+        } else {
+            3.2
+        }
+    }
+
     pub fn factory_top(&self, index: usize) -> f32 {
+        if self.industry.is_some() {
+            return match (
+                index == IndustrialYard::FUEL_TANK,
+                self.factories[index].live(),
+            ) {
+                (true, true) => 15.2,
+                (true, false) => 6.9,
+                (false, true) => 11.6,
+                (false, false) => 7.2,
+            };
+        }
         if self.factories[index].live() {
             12.2
         } else {
@@ -578,7 +660,16 @@ impl Port {
         }
     }
     pub(super) fn factory_span(&self, index: usize, a: Vec2, b: Vec2) -> Option<(f32, f32)> {
-        self.building_span(self.factory_position(index), (4., 4.), a, b)
+        if self.industry.is_some() {
+            let radius = if index == IndustrialYard::FUEL_TANK {
+                6.
+            } else {
+                2.9
+            };
+            super::footprint(a, b, self.factory_position(index), radius)
+        } else {
+            self.building_span(self.factory_position(index), (4., 4.), a, b)
+        }
     }
     pub(super) fn damage_factory(&mut self, index: usize, damage: u16) -> bool {
         let factory = &mut self.factories[index];
@@ -586,6 +677,12 @@ impl Port {
         factory.strength = factory.strength.saturating_sub(damage);
         let fell = was_live && !factory.live();
         if fell {
+            if self.industry.is_some()
+                && index < IndustrialYard::FUEL_TANK
+                && self.live_factories() == 0
+            {
+                self.collapse = Some(0.);
+            }
             self.settle();
         }
         fell
@@ -699,7 +796,7 @@ impl Port {
             dock.laid = 0;
         }
     }
-    fn building_span(
+    pub(super) fn building_span(
         &self,
         center: Vec2,
         (along, across): (f32, f32),
@@ -837,7 +934,7 @@ impl Port {
     /// The shelf the yard stands on, then the bluff behind it in tiers that step up its
     /// dome as the coast draws it, peaking near 9.6 m and back to the shelf 12 m out. A
     /// round clears the hill wherever the eye sees over it. Centre, radius and top.
-    pub(super) fn land_volumes(&self) -> [(Vec2, f32, f32); 5] {
+    pub(super) fn land_volumes(&self) -> impl Iterator<Item = (Vec2, f32, f32)> + '_ {
         let c = self.body.pos;
         let f = self.body.forward();
         let bluff = c - f * 7. - f.perp() * 5.;
@@ -848,6 +945,13 @@ impl Port {
             (bluff, 5., 7.4),
             (bluff, 3., 8.6),
         ]
+        .into_iter()
+        .chain(self.industrial_rocks())
+    }
+
+    pub(super) fn shores(&self) -> impl Iterator<Item = (Vec2, f32)> + '_ {
+        std::iter::once((self.body.pos, ISLAND_RADIUS))
+            .chain(self.industrial_rocks().map(|(at, radius, _)| (at, radius)))
     }
 
     /// The quay's root and outer end along the slip, and its half-width. The foundry's
@@ -890,7 +994,10 @@ impl Port {
                 point
             }
         };
-        let mut pos = clear_circle(pos, self.body.pos, ISLAND_RADIUS + clearance, forward);
+        let mut pos = pos;
+        for (shore, radius) in self.shores() {
+            pos = clear_circle(pos, shore, radius + clearance, forward);
+        }
         for gun in &self.turrets {
             pos = clear_circle(
                 pos,

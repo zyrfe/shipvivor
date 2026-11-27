@@ -9,7 +9,7 @@ use bevy::{
     window::{CursorGrabMode, CursorOptions},
 };
 use shipvivor_compass::{direction, heading};
-use shipvivor_encounter::{Battle, Raider, Sighting};
+use shipvivor_encounter::{Battle, Port, Raider, ShoreTurret, Sighting};
 use std::f32::consts::{PI, TAU};
 
 const CRUISE_FOV: f32 = 56_f32.to_radians();
@@ -33,12 +33,6 @@ pub enum Quarry {
     Battery(usize, usize),
 }
 impl Quarry {
-    /// A harbour gun's hit volume in the encounter: a drum five metres across its middle
-    /// that stands on its plinth up to 7.5 metres, marked halfway up its gunhouse.
-    pub const GUN_RADIUS: f32 = 5.;
-    pub const GUN_TOP: f32 = 7.5;
-    const GUN_MARK: f32 = 5.7;
-
     /// Whatever ship or gun a sighting has under the reticle.
     fn sighted(sight: &Sighting) -> Option<Self> {
         sight.ship_id.map(Self::Ship).or(sight
@@ -56,13 +50,19 @@ impl Quarry {
                 .map(move |(g, _)| Self::Battery(p, g))
         })
     }
+    pub(crate) fn battery(self, battle: &Battle) -> Option<(&Port, &ShoreTurret)> {
+        let Self::Battery(port, gun) = self else {
+            return None;
+        };
+        let port = battle.ports().get(port)?;
+        Some((port, port.turrets().get(gun).filter(|gun| gun.live())?))
+    }
     /// Her place on the water and the way her frame faces, while she is still a threat.
     pub fn frame(self, battle: &Battle) -> Option<(Vec2, Vec2)> {
         match self {
             Self::Ship(id) => battle.ship(id).map(|r| (r.body.pos, r.body.forward())),
-            Self::Battery(port, gun) => {
-                let port = battle.ports().get(port)?;
-                let gun = port.turrets().get(gun).filter(|gun| gun.live())?;
+            Self::Battery(..) => {
+                let (port, gun) = self.battery(battle)?;
                 Some((gun.position(&port.body), port.body.forward()))
             }
         }
@@ -74,7 +74,8 @@ impl Quarry {
                 .ship(id)
                 .map(|r| r.body.pos.extend(r.class.profile().deck * 0.65).xzy()),
             Self::Battery(..) => {
-                (self.frame(battle)).map(|(at, _)| at.extend(Self::GUN_MARK).xzy())
+                let (port, gun) = self.battery(battle)?;
+                Some(gun.position(&port.body).extend(gun.aim_height()).xzy())
             }
         }
     }
@@ -993,7 +994,7 @@ mod tests {
         assert!(quarry.seen(&view.sight(player, &battle)));
         let range = gun.xz().distance(player);
         assert!(
-            (range - at.distance(player)).abs() < Quarry::GUN_RADIUS + 1.,
+            (range - at.distance(player)).abs() < quarry.battery(&battle).unwrap().1.radius() + 1.,
             "{range}"
         );
 

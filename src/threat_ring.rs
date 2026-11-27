@@ -808,7 +808,7 @@ pub fn tag_ships(
                     continue;
                 }
                 let Some((corner, edge)) =
-                    crate::fire_control::battery_marker(&view, ship, size, at)
+                    crate::fire_control::battery_marker(&view, ship, size, at, turret)
                 else {
                     continue;
                 };

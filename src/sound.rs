@@ -330,6 +330,23 @@ pub fn report(
             serial: voyage.to_bits().into(),
         });
     }
+    // Each working stroke rings out from the Bell Works. Emitting from the forge
+    // lets distance and the time sound takes to cross the bay place it in the scene.
+    use shipvivor_encounter::IndustrialYard;
+    let stroke =
+        |t: f32| (t / IndustrialYard::HAMMER_PERIOD - IndustrialYard::HAMMER_STRIKE).floor();
+    if stroke(voyage) > stroke(around.seen) {
+        for port in battle.ports().iter().filter(|port| {
+            port.industrial_yard() == Some(IndustrialYard::BellWorks)
+                && port.industrial_collapse().is_none()
+        }) {
+            board.cues.send(Cue::Emit {
+                sound: Sound::Clank,
+                position: port.industrial_center().extend(6.).xzy(),
+                serial: voyage.to_bits().into(),
+            });
+        }
+    }
     (around.order, around.seen) = (Some(ordered), voyage);
     // One more module lost would sink her. The klaxon says so when it first becomes
     // true, and again every so often for as long as it stays true.

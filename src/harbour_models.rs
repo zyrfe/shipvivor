@@ -1,10 +1,15 @@
 //! Shipyard cranes, production buildings and the wreckage left on their foundations.
 #[path = "harbour_halls.rs"]
 mod halls;
+#[path = "industrial_works.rs"]
+mod industrial_works;
 #[path = "harbour_surfaces.rs"]
 mod surfaces;
 use crate::scene::Facets;
 use bevy::prelude::*;
+pub(super) use industrial_works::{
+    IndustrialPart, industrial, industrial_chimney, machine_pose, ore_fall_pose,
+};
 use shipvivor_encounter::YardState;
 pub(super) use surfaces::material;
 

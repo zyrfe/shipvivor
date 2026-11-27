@@ -1,6 +1,6 @@
 //! Water-level launch sectors and target-relative markings on the bridge sight.
 use crate::{
-    camera::{Quarry, ShipView},
+    camera::ShipView,
     scene::Facets,
     state::{Campaign, Encounter, Guns, PlayerHelm, Screen},
 };
@@ -237,10 +237,11 @@ pub(crate) fn battery_marker(
     player: Vec2,
     size: Vec2,
     at: Vec2,
+    gun: &shipvivor_encounter::ShoreTurret,
 ) -> Option<(Vec2, Rot2)> {
-    let plan = Rect::from_center_half_size(Vec2::ZERO, Vec2::splat(Quarry::GUN_RADIUS));
-    let pose = Transform::from_xyz(at.x, 0., at.y);
-    marker_over(view, player, size, pose, plan, Quarry::GUN_TOP)
+    let plan = Rect::from_center_half_size(Vec2::ZERO, Vec2::splat(gun.radius()));
+    let pose = Transform::from_xyz(at.x, gun.elevation(), at.y);
+    marker_over(view, player, size, pose, plan, gun.top() - gun.elevation())
 }
 /// A box standing on the water: `plan` spans starboard and astern, and `top` is its height.
 fn marker_over(
@@ -335,8 +336,9 @@ pub fn update_marks(
                         let masthead = kit.masthead(r.class);
                         contact_marker(&view, helm.position, size, pose, &profile.hull, masthead)
                     }
-                    None => (quarry.frame(&battle))
-                        .and_then(|(at, _)| battery_marker(&view, helm.position, size, at)),
+                    None => quarry.battery(&battle).and_then(|(port, gun)| {
+                        battery_marker(&view, helm.position, size, gun.position(&port.body), gun)
+                    }),
                 };
                 let Some((pos, angle)) = marker else {
                     continue;
@@ -467,11 +469,21 @@ mod tests {
         let size = Vec2::new(1120., 666.);
         let mut view = ShipView::astern(0.);
         let at = Vec2::new(30., -260.);
-        view.center_on(Vec2::ZERO, at.extend(5.7).xzy());
-        let (corner, turn) = battery_marker(&view, Vec2::ZERO, size, at).unwrap();
+        let passage = crate::passage::Passage::of(shipvivor_campaign::Stage::BorealRoad);
+        let battle = passage.battle(&passage.classic());
+        let gun = battle
+            .ports()
+            .last()
+            .unwrap()
+            .turrets()
+            .iter()
+            .find(|g| g.cliff_battery())
+            .unwrap();
+        view.center_on(Vec2::ZERO, at.extend(gun.aim_height()).xzy());
+        let (corner, turn) = battery_marker(&view, Vec2::ZERO, size, at, gun).unwrap();
         assert_eq!(turn, Rot2::IDENTITY);
         let roof = view
-            .viewport_point(Vec2::ZERO, at.extend(Quarry::GUN_TOP).xzy(), size)
+            .viewport_point(Vec2::ZERO, at.extend(gun.top()).xzy(), size)
             .unwrap();
         assert!(corner.y + CONTACT_SIZE.y + CONTACT_GAP <= roof.y + 0.01);
         assert!((corner.x + CONTACT_SIZE.x * 0.5 - roof.x).abs() < 1.);
