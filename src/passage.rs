@@ -39,6 +39,13 @@ impl Passage {
         }
     }
 
+    /// The same waters with bases that moor and launch `times` the ships, as a
+    /// punishing passage sails them.
+    pub fn with_strength(mut self, times: usize) -> Self {
+        self.sector = self.sector.with_strength(times);
+        self
+    }
+
     /// These waters as charted for one run. The same run seed always gives the same chart,
     /// and each leg of a run gets its own. Every candidate is surveyed before it is used,
     /// and if none passes the stage's hand-set chart stands in.

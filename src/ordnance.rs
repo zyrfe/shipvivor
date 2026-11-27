@@ -49,6 +49,63 @@ pub fn trail(tint: Color) -> Mesh {
     )
 }
 
+/// The glow of the tracer in a shell's base, as a disc a unit in radius facing +Z, to
+/// be turned to the camera: white hot at its heart, fading to nothing at its rim. It is
+/// what the eye follows up and over the arc when the shell is too small to see.
+pub fn glow(tint: Color) -> Mesh {
+    let burn = |gain: f32, alpha: f32| Color::from(tint.to_linear() * gain).with_alpha(alpha);
+    let rings = [
+        (0., Color::linear_rgb(6., 5.4, 4.)),
+        (0.3, Color::linear_rgb(5., 4.2, 2.6)),
+        (0.5, burn(2.6, 0.9)),
+        (0.75, burn(2., 0.35)),
+        (1., burn(1.6, 0.)),
+    ];
+    let mut facets = Facets::default();
+    let at = |n: usize, r: f32| {
+        let a = n as f32 * std::f32::consts::TAU / 16.;
+        Vec3::new(a.cos() * r, a.sin() * r, 0.)
+    };
+    for ring in rings.windows(2) {
+        let [(r0, inner), (r1, outer)] = [ring[0], ring[1]];
+        for i in 0..16 {
+            let (a, b) = (at(i, r0), at(i + 1, r0));
+            let (c, d) = (at(i + 1, r1), at(i, r1));
+            if r0 > 0. {
+                facets.triangle_colors([a, d, b], [inner, outer, inner]);
+            }
+            facets.triangle_colors([b, d, c], [inner, outer, outer]);
+        }
+    }
+    facets.finish()
+}
+
+/// How many straight lengths a shell's ghost trail is drawn in, so it bends with the arc.
+pub const GHOST_LENGTHS: usize = 3;
+
+/// One length of the thin glowing line a shell leaves hanging on its path: a unit long
+/// from its newer end at the origin back along -Z, a unit in radius at the trail's
+/// head. The whole trail thins and fades from the shell to nothing at its far end.
+pub fn ghost(tint: Color, length: usize) -> Mesh {
+    let along = |i: usize| i as f32 / GHOST_LENGTHS as f32;
+    let paint =
+        |t: f32| Color::from(tint.to_linear() * (2.4 - t)).with_alpha(0.75 * (1. - t) * (1. - t));
+    let (near, far) = (along(length), along(length + 1));
+    let (r0, r1) = (1. - 0.6 * near, 1. - 0.6 * far);
+    let mut facets = Facets::default();
+    let at = |n: usize, r: f32, z: f32| {
+        let a = n as f32 * std::f32::consts::TAU / 6.;
+        Vec3::new(a.cos() * r, a.sin() * r, z)
+    };
+    for i in 0..6 {
+        let (a, b) = (at(i, r0, 0.), at(i + 1, r0, 0.));
+        let (c, d) = (at(i + 1, r1, -1.), at(i, r1, -1.));
+        facets.triangle_colors([a, d, b], [paint(near), paint(far), paint(near)]);
+        facets.triangle_colors([b, d, c], [paint(near), paint(far), paint(far)]);
+    }
+    facets.finish()
+}
+
 /// Revolve rings of (z, radius, paint) around Z. Each band takes its leading ring's
 /// paint, or shades from one ring's to the next when `graded`.
 fn lathe(rings: &[(f32, f32, Color)], graded: bool) -> Mesh {

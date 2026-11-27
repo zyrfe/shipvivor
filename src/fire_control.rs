@@ -86,12 +86,14 @@ pub fn setup(
     );
 }
 
-// An in-game ghost holds the actor's current movement for its approximate travel time.
+/// Where she will be when a round fired now at `speed` gets there, holding her course
+/// and speed: the flight is worked out again to the point she will have reached.
 fn lead_point(target: &Raider, player: Vec2, speed: f32) -> Vec3 {
-    let seconds = player.distance(target.body.pos) / speed;
-    (target.body.pos + target.motion() * seconds)
-        .extend(target.class.profile().deck * 0.7)
-        .xzy()
+    let mut at = target.body.pos;
+    for _ in 0..3 {
+        at = target.body.pos + target.motion() * (player.distance(at) / speed);
+    }
+    at.extend(target.class.profile().deck * 0.7).xzy()
 }
 
 pub fn place_sectors(
@@ -157,7 +159,6 @@ pub enum Mark {
     Rail,
 }
 pub fn spawn(cmd: &mut Commands, root: Entity, contact_icon: Handle<Image>) {
-    let pale = Color::srgb_u8(208, 239, 226);
     let node = || Node {
         position_type: PositionType::Absolute,
         display: Display::None,
@@ -170,53 +171,35 @@ pub fn spawn(cmd: &mut Commands, root: Entity, contact_icon: Handle<Image>) {
             height: px(CONTACT_SIZE.y),
             ..node()
         },
-        ImageNode::new(contact_icon),
+        ImageNode::new(contact_icon.clone()),
         ChildOf(root),
     ));
     let mint = Color::srgb_u8(117, 255, 201);
+    // The contact's triangle again, smaller and in the lead's mint, its point on the lead.
     cmd.spawn((
         Mark::Lead,
         Node {
-            width: px(9),
-            height: px(9),
-            border: UiRect::all(px(1.5)),
-            border_radius: BorderRadius::MAX,
+            width: px(LEAD_SIZE.x),
+            height: px(LEAD_SIZE.y),
             ..node()
         },
-        BorderColor::all(mint),
+        ImageNode::new(contact_icon).with_color(mint),
         ChildOf(root),
     ));
     let line = Color::srgba_u8(200, 239, 223, 195);
     cmd.spawn((Mark::Rail, node(), BackgroundColor(line), ChildOf(root)));
-    for i in -4_i8..=4 {
-        let major = i % 2 == 0;
-        let tick = cmd
-            .spawn((Mark::Tick(i), node(), BackgroundColor(line), ChildOf(root)))
-            .id();
-        if major {
-            let label = if i == 0 {
-                "0".to_string()
-            } else {
-                format!("{:+}", i / 2)
-            };
-            cmd.spawn((
-                Text::new(label),
-                TextFont::from_font_size(10.),
-                TextColor(pale),
-                TextShadow::default(),
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: px(8),
-                    left: px(-6),
-                    ..default()
-                },
-                ChildOf(tick),
-            ));
-        }
+    for i in -TICKS..=TICKS {
+        cmd.spawn((Mark::Tick(i), node(), BackgroundColor(line), ChildOf(root)));
     }
 }
 pub(crate) const CONTACT_SIZE: Vec2 = Vec2::new(17., 12.);
 const CONTACT_GAP: f32 = 22.;
+/// The lead triangle, whose point lies where to lay the guns.
+const LEAD_SIZE: Vec2 = Vec2::new(13., 9.);
+/// Ticks either side of the middle of the scale under the contact, and the pixels
+/// between them. The scale is the same for every ship, at any range or speed.
+const TICKS: i8 = 4;
+const TICK_SPACING: f32 = 18.;
 
 /// Keep the entire triangle above the projected, wave-tilted ship. At the edge
 /// of the lens, only show a bearing arrow once the hull is fully out of view.
@@ -355,7 +338,10 @@ pub fn update_marks(
             }
             (_, None) => continue,
             (Mark::Lead, Some((r, _, _, (_, edge)))) => {
-                if (!guns.torpedo_mode && view.zoom < 0.45) || !edge.is_empty() {
+                if !run.lead_sight
+                    || (!guns.torpedo_mode && view.zoom < 0.45)
+                    || !edge.is_empty()
+                {
                     continue;
                 }
                 let speed = if guns.torpedo_mode {
@@ -371,15 +357,14 @@ pub fn update_marks(
                 if !off.is_empty() {
                     continue;
                 }
-                lead - Vec2::splat(4.5)
+                lead - Vec2::new(LEAD_SIZE.x * 0.5, LEAD_SIZE.y)
             }
-            (Mark::Tick(_) | Mark::Rail, Some((_, profile, center, (p, edge)))) => {
+            (Mark::Tick(_) | Mark::Rail, Some((_, _, _, (p, edge)))) => {
                 if view.zoom < 0.45 || !edge.is_empty() {
                     continue;
                 }
-                let half = (profile.hull.bow + profile.hull.stern) * 0.5;
-                // Project a half ship length at the contact's actual depth.
-                let spacing = view.screen_span(helm.position, *center, half, size);
+                let spacing = TICK_SPACING;
+                let reach = f32::from(TICKS) * spacing;
                 let y = p.y + 24.;
                 match kind {
                     Mark::Tick(i) => {
@@ -388,12 +373,16 @@ pub fn update_marks(
                             continue;
                         }
                         node.width = px(1.5);
-                        node.height = px(if i % 2 == 0 { 8. } else { 4. });
+                        node.height = px(match i {
+                            0 => 10.,
+                            _ if i % 2 == 0 => 7.,
+                            _ => 4.,
+                        });
                         Vec2::new(x, y)
                     }
                     _ => {
-                        let left = (p.x - 4. * spacing).max(12.);
-                        node.width = px(((p.x + 4. * spacing).min(size.x - 12.) - left).max(0.));
+                        let left = (p.x - reach).max(12.);
+                        node.width = px(((p.x + reach).min(size.x - 12.) - left).max(0.));
                         node.height = px(1.);
                         Vec2::new(left, y)
                     }

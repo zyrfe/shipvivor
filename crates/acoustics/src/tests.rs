@@ -290,6 +290,7 @@ fn a_gun_is_a_blast_and_not_a_note() {
         Sound::SecondaryGun,
         Sound::RaiderGun,
         Sound::ShoreGun,
+        Sound::PomPom,
     ] {
         for take in 0..foundry::VARIATIONS as u64 {
             let body = &bank.cast(Bank::index(sound, take)).layers[1];
@@ -1890,4 +1891,26 @@ fn a_full_air_gives_up_its_faintest_sound_so_a_blow_on_her_outlasts_far_splashes
     listen(&mut mixer, 0.02);
     assert_eq!(mixer.making(Sound::Splash).0, 0);
     assert_eq!(mixer.making(Sound::MainGun).0, 64);
+}
+
+#[test]
+fn a_pom_pom_is_heard_by_its_beat() {
+    let bank = Bank::standard();
+    for take in 0..foundry::VARIATIONS as u64 {
+        let body = &bank.cast(Bank::index(Sound::PomPom, take)).layers[1];
+        // Loudness through each 20 ms. A round is where it jumps from quiet to loud.
+        let step = (0.02 * RATE) as usize;
+        let loud: Vec<f32> = body
+            .chunks(step)
+            .map(|c| c.iter().fold(0_f32, |m, x| m.max(x.abs())))
+            .collect();
+        let rounds = (1..loud.len())
+            .filter(|&n| loud[n] > 0.5 && loud[n - 1] < 0.35)
+            .count()
+            + usize::from(loud[0] > 0.5);
+        assert!(
+            (3..=4).contains(&rounds),
+            "take {take}: {rounds} rounds in {loud:?}"
+        );
+    }
 }

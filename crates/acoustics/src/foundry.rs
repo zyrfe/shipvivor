@@ -124,6 +124,10 @@ impl Cast {
             Sound::Blast => inner_blast(rng),
             Sound::Gutted => gutted(rng),
             Sound::Shudder => shudder(rng),
+            Sound::PomPom => pom_pom(rng),
+            Sound::Typebar => typebar(rng),
+            Sound::Carriage => carriage(rng),
+            Sound::PrinterBell => printer_bell(rng),
         }
         .map(finish);
         let longest = layers.iter().map(Vec::len).max().unwrap_or(0);
@@ -322,6 +326,95 @@ impl Gun {
         }
         [crack, body, roll]
     }
+}
+
+/// A pom-pom: a light automatic gun whose barrels fire in turn, three or four rounds
+/// to a burst on a steady beat of four or five a second. Its round leaves slowly, so
+/// each report is a dull, round thud with little crack, and behind it the action runs
+/// out and slams home and a spent case rings on the deck. The beat and the clatter tell
+/// it from her secondaries, whose single reports crack and roll.
+fn pom_pom(rng: &mut Rng) -> [Vec<f32>; 3] {
+    /// The action's steel slamming home: hertz, level and the seconds each rings.
+    const ACTION: [(f32, f32, f32); 3] = [
+        (1240., 1., 0.012),
+        (1930., 0.7, 0.009),
+        (2870., 0.45, 0.006),
+    ];
+    /// A brass case striking the deck.
+    const CASE: [(f32, f32, f32); 3] =
+        [(3950., 1., 0.05), (5480., 0.6, 0.035), (7320., 0.35, 0.02)];
+    let rounds = if rng.unit() < 0.35 { 4 } else { 3 };
+    let beat = rng.within(0.19, 0.24);
+    let secs = (rounds - 1) as f32 * beat + 0.7;
+    let mut layers = [(); 3].map(|_| vec![0.; (secs * RATE) as usize]);
+    for round in 0..rounds {
+        let at = round as f32 * beat
+            + if round > 0 {
+                rng.within(-0.01, 0.01)
+            } else {
+                0.
+            };
+        let start = (at * RATE) as usize;
+        let (gain, push) = (rng.within(0.8, 1.), 0.005 * rng.within(0.9, 1.1));
+        // A small crack, and the flash of gas at the muzzle.
+        let front = Shock::new(push * 0.1, 2, (0.002, 0.012), rng);
+        for (n, x) in layers[0][start..]
+            .iter_mut()
+            .take((0.05 * RATE) as usize)
+            .enumerate()
+        {
+            *x += 0.5 * gain * front.pressure(n as f32 / RATE);
+        }
+        breath(
+            &mut layers[0],
+            at,
+            0.03,
+            &mut [Biquad::high_pass(2200., 0.7)],
+            rng,
+            |t| 0.25 * gain * (-t / 0.004).exp(),
+        );
+        let pitch = rng.within(0.95, 1.05);
+        let home = at + rng.within(0.05, 0.075);
+        strike(
+            &mut layers[0],
+            home,
+            &ACTION,
+            (0.45 * gain, pitch, 0.5),
+            rng,
+        );
+        let landed = at + rng.within(0.13, 0.2);
+        strike(
+            &mut layers[0],
+            landed,
+            &CASE,
+            (0.22, rng.within(0.9, 1.1), 0.6),
+            rng,
+        );
+        // The thud: a short, soft push and a puff of gas with its weight low down.
+        let shock = Shock::new(push, 3, (0.006, 0.03), rng);
+        let mut deep = Biquad::low_pass(150., 0.7);
+        let mut gas = [Biquad::high_pass(90., 0.7), Biquad::low_pass(800., 0.6)];
+        for (n, x) in layers[1][start..]
+            .iter_mut()
+            .take((0.3 * RATE) as usize)
+            .enumerate()
+        {
+            let t = n as f32 / RATE;
+            let air = gas[0].run(rng.noise());
+            let puff = gas[1].run(air);
+            let low = deep.run(rng.noise());
+            let onset = (t / 0.0015).min(1.);
+            let thud = shock.pressure(t)
+                + onset * (1.6 * puff * (-t / 0.03).exp() + 5. * low * (-t / 0.045).exp());
+            *x += gain * (2. * thud).tanh();
+        }
+        // Each round rolls away over the water a little way, and is gone by the next.
+        let roll = rumble(0.6, 260., rng);
+        for (x, y) in layers[2][start..].iter_mut().zip(&roll) {
+            *x += gain * y;
+        }
+    }
+    layers
 }
 
 /// A shell landing in the sea. Recordings of big splashes are broad, with as much in
@@ -2174,4 +2267,218 @@ fn shudder(rng: &mut Rng) -> [Vec<f32>; 3] {
         0.45,
     );
     layers
+}
+
+/// A ringing mode struck at `at` seconds: its hertz, loudness and the seconds it rings,
+/// heard at `t`.
+fn struck(t: f32, at: f32, (hz, loud, ring): (f32, f32, f32)) -> f32 {
+    let s = t - at;
+    if s < 0. {
+        return 0.;
+    }
+    loud * (TAU * hz * s).sin() * (-s / ring).exp()
+}
+
+/// The radio room: a small steel box a deck below the bridge, whose bulkheads answer
+/// anything sharp struck in it within a few milliseconds, and let it go almost as fast.
+fn compartment(dry: Vec<f32>) -> Vec<f32> {
+    /// Each return's delay in samples and what of it is kept on each lap.
+    const WALLS: [(usize, f32); 3] = [(173, 0.42), (251, 0.38), (367, 0.33)];
+    const WET: f32 = 0.22;
+    let mut laps = WALLS.map(|(len, _)| vec![0.; len]);
+    (dry.iter().enumerate())
+        .map(|(n, &x)| {
+            let mut wet = 0.;
+            for (lap, (len, keep)) in laps.iter_mut().zip(WALLS) {
+                let back = lap[n % len];
+                lap[n % len] = x + keep * back;
+                wet += back;
+            }
+            x + WET * wet / WALLS.len() as f32
+        })
+        .collect()
+}
+
+/// One character on a teleprinter of the 1930s, at a hundred words a minute. Its motor
+/// turns a main shaft whose cams do everything at a fixed point in the cycle, so every
+/// character sounds the same beat, and only the typebar's own pitch and which of the
+/// selector's five pulses are marks change from one to the next. The typebar is flung
+/// up against ribbon and paper on a rubber platen: a hard slap with the rubber's dull
+/// thud under it, the bar's thin steel ringing, and the sheet-steel cabinet booming
+/// under it all. The bar falls back into its basket with a light rattle, the carriage's
+/// escapement steps on a space, and the selector's armature clicks off the pulses of
+/// the character coming down the line.
+fn typebar(rng: &mut Rng) -> [Vec<f32>; 3] {
+    /// The typebar's steel, each mode's hertz, loudness and seconds of ring.
+    const BAR: [(f32, f32, f32); 3] = [
+        (2900., 1., 0.008),
+        (4700., 0.6, 0.005),
+        (7300., 0.35, 0.003),
+    ];
+    /// The platen's rubber over its steel core.
+    const PLATEN: [(f32, f32, f32); 2] = [(620., 1., 0.011), (1150., 0.7, 0.007)];
+    /// The cabinet's panels.
+    const CABINET: [(f32, f32, f32); 2] = [(178., 1., 0.035), (292., 0.6, 0.024)];
+    /// Seconds into the take of the strike, the bar's fall home and the escapement.
+    const STRIKE: f32 = 0.002;
+    const HOME: f32 = 0.027;
+    const STEP: f32 = 0.035;
+    /// The selector: the first pulse, the seconds from one to the next at 75 baud, and
+    /// the pulses in a character.
+    const SELECTOR: (f32, f32, usize) = (0.052, 0.0133, 5);
+    const SECS: f32 = 0.17;
+    let count = (SECS * RATE) as usize;
+    let mut layers = [(); 3].map(|_| vec![0.; count]);
+    let tune = rng.within(0.9, 1.12);
+    let heft = rng.within(0.85, 1.);
+    let pulses: Vec<f32> = (0..SELECTOR.2)
+        .map(|n| SELECTOR.0 + SELECTOR.1 * n as f32)
+        .zip(std::iter::repeat_with(|| rng.unit()))
+        .filter(|(_, roll)| *roll < 0.55)
+        .map(|(at, _)| at)
+        .collect();
+    let mut slap = Biquad::band_pass(2300., 0.7);
+    let mut tick = Biquad::band_pass(4200., 1.1);
+    for n in 0..count {
+        let t = n as f32 / RATE;
+        let grain = rng.noise();
+        let s = t - STRIKE;
+        let mut detail = 0.;
+        let mut body = 0.;
+        let mut rumble = 0.;
+        if s >= 0. {
+            detail += 1.3 * heft * slap.run(grain) * (-s / 0.0008).exp();
+            for (hz, loud, ring) in BAR {
+                detail += heft * struck(t, STRIKE, (hz * tune, loud, ring));
+                detail += 0.3 * struck(t, HOME, (hz * tune * 1.01, loud, ring * 0.7));
+            }
+            for mode in PLATEN {
+                body += heft * struck(t, STRIKE, mode);
+            }
+            for mode in CABINET {
+                body += 0.4 * struck(t, STRIKE, mode);
+                rumble += struck(t, STRIKE, mode);
+            }
+            body += 0.25 * struck(t, HOME, PLATEN[1]);
+        }
+        // The escapement's pawl and its little spring.
+        let e = t - STEP;
+        let mut clicks = 0.;
+        if e >= 0. {
+            clicks += 0.4 * (-e / 0.0005).exp();
+            detail += 0.32 * struck(t, STEP, (3800., 1., 0.004));
+        }
+        for &at in &pulses {
+            let p = t - at;
+            if p >= 0. {
+                clicks += 0.16 * (-p / 0.0004).exp();
+                detail += 0.1 * struck(t, at, (5600., 1., 0.0015));
+                body += 0.05 * struck(t, at, (900., 1., 0.004));
+            }
+        }
+        detail += tick.run(grain) * clicks;
+        layers[0][n] = detail;
+        layers[1][n] = body;
+        layers[2][n] = rumble;
+    }
+    layers.map(compartment)
+}
+
+/// The teleprinter's carriage return and line feed. The platen's ratchet clacks round a
+/// line, then the carriage, let go, runs back along its rack on its spring, rattling
+/// faster as it goes, and slams into the dashpot that stops it, booming the cabinet and
+/// bouncing once.
+fn carriage(rng: &mut Rng) -> [Vec<f32>; 3] {
+    /// When the carriage is let go and when it lands, give or take.
+    const LET_GO: f32 = 0.03;
+    const LANDS: f32 = 0.24;
+    const SECS: f32 = 0.6;
+    const CABINET: [(f32, f32, f32); 3] = [(158., 1., 0.07), (243., 0.7, 0.05), (410., 0.4, 0.03)];
+    const STEEL: [(f32, f32, f32); 2] = [(1900., 1., 0.02), (3100., 0.6, 0.012)];
+    let count = (SECS * RATE) as usize;
+    let mut layers = [(); 3].map(|_| vec![0.; count]);
+    let lands = LANDS * rng.within(0.92, 1.08);
+    let bounce = lands + rng.within(0.028, 0.036);
+    let mut rack = Biquad::band_pass(1800., 1.4);
+    let mut pawl = Biquad::band_pass(3300., 1.);
+    let mut thump = Biquad::low_pass(1200., 0.7);
+    let mut teeth = 0_f32;
+    for n in 0..count {
+        let t = n as f32 / RATE;
+        let grain = rng.noise();
+        let mut detail = 0.;
+        let mut body = 0.;
+        let mut rumble = 0.;
+        // The line feed: pawl, then the detent dropping in.
+        let mut clack = 0.;
+        for (at, loud) in [(0.002, 1.), (0.009, 0.6)] {
+            let s = t - at;
+            if s >= 0. {
+                clack += loud * (-s / 0.0007).exp();
+                body += 0.45 * loud * struck(t, at, (700., 1., 0.01));
+            }
+        }
+        detail += pawl.run(grain) * clack;
+        // The carriage running back, quicker as the spring pulls it.
+        if (LET_GO..lands).contains(&t) {
+            let run = (t - LET_GO) / (lands - LET_GO);
+            teeth += (140. + 320. * run) / RATE;
+            let rattle = 0.5 + 0.5 * (TAU * teeth).sin().max(0.).powi(3);
+            let swell = (run / 0.15).min(1.) * (0.5 + 0.5 * run);
+            detail += 0.35 * rack.run(grain) * rattle * swell;
+        } else {
+            rack.run(grain);
+        }
+        // The dashpot.
+        let mut bang = 0.;
+        for (at, loud) in [(lands, 1.), (bounce, 0.25)] {
+            let s = t - at;
+            if s < 0. {
+                continue;
+            }
+            bang += loud * (-s / 0.002).exp();
+            for mode in STEEL {
+                detail += 0.5 * loud * struck(t, at, mode);
+            }
+            for mode in CABINET {
+                body += 0.6 * loud * struck(t, at, mode);
+                rumble += loud * struck(t, at, mode);
+            }
+        }
+        body += 1.2 * thump.run(grain) * bang;
+        layers[0][n] = detail;
+        layers[1][n] = body;
+        layers[2][n] = rumble;
+    }
+    layers.map(compartment)
+}
+
+/// The teleprinter's bell: a small steel gong inside the cabinet, struck once by a
+/// hammer. A gong's modes stand far apart and its highest die first, leaving a bright
+/// ding with a short, hard knock in front of it.
+fn printer_bell(rng: &mut Rng) -> [Vec<f32>; 3] {
+    const NOTE: f32 = 1640.;
+    /// Each mode as a multiple of the note, its loudness and the seconds it rings.
+    const MODES: [(f32, f32, f32); 4] = [
+        (1., 1., 0.42),
+        (2.76, 0.5, 0.18),
+        (5.4, 0.24, 0.07),
+        (8.93, 0.12, 0.035),
+    ];
+    const SECS: f32 = 1.4;
+    let count = (SECS * RATE) as usize;
+    let mut layers = [(); 3].map(|_| vec![0.; count]);
+    let mut knock = Biquad::band_pass(4400., 1.2);
+    let beat = rng.within(1.5, 2.5);
+    for n in 0..count {
+        let t = n as f32 / RATE;
+        let onset = (t / 0.0008).min(1.);
+        for (ratio, loud, ring) in MODES {
+            let hz = NOTE * ratio;
+            let pair = (TAU * hz * t).sin() + 0.3 * (TAU * (hz + beat) * t + 0.7).sin();
+            layers[usize::from(ratio < 2.)][n] += onset * loud * pair * (-t / ring).exp();
+        }
+        layers[0][n] += 0.7 * knock.run(rng.noise()) * (-t / 0.0012).exp();
+    }
+    layers.map(compartment)
 }

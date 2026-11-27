@@ -494,6 +494,8 @@ fn home(side: f32, fore: f32) -> f32 {
     }
 }
 
+#[derive(Clone)]
+
 pub struct EnemyGun {
     offset: (f32, f32, f32),
     train: f32,
@@ -549,6 +551,8 @@ const SECONDARY_ARC: f32 = 85_f32.to_radians();
 /// Metres round one of her secondaries that the guns beside it keep their fire clear of.
 const SECONDARY_BERTH: f32 = 2.;
 
+#[derive(Clone)]
+
 pub struct SecondaryMount {
     pub(super) strength: u16,
     offset: Vec2,
@@ -593,6 +597,8 @@ fn works_stage(mangled: f32) -> u8 {
         0
     }
 }
+
+#[derive(Clone)]
 
 pub struct Raider {
     pub secondaries: Vec<SecondaryMount>,

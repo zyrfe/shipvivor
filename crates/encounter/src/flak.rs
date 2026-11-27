@@ -43,6 +43,7 @@ pub enum Airframe {
 }
 
 /// One light anti-aircraft mount, worked by its crew.
+#[derive(Clone)]
 pub struct AaMount {
     reload: f32,
     abeam: f32,

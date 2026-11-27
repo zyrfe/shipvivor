@@ -29,6 +29,10 @@ const ENEMY: Ink = [255, 111, 93, 255];
 /// A heavy battery's reach, while it has no plot of her.
 const REACH: Ink = [158, 82, 72, 255];
 const GOLD: Ink = [255, 200, 94, 255];
+/// Cargo ships: orange targets, apart from the red raiders that fight back and the
+/// gold of stores and bases. Their route to the next yard is a dim shade of it.
+const CARGO: Ink = [255, 146, 32, 255];
+const CARGO_ROUTE: Ink = [176, 108, 44, 255];
 const WHITE: Ink = [246, 248, 229, 255];
 /// Backing behind the flagship's crown, so it reads over land and grid alike.
 const SHADOW: Ink = [21, 38, 44, 255];
@@ -554,11 +558,11 @@ impl Chart<'_> {
         for raider in battle.raiders() {
             let boss = raider.class.is_flagship();
             if raider.class == EnemyClass::Coaster {
-                // A coaster is a small gold block, with no route drawn: they are many,
+                // A coaster is a small orange block, with no route drawn: they are many,
                 // and they trade only with the next yard along.
                 let p = self.project(raider.body.pos);
                 for y in [0, 1] {
-                    self.line(p + IVec2::new(-2, y), p + IVec2::new(2, y), GOLD);
+                    self.line(p + IVec2::new(-2, y), p + IVec2::new(2, y), CARGO);
                 }
                 continue;
             }
@@ -572,11 +576,11 @@ impl Chart<'_> {
                     let from = self.project(raider.body.pos);
                     let steps = (to - from).abs().max_element().max(1);
                     for k in (3..steps).step_by(4) {
-                        self.dot(from + (to - from) * k / steps, [171, 148, 96, 255]);
+                        self.dot(from + (to - from) * k / steps, CARGO_ROUTE);
                     }
                 }
                 for y in [-1, 0, 1] {
-                    self.line(p + IVec2::new(-3, y), p + IVec2::new(3, y), GOLD);
+                    self.line(p + IVec2::new(-3, y), p + IVec2::new(3, y), CARGO);
                 }
                 self.dot(p - IVec2::new(2, 2), WHITE);
                 continue;

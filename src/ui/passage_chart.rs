@@ -564,7 +564,7 @@ fn offer_tab(
         figure(cmd, tab, exit.stars.into(), &art.star, ink, face);
     }
     // Every star at the grade's rate and every yard, before any cargo.
-    let most = shipvivor_sim::Sector::of(sea, exit.grade).most_points();
+    let most = shipvivor_sim::Sector::sailed(&exit).most_points();
     figure(cmd, tab, most, &art.order, ink, face);
     if exit.under_air_cover() {
         stamp(cmd, tab, &art.floatplane, if open { PENCIL } else { FADED });

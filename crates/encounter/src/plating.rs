@@ -56,6 +56,8 @@ pub struct Scar {
     cell: Cell,
 }
 
+#[derive(Clone)]
+
 pub(super) struct Plating {
     belt: ArmorPanel,
     /// The plate of the strakes hung over her belt, where they still hang.

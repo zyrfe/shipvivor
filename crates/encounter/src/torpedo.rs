@@ -39,6 +39,7 @@ impl Rack {
         })
     }
 }
+#[derive(Clone)]
 pub struct Torpedo {
     pub body: Body,
     remaining: f32,

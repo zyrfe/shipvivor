@@ -122,13 +122,16 @@ impl Eddy {
 }
 
 /// The solved current over one chart.
+#[derive(Clone)]
 pub struct Currents {
     set: Set,
     origin: Vec2,
     cell: f32,
     cols: usize,
     rows: usize,
-    flow: Vec<Vec2>,
+    /// Shared, not copied: it never changes once solved, and the rewind keeps a copy of
+    /// the battle every second.
+    flow: std::sync::Arc<[Vec2]>,
     peak: f32,
 }
 impl Currents {
@@ -140,7 +143,7 @@ impl Currents {
             cell: 1.,
             cols: 0,
             rows: 0,
-            flow: vec![],
+            flow: std::sync::Arc::from([]),
             peak: 0.,
         }
     }
@@ -198,7 +201,7 @@ impl Currents {
             cell: level.cell,
             cols: level.cols,
             rows: level.rows,
-            flow,
+            flow: flow.into(),
             peak,
         }
     }

@@ -38,12 +38,18 @@ bevy = { version = "=0.20.1", default-features = false, features = [
 ] }
 # Encodes dev captures. Bevy's own `png` feature would rebuild most of Bevy.
 png = "0.18"
+# The in-game MCP server's JSON-RPC.
+serde_json = { version = "1", optional = true }
 
 [features]
-default = ["dev-tools"]
+default = ["dev-tools", "mcp"]
 # The run logbook (`work/runs`) and the ` capture key (`work/screenshots`). On in every
 # build, `--release` included. Build with `--no-default-features` to ship without them.
 dev-tools = []
+# An MCP server on 127.0.0.1 (port 7531, or `SHIPVIVOR_MCP_PORT`) for an agent to read the
+# battle and change it as it runs: place, move, rebuild and regun ships, rewind, step a
+# paused fight. No auth: it answers this machine only, and refuses browser pages.
+mcp = ["dep:serde_json"]
 
 [profile.dev]
 debug = 1

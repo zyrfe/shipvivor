@@ -267,7 +267,7 @@ pub fn sail_for(setup: Setup, limit: f32) -> Report {
 /// own [`crate::sector::PRESSURE`] (see `Battle::with_pressure`).
 pub fn sail_leg(run: &mut Run, setup: Setup, bot: &mut Bot, limit: f32, pressure: f32) -> Report {
     let started = std::time::Instant::now();
-    let sector = Sector::of(setup.stage, setup.grade);
+    let sector = Sector::of(setup.stage, setup.grade).with_strength(run.strength());
     let chart = sector.chart(setup.seed);
     let battle = open_battle(&sector, &chart, run, Rewards::Direct, true);
     // The round's own pressure, turned further by the simulation's.

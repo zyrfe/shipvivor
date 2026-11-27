@@ -147,9 +147,24 @@ pub enum Sound {
     /// Her frames taking a heavy blow, carried to the bridge by the ship: a deep thud,
     /// the hull flexing, loose gear rattling and a groan as she settles.
     Shudder,
+    /// Her light anti-aircraft guns: a pom-pom's barrels firing in turn, three or four
+    /// dull thuds on a steady beat, the action clacking home and spent cases ringing on
+    /// the deck between them. Nothing else she carries has a beat.
+    PomPom,
+    /// One character on the radio room's teleprinter: the typebar whacking ribbon and
+    /// paper onto the rubber platen, its rattle home into the basket, the carriage's
+    /// escapement stepping on, and the selector clicking off the next character's
+    /// pulses. Struck on a steady beat, as the line sets it. It is the game speaking.
+    Typebar,
+    /// The teleprinter's carriage return and line feed: the platen's ratchet clacking a
+    /// line on, the carriage running back on its spring and banging into its dashpot.
+    Carriage,
+    /// The teleprinter's bell, a small gong struck once by its hammer. A message of
+    /// high precedence rings it before it prints.
+    PrinterBell,
 }
 impl Sound {
-    pub const ALL: [Self; 46] = [
+    pub const ALL: [Self; 50] = [
         Self::MainGun,
         Self::SecondaryGun,
         Self::RaiderGun,
@@ -196,6 +211,10 @@ impl Sound {
         Self::Blast,
         Self::Gutted,
         Self::Shudder,
+        Self::PomPom,
+        Self::Typebar,
+        Self::Carriage,
+        Self::PrinterBell,
     ];
 
     /// Level of the detail, body and rumble layers at close range.
@@ -251,6 +270,12 @@ impl Sound {
             Self::Blast => [0.22, 1., 1.1],
             Self::Gutted => [0.2, 0.75, 0.9],
             Self::Shudder => [0.14, 0.4, 0.34],
+            Self::PomPom => [0.42, 0.4, 0.1],
+            // The radio room is a deck below the bridge: clear over the engines, never
+            // over a gun.
+            Self::Typebar => [0.3, 0.26, 0.05],
+            Self::Carriage => [0.26, 0.3, 0.06],
+            Self::PrinterBell => [0.2, 0.32, 0.],
         }
     }
 
@@ -275,6 +300,9 @@ impl Sound {
                 | Self::EngineHurt
                 | Self::EngineStall
                 | Self::Shudder
+                | Self::Typebar
+                | Self::Carriage
+                | Self::PrinterBell
         )
     }
 
@@ -290,13 +318,22 @@ impl Sound {
                 | Self::Chime
                 | Self::TorpedoAlarm
                 | Self::Tick
+                | Self::PrinterBell
         )
     }
 
     /// The game speaking to the player. It belongs to no moment of the battle, so it
     /// is heard whether the world's time runs or holds, and a hush leaves it be.
     fn notice(self) -> bool {
-        matches!(self, Self::Upgrade | Self::Chime | Self::Tick) || self.chart_paper()
+        matches!(
+            self,
+            Self::Upgrade
+                | Self::Chime
+                | Self::Tick
+                | Self::Typebar
+                | Self::Carriage
+                | Self::PrinterBell
+        ) || self.chart_paper()
     }
 
     fn chart_paper(self) -> bool {

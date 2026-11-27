@@ -2656,6 +2656,15 @@ fn header(
     } else {
         text(cmd, tally, "Past the clock", 13., muted());
     }
+    if run.survival_points() > 0 {
+        text(
+            cmd,
+            tally,
+            format!("Came through punishing  +{} pts", run.survival_points()),
+            13.,
+            brass(),
+        );
+    }
 
     // Her hull, as the dock has mended it. The points to spend stand over the way out.
     let orders = column(cmd, AlignItems::End);
@@ -2712,7 +2721,7 @@ fn test_briefing(cmd: &mut Commands, column: Entity, run: &Campaign) {
         19.,
         paper(),
     );
-    let sector = shipvivor_sim::Sector::of(stage, run.grade);
+    let sector = shipvivor_sim::Sector::of(stage, run.grade).with_strength(run.strength());
     let air = if run.under_air_cover() {
         ", under air cover"
     } else {

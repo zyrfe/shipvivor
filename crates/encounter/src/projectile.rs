@@ -98,6 +98,8 @@ fn below_bays(at: Vec3, travel: Vec3) -> Option<[Vec3; 2]> {
     })
 }
 
+#[derive(Clone)]
+
 pub struct Shot {
     pub body: Body,
     pub battery: Battery,
@@ -128,6 +130,12 @@ impl Shot {
     }
     pub fn tangent(&self) -> Vec3 {
         Vec3::new(self.velocity.x, self.arc.slope(self.age), self.velocity.y).normalize()
+    }
+    /// Where the round was a `share` of the way back along the last `seconds` of its
+    /// present arc, or along all of it while it has flown less: the path its trail
+    /// hangs on, no further back than the muzzle or the plate it skipped off.
+    pub fn wake(&self, seconds: f32, share: f32) -> Vec3 {
+        self.point(self.age - self.age.min(seconds) * share)
     }
     /// Where on the chart the round left the muzzle.
     pub fn origin(&self) -> Vec2 {
@@ -683,6 +691,8 @@ pub struct Sighting {
     /// Number painted on the spotting display, counting from one.
     pub turret: Option<usize>,
     pub director: Option<bool>,
+    /// Drift ice under the crosshair, which the sight looks past for a contact.
+    pub ice: bool,
 }
 
 impl Battle {
@@ -717,6 +727,7 @@ impl Battle {
                 Contact::Port(i, PortPart::Dock(j)) => sight.yard = Some((i, j)),
                 Contact::Port(i, PortPart::Factory(j)) => sight.factory = Some((i, j)),
                 Contact::Port(i, PortPart::Airfield(part)) => sight.airfield = Some((i, part)),
+                Contact::Ice(_) => sight.ice = true,
                 Contact::Raider(i, part) => {
                     let r = &self.raiders[i];
                     sight.ship = Some(r.class);

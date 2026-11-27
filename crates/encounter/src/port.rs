@@ -37,6 +37,8 @@ pub enum YardState {
     Ruined,
 }
 
+#[derive(Clone)]
+
 pub struct Factory {
     strength: u16,
 }
@@ -48,6 +50,7 @@ impl Factory {
 
 /// One drydock and its slip. Each lays down its own hull and launches it, and when it
 /// falls the base's factories set about raising it again.
+#[derive(Clone)]
 pub struct Dock {
     /// Starboard and forward of the harbour centre, in the port's rotating frame: where
     /// the dock house stands. Its slip and quay run straight out ahead of it.
@@ -154,6 +157,7 @@ pub struct Pock {
 }
 
 /// A single independently trained, damageable mount on the harbour apron.
+#[derive(Clone)]
 pub struct ShoreTurret {
     // Starboard and forward of the harbour centre, in the port's rotating frame.
     station: Vec2,
@@ -381,6 +385,8 @@ impl ShoreTurret {
     }
 }
 
+#[derive(Clone)]
+
 pub struct Port {
     pub(super) industry: Option<IndustrialYard>,
     pub(super) collapse: Option<f32>,
@@ -391,6 +397,9 @@ pub struct Port {
     docks: Vec<Dock>,
     // Unfinished fraction of the next unit of material. A full storehouse stops production.
     material_progress: f64,
+    /// How many times over the yard works: its steel comes in this much quicker. A
+    /// punishing passage's yards work twice over (see `Battle::with_strength`).
+    output: f32,
     tier: usize,
     order_index: usize,
     /// What holds the waters, which decides what the yard lays down at each tier.
@@ -503,6 +512,7 @@ impl Port {
                             .collect(),
                         docks,
                         material_progress: 0.,
+                        output: 1.,
                         tier: 0,
                         order_index: 0,
                         doctrine: super::Doctrine::Mixed,
@@ -692,10 +702,22 @@ impl Port {
     /// it, and only the docks still standing make steel.
     pub fn production_per_minute(&self) -> f32 {
         let docks = self.live_docks() as f32;
-        if docks == 0. || self.raising() {
-            docks
-        } else {
-            docks + 3. * self.live_factories() as f32
+        self.output
+            * if docks == 0. || self.raising() {
+                docks
+            } else {
+                docks + 3. * self.live_factories() as f32
+            }
+    }
+    /// Work `times` over: steel that much quicker, and the slips fitting out the hulls
+    /// on them that much sooner. What comes after is the battle's to time, at its own
+    /// quickened pace.
+    pub(super) fn quicken(&mut self, times: f32) {
+        let quicker = times / self.output;
+        self.output = times;
+        for dock in &mut self.docks {
+            dock.slipway_clock /= quicker;
+            dock.slipway_turn /= quicker;
         }
     }
     /// A drydock is down and a factory stands to raise it.

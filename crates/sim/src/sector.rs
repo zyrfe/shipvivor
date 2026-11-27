@@ -3,7 +3,9 @@
 //! plain geometry and timing, so this is the one place that ties a stage to both. The
 //! game and the simulator both sail these sectors.
 use glam::{Mat2, Vec2};
-use shipvivor_campaign::{Fleet, Grade, MAX_STARS, PATROLS, POOLS, ROUNDS, Stage, YARD_POINTS};
+use shipvivor_campaign::{
+    Exit, Fleet, Grade, MAX_STARS, PATROLS, POOLS, ROUNDS, SURVIVAL_POINTS, Stage, YARD_POINTS,
+};
 use shipvivor_encounter::{
     Battle, Chart, Doctrine, EnemyClass, IndustrialYard, Surprise, Waters, leg_seed,
 };
@@ -23,6 +25,9 @@ pub struct Sector {
     stage: Stage,
     /// How hard the passage into these waters runs.
     grade: Grade,
+    /// How many times over its bases moor and launch their ships: 2 on a punishing
+    /// passage (see [`Sector::with_strength`]).
+    strength: usize,
     /// The channel the waters are charted as.
     kind: Kind,
     /// What the waters are like. Each run charts them afresh from its seed.
@@ -334,6 +339,7 @@ impl Sector {
         Self {
             stage,
             grade,
+            strength: 1,
             kind,
             waters,
             weather: Weather {
@@ -347,6 +353,28 @@ impl Sector {
             raid_interval: raid_interval * 1.35 * pace,
             head_start,
         }
+    }
+
+    /// These waters as a passage `exit` sails them: at its grade, and punishing if the
+    /// captain set it so.
+    pub fn sailed(exit: &Exit) -> Self {
+        Self::of(exit.stage, exit.grade).with_strength(exit.strength())
+    }
+    /// Bases that moor and launch `times` the ships: see [`Battle::with_strength`]. An
+    /// anchorage and Crown Deep are never punishing.
+    pub fn with_strength(mut self, times: usize) -> Self {
+        if (2..=PATROLS).contains(&self.stage.round()) {
+            self.strength = times.max(1);
+        }
+        self
+    }
+    /// How many times over its bases moor and launch their ships.
+    pub fn strength(&self) -> usize {
+        self.strength
+    }
+    /// The bases moor and launch twice the ships, and coming through pays a bonus.
+    pub fn punishing(&self) -> bool {
+        self.strength > 1
     }
 
     /// The channel these waters are charted as.
@@ -419,9 +447,10 @@ impl Sector {
         IndustrialYard::from_works(works)
     }
 
-    /// Seconds between the raiders' launches here.
+    /// Seconds between the raiders' launches here: quicker as many times over as the
+    /// bases' strength.
     pub fn raid_interval(&self) -> f32 {
-        self.raid_interval
+        self.raid_interval / self.strength as f32
     }
 
     /// The boss these waters build up to: none in an anchorage, the Commodore's
@@ -470,6 +499,7 @@ impl Sector {
     pub fn most_points(&self) -> u16 {
         self.stage.star_points(self.grade) * (u16::from(MAX_STARS) + 1)
             + YARD_POINTS * u16::try_from(self.bases()).unwrap_or(u16::MAX)
+            + if self.punishing() { SURVIVAL_POINTS } else { 0 }
     }
 
     /// These waters as charted for one run. The same run seed always gives the same chart,
@@ -515,6 +545,7 @@ impl Sector {
                 None => held,
             }
             .with_squadrons(self.stage.round())
+            .with_strength(self.strength)
         };
         match (self.stage, self.boss()) {
             (Stage::CrownDeep, _) => Battle::regent_encounter(self.raid_interval, chart),

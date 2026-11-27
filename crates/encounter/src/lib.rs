@@ -7,6 +7,7 @@ pub use coast::{
     mainland_top,
 };
 mod current;
+mod dev;
 pub use current::{Currents, Gyre, MAX_CURRENT, Set};
 mod iceberg;
 pub use iceberg::{AVOIDED_RADIUS, IceShape, Iceberg};
@@ -188,6 +189,7 @@ impl EffectKind {
         }
     }
 }
+#[derive(Clone)]
 pub struct Effect {
     pub body: Body,
     pub kind: EffectKind,
@@ -460,6 +462,7 @@ pub struct Orders {
     pub reload: f32,
     pub shell: MainShell,
 }
+#[derive(Clone)]
 pub struct Battle {
     ports: Vec<Port>,
     air_station: Option<AirStation>,
@@ -473,6 +476,9 @@ pub struct Battle {
     alert_until: Vec<f32>,
     /// The round of the run whose squadrons lie in the harbours, from one.
     squadron_round: usize,
+    /// How many times over the bases moor their squadrons and launch their ships: 2 on
+    /// a punishing passage (see [`Battle::with_strength`]).
+    strength: usize,
     /// What holds these waters: what the harbours moor, the yards build and the boss
     /// sails with, and how heavily its warships are gunned.
     doctrine: Doctrine,
@@ -625,6 +631,7 @@ impl Battle {
             harrier_due: vec![0.; ports.len()],
             alert_until: vec![f32::NEG_INFINITY; ports.len()],
             squadron_round: 1,
+            strength: 1,
             doctrine: Doctrine::Mixed,
             surprise: None,
             squadrons: Vec::new(),
@@ -1046,6 +1053,29 @@ impl Battle {
         self.garrison();
         self
     }
+    /// Bases that hold `times` the ships: each moors its squadron that many times over,
+    /// as one, and its yards work that much quicker, steel and slips alike, so they
+    /// launch that many times as often. Up to that many times as many warships are
+    /// under way at once. The boss, its escort, the torpedo boats, the pickets and the
+    /// air stay as charted. Comes after [`Battle::with_squadrons`] and before the boss.
+    pub fn with_strength(mut self, times: usize) -> Self {
+        let times = times.max(1);
+        if times == self.strength {
+            return self;
+        }
+        let quicker = times as f32 / self.strength as f32;
+        self.strength = times;
+        self.wave_interval /= quicker;
+        for port in &mut self.ports {
+            port.quicken(times as f32);
+        }
+        let round = self.squadron_round;
+        self.with_squadrons(round)
+    }
+    /// How many times over the bases moor and launch their ships.
+    pub fn strength(&self) -> usize {
+        self.strength
+    }
     /// Waters held by `doctrine`: the yards lay down its ships and each base moors its
     /// torpedo boats. Its squadrons and the boss's escort follow from
     /// [`Battle::with_squadrons`], which comes after, and from the round it sets. How
@@ -1097,7 +1127,8 @@ impl Battle {
         for base in 0..self.ports.len() {
             let (berth, forward) = (self.ports[base].berth(), self.ports[base].body.forward());
             let mut moored = Vec::new();
-            for &class in self.squadron(base) {
+            let squadron = self.squadron(base);
+            for &class in squadron.iter().cycle().take(squadron.len() * self.strength) {
                 let hull = class.profile().hull;
                 // A berth a heavy ship had no room for may suit a lighter one.
                 let spot = GARRISON_STATIONS
@@ -1474,7 +1505,7 @@ impl Battle {
     }
 
     fn reinforce(&mut self, player: Vec2) {
-        if self.combatants() >= COMBATANT_LIMIT {
+        if self.combatants() >= COMBATANT_LIMIT * self.strength {
             return;
         }
         // Steel just landed goes into the hulls before anything is launched.

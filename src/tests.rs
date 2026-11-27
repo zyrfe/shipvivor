@@ -3810,3 +3810,88 @@ fn test_mode_sails_any_sea_from_a_free_yard_and_comes_back_to_it() {
     assert!(!run.is_exercise());
     assert_eq!((run.level, run.spent()), (1, 0));
 }
+
+/// The battle's timeline keeps the leg as it is sailed and marks each ship sunk. From the
+/// pause menu it opens on an earlier moment, Esc takes it back to the present, and Enter
+/// sails on from the moment picked, forgetting what came after. From the report of her
+/// loss it takes her back afloat.
+#[test]
+fn the_timeline_takes_the_battle_back_and_sails_on_from_the_moment_picked() {
+    use rewind::{MarkKind, STEP, Timeline};
+    let mut app = headless_game();
+    let w = app.world_mut();
+    start_in_narrows(w);
+    let sail = |w: &mut World, seconds: f32| {
+        for _ in 0..(seconds * 60.).round() as usize {
+            w.run_schedule(FixedUpdate);
+        }
+    };
+    let at_sea = |w: &World| w.resource::<Encounter>().at_sea();
+    sail(w, 20.);
+    let (first, last) = w.resource::<Timeline>().span().expect("moments kept");
+    assert!(first < STEP, "{first}");
+    assert!(at_sea(w) - last < STEP + 0.02, "{last} vs {}", at_sea(w));
+    let moments = w.resource::<Timeline>().moments();
+    assert!((38..=42).contains(&moments), "{moments}");
+
+    // A ship sunk by hand goes down on the next step, and the timeline marks it.
+    let victim = w.resource::<Encounter>().raiders()[0].body.id;
+    w.resource_mut::<Encounter>().dev_damage(victim, 1e6).unwrap();
+    sail(w, 5.);
+    let marks = w.resource::<Timeline>().marks().to_vec();
+    assert_eq!(marks.len(), 1, "{marks:?}");
+    assert!(matches!(marks[0].kind, MarkKind::Sunk(_)));
+    assert!(w.resource::<Encounter>().ship(victim).is_none());
+
+    // Paused, the timeline opens ten seconds back, before she went down.
+    press(w, KeyCode::Escape);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Paused);
+    let present = (at_sea(w), w.resource::<PlayerHelm>().position);
+    press(w, KeyCode::KeyR);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Rewind);
+    let shown = at_sea(w);
+    assert!((present.0 - 10. - shown).abs() <= STEP, "{shown} vs {}", present.0);
+    assert!(w.resource::<Encounter>().ship(victim).is_some());
+    assert_ne!(w.resource::<PlayerHelm>().position, present.1);
+
+    // Esc puts the present back as it was.
+    press(w, KeyCode::Escape);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Paused);
+    assert_eq!((at_sea(w), w.resource::<PlayerHelm>().position), present);
+    assert!(w.resource::<Encounter>().ship(victim).is_none());
+
+    // A step back and Enter: she sails on from there, and what came after is gone.
+    press(w, KeyCode::KeyR);
+    press(w, KeyCode::ArrowLeft);
+    let picked = at_sea(w);
+    assert!(picked < shown, "{picked} vs {shown}");
+    press(w, KeyCode::Enter);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Sailing);
+    assert_eq!(at_sea(w), picked);
+    let timeline = w.resource::<Timeline>();
+    assert!(timeline.span().unwrap().1 <= picked + 1e-3);
+    assert!(timeline.marks().is_empty());
+    assert!(w.resource::<Encounter>().ship(victim).is_some());
+    sail(w, 1.);
+    assert!(at_sea(w) > picked);
+
+    // Lost, the report rewinds her afloat.
+    sail(w, 12.);
+    let hull = w.resource::<Campaign>().hull_shape();
+    for i in 0..12 {
+        let aft = (hull.bow + hull.stern) * (i as f32 + 0.5) / 12.;
+        w.resource_mut::<Campaign>().strike(aft, 9999);
+    }
+    sail(w, 1.);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Lost);
+    assert!(
+        (w.resource::<Timeline>().marks().iter()).any(|m| m.kind == MarkKind::Lost),
+        "her loss is marked"
+    );
+    press(w, KeyCode::KeyR);
+    assert_eq!(w.resource::<Campaign>().screen(), Screen::Rewind);
+    press(w, KeyCode::Enter);
+    let run = w.resource::<Campaign>();
+    assert_eq!(run.screen(), Screen::Sailing);
+    assert!(run.ship.afloat());
+}

@@ -3922,6 +3922,36 @@ fn each_base_keeps_a_squadron_at_anchor_that_sails_when_it_is_roused() {
 }
 
 #[test]
+fn a_punishing_passage_moors_twice_the_squadrons_and_its_yards_work_twice_over() {
+    let chart = coastwise_chart([0, 1, 1]);
+    let charted = Battle::for_chart(60., &chart).with_squadrons(3);
+    let doubled = Battle::for_chart(60., &chart)
+        .with_squadrons(3)
+        .with_strength(2);
+    assert_eq!((charted.strength(), doubled.strength()), (1, 2));
+    let garrison = |b: &Battle, base: usize| {
+        (b.raiders.iter())
+            .filter(|r| r.moored_at() == Some(base) && !r.class.is_merchant())
+            .filter(|r| r.class != EnemyClass::TorpedoBoat)
+            .count()
+    };
+    for base in 0..3 {
+        assert_eq!(garrison(&doubled, base), 2 * garrison(&charted, base), "base {base}");
+    }
+    // Steel comes in twice as quick, and the slips fit out in half the time.
+    for (a, b) in charted.ports.iter().zip(&doubled.ports) {
+        assert_eq!(b.production_per_minute(), 2. * a.production_per_minute());
+        for (a, b) in a.docks().iter().zip(b.docks()) {
+            assert_eq!(b.slipway_clock(), a.slipway_clock() / 2.);
+        }
+    }
+    assert_eq!(doubled.wave_interval, charted.wave_interval / 2.);
+    // Setting it again changes nothing.
+    let again = doubled.with_strength(2);
+    assert_eq!(again.ports[0].production_per_minute(), 2. * charted.ports[0].production_per_minute());
+}
+
+#[test]
 fn coasters_ride_at_anchor_until_their_base_is_roused_then_ply_to_the_next_yard() {
     let mut b = coastwise([0, 1, 2]);
     let orders = Orders {

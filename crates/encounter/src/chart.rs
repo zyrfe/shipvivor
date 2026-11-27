@@ -635,6 +635,7 @@ pub(super) fn segment_distance(p: Vec2, a: Vec2, b: Vec2) -> f32 {
 }
 
 /// SplitMix64: small, fast and the same on every platform, so a seed always replays.
+#[derive(Clone)]
 pub(super) struct Rng(pub(super) u64);
 impl Rng {
     pub(super) fn next(&mut self) -> u64 {

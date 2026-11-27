@@ -97,6 +97,9 @@ pub enum Mode {
     Trial,
     Patrol,
     Paused,
+    /// The battle's timeline is open, from the pause menu or the report of her loss, and
+    /// the waters show the moment picked on it (see `rewind`).
+    Rewind,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -132,6 +135,8 @@ pub enum Screen {
     PassageMap,
     Intercept(LegEnd),
     Paused,
+    /// Scrubbing back through the battle to sail on from an earlier moment.
+    Rewind,
     Won(LegEnd),
     Lost,
 }
@@ -470,6 +475,7 @@ impl Campaign {
             Mode::Trial => Screen::Trial,
             Mode::Paused if self.chart_roll.is_some() => Screen::PassageMap,
             Mode::Paused => Screen::Paused,
+            Mode::Rewind => Screen::Rewind,
             Mode::Patrol if self.clearance_left > 0. => Screen::Secured,
             Mode::Patrol => match self.run.phase() {
                 Phase::Sailing => Screen::Sailing,

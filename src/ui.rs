@@ -122,6 +122,11 @@ pub(crate) enum Action {
     TestSea(Stage),
     /// Leave a test sortie, won, lost or paused, for its yard, with the ship as she sailed.
     Yard,
+    /// On the chart from a yard: set the passage at this place punishing, or back again.
+    Punish(usize),
+    /// Open the battle's timeline, from the pause menu or the report of her loss, to sail
+    /// on from an earlier moment of the leg.
+    Rewind,
 }
 #[derive(Component)]
 pub struct ScreenRoot;
@@ -150,12 +155,17 @@ pub fn intent(
     )>,
 ) -> Option<Action> {
     // A fitting card still dealing in can sweep under the pointer. It is not a choice yet.
-    if mouse.just_pressed(MouseButton::Left)
-        && let Some((action, ..)) = buttons
+    if mouse.just_pressed(MouseButton::Left) {
+        let hovered: Vec<Action> = buttons
             .iter()
-            .find(|(_, p, card)| p.cursor_over() && card.is_none_or(|c| c.landed()))
-    {
-        return Some(*action);
+            .filter(|(_, p, card)| p.cursor_over() && card.is_none_or(|c| c.landed()))
+            .map(|(action, ..)| *action)
+            .collect();
+        // A passage card's punishing switch sits inside the card, and wins the click.
+        let switch = hovered.iter().find(|a| matches!(a, Action::Punish(_)));
+        if let Some(&action) = switch.or(hovered.first()) {
+            return Some(action);
+        }
     }
     let key = |k| keys.just_pressed(k);
     let choice = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3]
@@ -226,6 +236,7 @@ pub fn intent(
         Screen::Paused if key(KeyCode::Escape) || key(KeyCode::Enter) => Some(Action::Resume),
         Screen::Paused if key(KeyCode::KeyM) => Some(Action::Title),
         Screen::Paused if key(KeyCode::KeyY) && run.is_exercise() => Some(Action::Yard),
+        Screen::Paused | Screen::Lost if key(KeyCode::KeyR) => Some(Action::Rewind),
         Screen::Drydock(_) => {
             // The ship is the menu: a click on her selects the section under the cursor.
             let count = run.dock_jobs().len();
@@ -295,6 +306,10 @@ pub fn intent(
         }
         Screen::Refit => choice.and_then(|i| run.offers().get(i).copied().map(Action::Card)),
         Screen::Intercept(_) if key(KeyCode::Enter) => Some(Action::Engage),
+        // Shift and a passage's number set it punishing; the number alone sails it.
+        Screen::Chart if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) => {
+            choice.map(Action::Punish)
+        }
         Screen::Chart => choice.and_then(|i| Some(Action::Depart(run.exits()?[i].stage))),
         Screen::Won(_) | Screen::Lost if key(KeyCode::Enter) && run.is_exercise() => {
             Some(Action::Yard)
@@ -496,6 +511,8 @@ pub fn hover(
             Screen::Title | Screen::Customise | Screen::Options | Screen::Exercise
         ) {
             title::fill(*action, cursor.cursor_over())
+        } else if let Action::Punish(lane) = *action {
+            punish_color(run.punishing_offers()[lane], cursor.cursor_over())
         } else if chart_name {
             if cursor.cursor_over() {
                 brass()
@@ -509,6 +526,44 @@ pub fn hover(
             bg.0 = desired;
         }
     }
+}
+/// A passage card's punishing switch: deep red while it is set, the card's own blue-green
+/// while it is not.
+fn punish_color(on: bool, hover: bool) -> Color {
+    match (on, hover) {
+        (true, false) => Color::srgb_u8(122, 28, 34),
+        (true, true) => Color::srgb_u8(158, 40, 46),
+        (false, false) => Color::srgb_u8(24, 50, 56),
+        (false, true) => Color::srgb_u8(44, 74, 78),
+    }
+}
+/// The switch inside passage card `lane` that sets it punishing, or back again.
+fn punish_switch(cmd: &mut Commands, card: Entity, lane: usize, on: bool) {
+    let switch = cmd
+        .spawn((
+            Action::Punish(lane),
+            RelativeCursorPosition::default(),
+            Node {
+                padding: UiRect::axes(px(8), px(4)),
+                border: UiRect::all(px(1)),
+                align_self: AlignSelf::FlexStart,
+                ..default()
+            },
+            BackgroundColor(punish_color(on, false)),
+            BorderColor::all(if on { brass() } else { trim() }),
+            ChildOf(card),
+        ))
+        .id();
+    let label = if on {
+        format!(
+            "PUNISHING: 2x ships, +{} to survive  [Shift+{}]",
+            shipvivor_campaign::SURVIVAL_POINTS,
+            lane + 1
+        )
+    } else {
+        format!("Sail punishing: 2x ships  [Shift+{}]", lane + 1)
+    };
+    text(cmd, switch, label, 13., if on { ink() } else { pale() });
 }
 fn menu_panel(cmd: &mut Commands, root: Entity, width: f32) -> Entity {
     cmd.spawn((
@@ -536,6 +591,8 @@ type ScreenKey = (
     (u32, bool),
     // Test mode: the round and grade its list of seas shows, and a sortie reported.
     (usize, Grade, bool),
+    // The passages on the chart set punishing.
+    [bool; shipvivor_campaign::OFFERED],
 );
 
 pub fn rebuild_screen(
@@ -551,6 +608,7 @@ pub fn rebuild_screen(
         Res<crate::options::GameOptions>,
         Option<Res<crate::telemetry::Logbook>>,
     ),
+    timeline: Res<crate::rewind::Timeline>,
 ) {
     let (run, battle) = patrol;
     // A test sortie is no round of a run: nothing is asked of it.
@@ -564,6 +622,7 @@ pub fn rebuild_screen(
         run.dock_module,
         (run.dock_revision, run.dock_receipt.is_some()),
         (run.bench.0, run.bench.1, run.debrief.is_some()),
+        run.punishing_offers(),
     );
     if *last == Some(key) {
         return;
@@ -633,6 +692,24 @@ pub fn rebuild_screen(
         exercise::show(&mut cmd, root, &run, &art.display_face);
         return;
     }
+    // The timeline draws its own bar, over the waters of the moment it shows.
+    if run.screen() == Screen::Rewind {
+        return;
+    }
+    // On the pause menu and the report of her loss: back along this leg's timeline.
+    let rewind = timeline.can_open(&run).then(|| {
+        let sunk = (timeline.marks().iter())
+            .filter(|m| matches!(m.kind, crate::rewind::MarkKind::Sunk(_)))
+            .count();
+        format!(
+            "Scrub back through this leg, {} so far, and sail on from any moment.",
+            match sunk {
+                0 => "no ship sunk".to_string(),
+                1 => "1 ship sunk".to_string(),
+                n => format!("{n} ships sunk"),
+            }
+        )
+    });
     cmd.entity(root)
         .insert(BackgroundColor(Color::srgba_u8(6, 18, 26, 145)));
     let nautical = shows_chart_table(run.screen());
@@ -745,7 +822,7 @@ pub fn rebuild_screen(
             for (i, exit) in run.exits().into_iter().flatten().enumerate() {
                 let (stage, required) = (exit.stage, exit.stars);
                 let open = run.stars() >= required;
-                let sector = shipvivor_sim::Sector::of(stage, exit.grade);
+                let sector = shipvivor_sim::Sector::sailed(&exit);
                 // Six lines a card, so three of them fit the table: what holds the
                 // waters, who sails with the flagship, the waters, how hard the passage
                 // runs and what it grants, and the spanner count on the chart spelled
@@ -795,6 +872,10 @@ pub fn rebuild_screen(
                 };
                 text(&mut cmd, card, verdict(&outlook), 14., ink);
                 text(&mut cmd, card, detail, 14., pale());
+                // Any passage she can take she may take punishing.
+                if open {
+                    punish_switch(&mut cmd, card, i, exit.punishing);
+                }
             }
         }
         Screen::Intercept(reason) => {
@@ -905,6 +986,16 @@ pub fn rebuild_screen(
                     .id();
                 feedback::sheet(&mut cmd, sheet, "RATE THE RUN");
             }
+            if let Some(detail) = rewind.as_deref().filter(|_| run.screen() == Screen::Lost) {
+                action(
+                    &mut cmd,
+                    panel,
+                    Some(Action::Rewind),
+                    "Rewind and try again     [R]",
+                    detail,
+                    false,
+                );
+            }
             if run.is_exercise() {
                 action(
                     &mut cmd,
@@ -944,6 +1035,16 @@ pub fn rebuild_screen(
                 "",
                 false,
             );
+            if let Some(detail) = &rewind {
+                action(
+                    &mut cmd,
+                    panel,
+                    Some(Action::Rewind),
+                    "Rewind     [R]",
+                    detail,
+                    false,
+                );
+            }
             if run.is_exercise() {
                 action(
                     &mut cmd,
@@ -1128,6 +1229,7 @@ fn hud(
         for (s, c) in [
             ("Cleared", Color::srgb_u8(145, 219, 195)),
             ("Raiders", Color::srgb_u8(255, 124, 102)),
+            ("Cargo", Color::srgb_u8(255, 146, 32)),
             ("Stores", brass()),
         ] {
             text(cmd, key, s, 12., c);

@@ -359,6 +359,8 @@ struct Sea {
     /// Seconds along their escalation the raids begin.
     head_start: f32,
     raid_interval: f32,
+    /// How many times over the bases moor their squadrons and make their steel.
+    strength: f32,
     /// Barrels in the heavy battery.
     heavy: u8,
     /// Damage a second from the air, before her AA.
@@ -366,7 +368,7 @@ struct Sea {
 }
 impl Sea {
     fn of(exit: &Exit) -> Self {
-        let sector = Sector::of(exit.stage, exit.grade);
+        let sector = Sector::sailed(exit);
         let round = exit.stage.round();
         let doctrine = doctrine(exit.stage.fleet());
         let plan = sector.plan();
@@ -436,6 +438,7 @@ impl Sea {
             escort: sector.escort(),
             head_start: sector.head_start(),
             raid_interval: sector.raid_interval(),
+            strength: sector.strength() as f32,
             heavy: 2.min(cap),
             air,
         }
@@ -460,7 +463,10 @@ impl Sea {
                 .rotation(tier, if base.industrial { 3 } else { base.factories });
             // The hulls waiting on its slips sail when it stirs, with its squadron and
             // its torpedo boats.
-            let mut group: Vec<EnemyClass> = base.squadron.to_vec();
+            let mut group: Vec<EnemyClass> = (base.squadron.iter().copied())
+                .cycle()
+                .take(base.squadron.len() * self.strength as usize)
+                .collect();
             group.extend((0..base.docks).map(|i| rotation[i % rotation.len()].0));
             group.extend(std::iter::repeat_n(
                 TorpedoBoat,
@@ -473,7 +479,7 @@ impl Sea {
             // out. With a dock down its factories turn to raising it, and launch nothing.
             let bill: f32 =
                 rotation.iter().map(|&(_, b)| f32::from(b)).sum::<f32>() / rotation.len() as f32;
-            let steel = (base.docks as f32 + 3. * base.factories as f32) / 60.;
+            let steel = self.strength * (base.docks as f32 + 3. * base.factories as f32) / 60.;
             let fitted = base.docks as f32 / (SLIP_TURNS * self.raid_interval);
             let launches = (steel / bill).min(fitted);
             let each: f32 =

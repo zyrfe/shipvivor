@@ -49,6 +49,7 @@ pub(super) const STRENGTH: [u16; 2] = [6, 5];
 /// The most aircraft all the airfields keep in the air and on their way to it.
 pub(super) const MOST_ALOFT: usize = 8;
 
+#[derive(Clone)]
 enum Leg {
     /// Away from the runway and up to its height.
     Climb,
@@ -65,6 +66,7 @@ enum Leg {
 }
 
 /// One of an airfield's aircraft in the air.
+#[derive(Clone)]
 pub struct Warplane {
     pub body: Body,
     pub altitude: f32,

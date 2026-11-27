@@ -11,6 +11,8 @@ pub const ALERT_SECONDS: f32 = 3.2;
 const LOST_SECONDS: f32 = 3.;
 const PLAYER_MAST: f32 = 6.;
 
+#[derive(Clone)]
+
 pub struct Spotter {
     pub position: Vec2,
     pub heading: f32,

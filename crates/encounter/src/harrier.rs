@@ -71,6 +71,7 @@ const ABREAST: f32 = 10.;
 const MOORING_ROW: f32 = 11.;
 
 /// A light strafing floatplane from a base's mooring.
+#[derive(Clone)]
 pub struct Harrier {
     pub body: Body,
     pub altitude: f32,
@@ -90,6 +91,7 @@ pub struct Harrier {
     leg: Leg,
 }
 
+#[derive(Clone)]
 enum Leg {
     /// Coming in at the ship to line up a pass, from the mooring or from circling out.
     Inbound,

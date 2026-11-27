@@ -83,7 +83,7 @@ fn capture(
     );
 }
 
-fn save_png(image: Image, scale: u32, path: &Path) -> Result<(), String> {
+pub(crate) fn save_png(image: Image, scale: u32, path: &Path) -> Result<(), String> {
     let rgb = image
         .try_into_dynamic()
         .map_err(|e| e.to_string())?

@@ -179,6 +179,8 @@ impl Feature {
     }
 }
 
+#[derive(Clone)]
+
 pub struct Landmark {
     pub body: Body,
     pub radius: f32,

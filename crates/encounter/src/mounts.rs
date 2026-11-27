@@ -135,6 +135,8 @@ struct Tube {
     recoil_left: f32,
 }
 
+#[derive(Clone)]
+
 pub struct MainMount {
     pub position: GunStation,
     pub(super) in_service: bool,
@@ -474,6 +476,7 @@ pub(super) fn wing_berths(
 }
 
 /// A shielded close-range gun on the bow or the beam, worked by the crew.
+#[derive(Clone)]
 pub struct WingGun {
     pub(super) reload: f32,
     abeam: f32,

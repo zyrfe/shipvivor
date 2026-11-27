@@ -50,6 +50,8 @@ impl Rewards {
     }
 }
 
+#[derive(Clone)]
+
 pub struct Package {
     pub body: Body,
     pub stores: u8,

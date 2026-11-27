@@ -1,0 +1,422 @@
+# Breakwater's wardroom: the officers who can be dealt as leader cards, the skills they
+# bring, and how those skills rank up.
+#
+# Edit and save while the game runs: it reloads this file within a second. A file that
+# doesn't parse is ignored, with the reason logged, and the game keeps what it had.
+# The game reads, in order: the file named by SHIPVIVOR_CREW_FILE, data/crew.toml beside
+# the executable, data/crew.toml in the folder it was started from, and finally the copy
+# built into the game.
+#
+# Fractions are written as 0.25 for 25%. Times are seconds, distances metres.
+
+# --- Ranking up --------------------------------------------------------------------------
+
+[ranks]
+# Experience a skill needs to reach each tier past the first: tier II, then tier III.
+# A skill can't have more tiers than this list allows (one more than its length).
+experience = [100, 250]
+# Officer points each star of a leg pays, to spend in the yard on any skill.
+points_per_star = 1
+# Experience one officer point buys.
+experience_per_point = 50
+
+# --- Leader hands ------------------------------------------------------------------------
+
+[hand]
+# Cards in a leader hand.
+cards = 3
+# Chance of a leader hand after a leg, by stars earned: 0, 1, 2, 3.
+chance = [0.0, 0.4, 0.7, 1.0]
+
+# How often each rarity is drawn, by stars earned on the leg: 0, 1, 2, 3.
+# Better legs lean rarer.
+[hand.weight]
+common = [70, 60, 45, 30]
+uncommon = [25, 30, 40, 45]
+rare = [5, 10, 15, 25]
+
+# --- Posts -------------------------------------------------------------------------------
+# One officer holds each post. A new officer for a post replaces the one there.
+
+[[post]]
+id = "gunnery"
+name = "Gunnery"
+colour = "#f06858"
+
+[[post]]
+id = "signals"
+name = "Signals"
+colour = "#9098ff"
+
+[[post]]
+id = "engineering"
+name = "Engineering"
+colour = "#58ccd6"
+
+[[post]]
+id = "damage_control"
+name = "Damage Control"
+colour = "#84e078"
+
+[[post]]
+id = "liaison"
+name = "Liaison"
+colour = "#ec96e2"
+
+# --- Skills ------------------------------------------------------------------------------
+# Each skill's id is fixed by the game. So are the numbers its tiers
+# must give, and what its `experience` rate counts (noted above each skill).
+#
+# `card` is the line the card shows for a tier, with {name} replaced by that tier's
+# number and {name%} by it as a percentage. A tier's own `text` replaces the card line.
+# `key = true` marks a skill the player sets off with a key.
+
+# Experience per point of damage dealt while a fury is on.
+[[skill]]
+id = "gun_fury"
+name = "Gun Fury"
+key = true
+card = "{seconds} s at {reload%} reload time, {cooldown} s cooldown"
+experience = 1.0
+tiers = [
+    { seconds = 10, reload = 0.5, cooldown = 60 },
+    { seconds = 12, reload = 0.5, cooldown = 50 },
+    { seconds = 15, reload = 0.5, cooldown = 40 },
+]
+
+# Experience per hit from a salvo corrected by an earlier one at the same ship.
+[[skill]]
+id = "spotting_corrections"
+name = "Spotting Corrections"
+card = "Each salvo on the same ship -{per_salvo%} scatter, to -{most%}"
+experience = 2.0
+tiers = [
+    { per_salvo = 0.15, most = 0.30 },
+    { per_salvo = 0.20, most = 0.40 },
+    { per_salvo = 0.25, most = 0.50 },
+]
+
+# Experience per hit on a ship making over half her speed.
+[[skill]]
+id = "rate_plot"
+name = "Rate Plot"
+card = "-{scatter%} scatter against ships under way"
+experience = 2.0
+tiers = [
+    { scatter = 0.10 },
+    { scatter = 0.20 },
+    { scatter = 0.30 },
+]
+
+# Experience per point of damage to a ship first seen on radar.
+[[skill]]
+id = "radar_operator"
+name = "Radar Operator"
+card = "Contacts beyond line of sight, out to {range} m"
+experience = 1.0
+tiers = [
+    { range = 1500, lay_guns = false },
+    { range = 2500, lay_guns = false },
+    { range = 2500, lay_guns = true, text = "Out to 2500 m, and the guns lay on radar contacts" },
+]
+
+# Experience per point of damage to the marked threat.
+[[skill]]
+id = "target_identification"
+name = "Target Identification"
+experience = 1.0
+tiers = [
+    { show_aim = false, damage = 0.0, text = "Marks the most pressing threat" },
+    { show_aim = true, damage = 0.0, text = "Also shows its aim and reload" },
+    { show_aim = true, damage = 0.15, text = "+15% damage against it" },
+]
+
+# Experience per hit landed beyond the weapon's stock reach.
+[[skill]]
+id = "range_boost"
+name = "Range Boost"
+card = "All weapons +{reach%} reach"
+experience = 2.0
+tiers = [
+    { reach = 0.20 },
+    { reach = 0.30 },
+    { reach = 0.40 },
+]
+
+# Nothing to count: ranks up from officer points.
+[[skill]]
+id = "fall_of_shot"
+name = "Fall of Shot"
+experience = 0.0
+tiers = [
+    { every_shell = false, torpedoes = false, text = "Incoming main-gun salvos mark where they'll land" },
+    { every_shell = true, torpedoes = false, text = "Every incoming shell marks where it'll land" },
+    { every_shell = true, torpedoes = true, text = "Every shell, and torpedo tracks" },
+]
+
+# Nothing to count: ranks up from officer points.
+[[skill]]
+id = "forced_draught"
+name = "Forced Draught"
+card = "+{speed%} speed and acceleration"
+experience = 0.0
+tiers = [
+    { speed = 0.08 },
+    { speed = 0.14 },
+    { speed = 0.20 },
+]
+
+# Experience per second steamed on a cooked engine.
+[[skill]]
+id = "steam_held"
+name = "Steam Held"
+card = "A cooked engine runs at {power%} instead of stalling"
+experience = 1.0
+tiers = [
+    { power = 0.35 },
+    { power = 0.50 },
+    { power = 0.70 },
+]
+
+# Experience per enemy round that misses her through smoke.
+[[skill]]
+id = "smoke_screen"
+name = "Smoke Screen"
+key = true
+card = "{seconds} s screen, {cooldown} s cooldown"
+experience = 3.0
+tiers = [
+    { seconds = 20, cooldown = 90 },
+    { seconds = 30, cooldown = 75 },
+    { seconds = 40, cooldown = 60 },
+]
+
+# Nothing to count: ranks up from officer points.
+[[skill]]
+id = "hard_over"
+name = "Hard Over"
+card = "Rudder +{rudder%}"
+experience = 0.0
+tiers = [
+    { rudder = 0.15 },
+    { rudder = 0.25 },
+    { rudder = 0.35 },
+]
+
+# Experience per hull point the second crew mends.
+[[skill]]
+id = "second_repair_crew"
+name = "Second Repair Crew"
+experience = 1.0
+tiers = [
+    { power = 1.0, text = "A second repair party: twice the repair power" },
+    { power = 1.25, text = "Each party +25%" },
+    { power = 1.5, text = "Each party +50%" },
+]
+
+# Experience per hull point mended by steady repairs.
+[[skill]]
+id = "drilled_party"
+name = "Drilled Party"
+card = "Steady repairs +{repairs%}, the party moves at once"
+experience = 0.5
+tiers = [
+    { repairs = 0.15 },
+    { repairs = 0.30 },
+    { repairs = 0.45 },
+]
+
+# Experience per knocked-out part brought back.
+[[skill]]
+id = "shoring"
+name = "Shoring"
+card = "Knocked-out parts return at {restore%}"
+experience = 20.0
+tiers = [
+    { restore = 0.25 },
+    { restore = 0.40 },
+    { restore = 0.60 },
+]
+
+# Experience per tonne of water pumped out.
+[[skill]]
+id = "counterflooding"
+name = "Counterflooding"
+card = "Flooding drag -{drag%}"
+experience = 1.0
+tiers = [
+    { drag = 0.25 },
+    { drag = 0.40 },
+    { drag = 0.60 },
+]
+
+# Experience per point of damage the bombers do to port facilities.
+[[skill]]
+id = "bomber_strike"
+name = "Bomber Strike"
+key = true
+experience = 1.0
+tiers = [
+    { bombers = 6, per_round = 1, pick_target = false, text = "Once a round, 6 light bombers hit the nearest port facility" },
+    { bombers = 9, per_round = 1, pick_target = true, text = "9 bombers, on the facility you mark" },
+    { bombers = 9, per_round = 2, pick_target = true, text = "Twice a round" },
+]
+
+# Nothing to count: ranks up from officer points.
+[[skill]]
+id = "recon_flight"
+name = "Recon Flight"
+experience = 0.0
+tiers = [
+    { hidden_fleet = false, spotter = 0.0, text = "The chart shows every base from the start" },
+    { hidden_fleet = true, spotter = 0.0, text = "And any hidden fleet" },
+    { hidden_fleet = true, spotter = 0.15, text = "A spotter plane over the marked ship: -15% scatter on her" },
+]
+
+# Experience per point of damage the salvos do.
+[[skill]]
+id = "fleet_gunfire"
+name = "Fleet Gunfire"
+key = true
+experience = 1.0
+tiers = [
+    { per_round = 1, barrels = 6, bore = 15, text = "Once a round, a heavy salvo from over the horizon on the mark" },
+    { per_round = 2, barrels = 6, bore = 15, text = "Twice a round" },
+    { per_round = 2, barrels = 9, bore = 16, text = "A heavier salvo" },
+]
+
+# Experience per plane the fighters bring down.
+[[skill]]
+id = "fighter_cover"
+name = "Fighter Cover"
+card = "{fighters} fighters break up the first air raid each round"
+experience = 5.0
+tiers = [
+    { fighters = 2, every_raid = false },
+    { fighters = 4, every_raid = false },
+    { fighters = 4, every_raid = true, text = "4 fighters break up every air raid" },
+]
+
+# --- Officers ----------------------------------------------------------------------------
+# `skills` gives each skill the officer brings and the tier it starts at.
+# `portrait` is the painting's file name.
+
+[[officer]]
+id = "varenholt"
+name = "Lt. Cdr. Ilse Varenholt"
+post = "gunnery"
+rarity = "common"
+portrait = "gunnery.png"
+skills = { spotting_corrections = 1, rate_plot = 1 }
+
+[[officer]]
+id = "brask"
+name = "Lt. Augustin Brask"
+post = "gunnery"
+rarity = "uncommon"
+portrait = "gunnery-brask.png"
+skills = { gun_fury = 2, spotting_corrections = 1 }
+
+[[officer]]
+id = "sollum"
+name = "Master Gunner Henrik Sollum"
+post = "gunnery"
+rarity = "rare"
+portrait = "gunnery-sollum.png"
+skills = { gun_fury = 1, spotting_corrections = 1, rate_plot = 1 }
+
+[[officer]]
+id = "callender"
+name = "Sub-Lt. Pip Callender"
+post = "signals"
+rarity = "common"
+portrait = "signals.png"
+skills = { radar_operator = 1, range_boost = 1 }
+
+[[officer]]
+id = "haddad"
+name = "Lt. Noor Haddad"
+post = "signals"
+rarity = "uncommon"
+portrait = "signals-haddad.png"
+skills = { target_identification = 2, fall_of_shot = 1 }
+
+[[officer]]
+id = "wyck"
+name = "Dr. Leopold Wyck"
+post = "signals"
+rarity = "rare"
+portrait = "signals-wyck.png"
+skills = { radar_operator = 1, target_identification = 1, range_boost = 1 }
+
+[[officer]]
+id = "rao"
+name = "Chief Engineer Devika Rao"
+post = "engineering"
+rarity = "common"
+portrait = "engineer.png"
+skills = { steam_held = 1, forced_draught = 1 }
+
+[[officer]]
+id = "marsk"
+name = "Lt. Teodor Marsk"
+post = "engineering"
+rarity = "uncommon"
+portrait = "engineer-marsk.png"
+skills = { smoke_screen = 2, hard_over = 1 }
+
+[[officer]]
+id = "brenner"
+name = "Cdr. Gunhild Brenner"
+post = "engineering"
+rarity = "rare"
+portrait = "engineer-brenner.png"
+skills = { forced_draught = 1, steam_held = 1, smoke_screen = 1 }
+
+[[officer]]
+id = "abernathy"
+name = "Lt. Cdr. Elias Abernathy"
+post = "damage_control"
+rarity = "common"
+portrait = "first-lieutenant.png"
+skills = { second_repair_crew = 1, shoring = 1 }
+
+[[officer]]
+id = "dalisay"
+name = "Lt. Marisol Dalisay"
+post = "damage_control"
+rarity = "uncommon"
+portrait = "firstlt-dalisay.png"
+skills = { drilled_party = 2, counterflooding = 1 }
+
+[[officer]]
+id = "fuimaono"
+name = "Lt. Cdr. Tavita Fuimaono"
+post = "damage_control"
+rarity = "rare"
+portrait = "firstlt-fuimaono.png"
+skills = { second_repair_crew = 1, drilled_party = 1, shoring = 1 }
+
+[[officer]]
+id = "morrow"
+name = "Lt. Kaede Morrow"
+post = "liaison"
+rarity = "common"
+portrait = "liaison.png"
+skills = { bomber_strike = 1, recon_flight = 1 }
+
+[[officer]]
+id = "vance"
+name = "Cdr. Aurelian Vance"
+post = "liaison"
+rarity = "uncommon"
+portrait = "liaison-vance.png"
+skills = { fleet_gunfire = 2, recon_flight = 1 }
+
+[[officer]]
+id = "quintero"
+name = "Lt. Rafael Quintero"
+post = "liaison"
+rarity = "rare"
+portrait = "liaison-quintero.png"
+skills = { bomber_strike = 1, fighter_cover = 1, recon_flight = 1 }

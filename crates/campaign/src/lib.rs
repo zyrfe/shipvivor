@@ -4,6 +4,7 @@
 //! down or she sinks: the clock is the time to beat, each base wrecked puts time back on
 //! it, and finishing inside it pays a star's worth of yard points.
 mod battery;
+pub mod crew;
 mod plan;
 mod workshop;
 pub use battery::{CALIBRES, ShipBeam};
@@ -483,6 +484,13 @@ pub const STAR_POINTS: u16 = 2;
 pub const GRADE_STAR_POINTS: [u16; 2] = [3, 4];
 /// Yard points for each enemy yard whose gantry comes down on a leg.
 pub const YARD_POINTS: u16 = 1;
+/// How many times over a punishing passage's bases moor their squadrons and launch
+/// their ships (see [`Exit::punishing`]).
+pub const PUNISHING_STRENGTH: usize = 2;
+/// Yard points a punishing passage pays her for coming through it, whatever the grade:
+/// a modest bonus beside a leg's twenty or so, since the doubled fleet also brings
+/// more kills, more cargo and more experience within reach.
+pub const SURVIVAL_POINTS: u16 = 5;
 
 /// A whole section the yard can splice into the hull: a straight frame and what stands on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -563,6 +571,10 @@ pub struct Exit {
     pub grade: Grade,
     pub stars: u8,
     pub perk: Perk,
+    /// Sailed punishing: its bases moor and launch [`PUNISHING_STRENGTH`] times the
+    /// ships, and coming through pays [`SURVIVAL_POINTS`]. The captain sets it on the
+    /// chart, on any passage, whatever its grade.
+    pub punishing: bool,
 }
 impl Exit {
     /// The passage into `stage` at `grade`, priced as the grade says.
@@ -572,7 +584,17 @@ impl Exit {
             grade,
             stars: grade.stars(),
             perk: grade.perk(),
+            punishing: false,
         }
+    }
+    /// How many times over its bases moor and launch their ships: 1, or
+    /// [`PUNISHING_STRENGTH`] on a punishing passage.
+    pub fn strength(&self) -> usize {
+        if self.punishing { PUNISHING_STRENGTH } else { 1 }
+    }
+    /// Yard points coming through this passage pays on top of its stars and bases.
+    pub fn survival_points(&self) -> u16 {
+        if self.punishing { SURVIVAL_POINTS } else { 0 }
     }
     /// Yard points each star earned on this passage pays.
     pub fn star_points(&self) -> u16 {
@@ -1118,11 +1140,20 @@ pub struct Run {
     cargo_carried: f32,
     /// The patrol just sailed finished with time still on its clock.
     beat_clock: bool,
+    /// She is sailing a punishing passage: see [`Exit::punishing`].
+    pub punishing: bool,
+    /// The passages the chart from her yard has been set punishing, by their place on it.
+    punishing_offers: [bool; OFFERED],
+    /// The punishing patrol just sailed is behind her, so it pays [`SURVIVAL_POINTS`].
+    survived: bool,
     /// Yard points of work ordered for her over the run, whatever paid for it.
     spent: u16,
     /// Test mode: one sea sailed on its own from a yard that charges nothing. See
     /// [`Run::exercise`].
     exercise: bool,
+    /// The scope shows where to lay the guns on a moving ship: a mark where she will be
+    /// when a round gets there. On from the start for now; a character card is to grant it.
+    pub lead_sight: bool,
 }
 impl Default for Run {
     fn default() -> Self {
@@ -1145,8 +1176,12 @@ impl Default for Run {
             points: 0,
             cargo_carried: 0.,
             beat_clock: false,
+            punishing: false,
+            punishing_offers: [false; OFFERED],
+            survived: false,
             spent: 0,
             exercise: false,
+            lead_sight: true,
         }
     }
 }
@@ -1207,6 +1242,9 @@ impl Run {
         self.cargo_carried = 0.;
         self.objectives = Objectives::default();
         self.beat_clock = false;
+        self.punishing = false;
+        self.punishing_offers = [false; OFFERED];
+        self.survived = false;
         self.elapsed = 0.;
         self.phase = Phase::Drydock(LegEnd::BasesDestroyed);
     }
@@ -1324,6 +1362,17 @@ impl Run {
             .saturating_add(YARD_POINTS.saturating_mul(self.objectives.yards))
             .saturating_add(self.cargo_points())
             .saturating_add(self.clock_points())
+            .saturating_add(self.survival_points())
+    }
+    /// How many times over the bases of these waters moor and launch their ships: 1, or
+    /// [`PUNISHING_STRENGTH`] on a punishing passage.
+    pub fn strength(&self) -> usize {
+        if self.punishing { PUNISHING_STRENGTH } else { 1 }
+    }
+    /// Yard points coming through a punishing patrol pays, once she has:
+    /// [`SURVIVAL_POINTS`], or none.
+    pub fn survival_points(&self) -> u16 {
+        if self.survived { SURVIVAL_POINTS } else { 0 }
     }
     /// Cargo sunk this leg and carried over from the last, in yard points.
     fn cargo_sunk(&self) -> f32 {
@@ -1343,6 +1392,7 @@ impl Run {
         self.cargo_carried = self.cargo_progress();
         self.objectives = Objectives::default();
         self.beat_clock = false;
+        self.survived = false;
     }
     /// Yard points to spend, earned on every leg and kept until they are spent.
     pub fn points(&self) -> u16 {
@@ -1358,6 +1408,7 @@ impl Run {
     /// free hands before it takes her.
     fn finish_leg(&mut self, reason: LegEnd) {
         self.beat_clock = !self.late();
+        self.survived = self.punishing;
         self.points = self.points.saturating_add(self.leg_points());
         self.ship.dock(f32::from(DOCK_REPAIR));
         self.phase = Phase::Drydock(reason);
@@ -1370,6 +1421,7 @@ impl Run {
         }
         self.previous_stars += self.stars();
         self.stage = Stage::CrownDeep;
+        self.punishing = false;
         self.new_leg();
         self.elapsed = 0.;
         self.phase = Phase::Sailing;
@@ -1523,6 +1575,16 @@ impl Run {
     pub fn hull_percent(&self) -> u16 {
         (self.ship.integrity() * 100.).round() as u16
     }
+    /// Dev tools: fit `card` at once, whether or not a hand offers it or a level is owed.
+    pub fn dev_fit(&mut self, card: Card) {
+        self.fittings = self.fittings.with(card);
+        self.refit_protection();
+    }
+    /// Dev tools: mend her completely, as fresh from the yard with the same sections.
+    pub fn dev_mend(&mut self) {
+        self.ship = Ship::new(self.ship.design().clone());
+        self.refit_protection();
+    }
     /// Fit a card from the hand on offer, for one of the level-ups owed.
     pub fn install(&mut self, card: Card) {
         if !matches!(self.phase, Phase::Refit | Phase::Drydock(_))
@@ -1545,7 +1607,23 @@ impl Run {
     /// next leg is the intercept.
     pub fn exits(&self) -> Option<[Exit; OFFERED]> {
         let seas = charted(self.seed, self.stage.round() + 1)?;
-        Some(std::array::from_fn(|i| Exit::new(seas[i], GRADES[i])))
+        Some(std::array::from_fn(|i| Exit {
+            punishing: self.punishing_offers[i],
+            ..Exit::new(seas[i], GRADES[i])
+        }))
+    }
+    /// Which passages on the chart from her yard are set punishing, by their place on it.
+    pub fn punishing_offers(&self) -> [bool; OFFERED] {
+        self.punishing_offers
+    }
+    /// Set the passage at `lane` on the chart punishing, or back again. Only the chart
+    /// from a yard offers it; `false` anywhere else.
+    pub fn toggle_punishing(&mut self, lane: usize) -> bool {
+        if self.phase != Phase::Chart || lane >= OFFERED || self.exits().is_none() {
+            return false;
+        }
+        self.punishing_offers[lane] = !self.punishing_offers[lane];
+        true
     }
     /// Sail from the chart into the next round, by a passage the leg just sailed has
     /// earned the stars for.
@@ -1565,6 +1643,8 @@ impl Run {
         self.course.push(next);
         self.stage = next;
         self.grade = exit.grade;
+        self.punishing = exit.punishing;
+        self.punishing_offers = [false; OFFERED];
         self.elapsed = 0.;
         self.new_leg();
         self.phase = Phase::Sailing;
@@ -2577,6 +2657,39 @@ mod tests {
         assert_eq!(r.points(), 10 + 2 * GRADE_STAR_POINTS[0]);
         assert!(r.leave_dock());
         assert_eq!(r.phase(), Phase::Chart);
+    }
+
+    #[test]
+    fn a_punishing_passage_is_set_on_the_chart_and_pays_for_coming_through() {
+        let mut r = Run::default();
+        // Not on a patrol: only the chart from a yard sets one.
+        assert!(!r.toggle_punishing(0));
+        r.clear();
+        assert!(r.leave_dock());
+        assert_eq!(r.phase(), Phase::Chart);
+        assert!(!r.toggle_punishing(OFFERED));
+        assert!(r.toggle_punishing(0) && r.toggle_punishing(2) && r.toggle_punishing(2));
+        let exits = r.exits().unwrap();
+        assert_eq!(exits.map(|e| e.punishing), [true, false, false]);
+        assert_eq!((exits[0].strength(), exits[1].strength()), (PUNISHING_STRENGTH, 1));
+        assert_eq!(exits[0].survival_points(), SURVIVAL_POINTS);
+        let banked = r.points();
+        assert!(r.depart(exits[0].stage));
+        assert!(r.punishing);
+        assert_eq!(r.leg_points(), 0, "the bonus is paid for coming through");
+        r.clear();
+        // Her stars and the clock at the moderate rate, and the bonus.
+        assert_eq!(r.survival_points(), SURVIVAL_POINTS);
+        let stars = r.star_points() * (u16::from(r.stars()) + 1);
+        assert_eq!(r.leg_points(), stars + SURVIVAL_POINTS);
+        assert_eq!(r.points(), banked + r.leg_points());
+        assert!(r.leave_dock());
+        // The next chart starts with every passage as charted.
+        assert!(r.exits().unwrap().iter().all(|e| !e.punishing));
+        assert!(r.depart(r.moderate_passage()));
+        assert!(!r.punishing);
+        r.clear();
+        assert_eq!(r.survival_points(), 0);
     }
 
     #[test]

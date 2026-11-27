@@ -103,6 +103,13 @@ impl Logbook {
             self.captures.push((run.stage.round(), png.to_owned()));
         }
     }
+    /// Note a change made by hand through the dev tools, so the log reads as tampered
+    /// with from there on.
+    pub fn note_dev(&mut self, text: &str) {
+        if let Some(run) = self.run.as_mut().filter(|r| !r.over) {
+            run.write("dev", text);
+        }
+    }
     /// The dev captures taken in one round of the run under way, or the last to end.
     pub fn captures_in(&self, round: usize) -> Vec<String> {
         self.captures
@@ -112,9 +119,65 @@ impl Logbook {
             .collect()
     }
 
+    /// The battle was taken back along its timeline, from `from` to `to` seconds into
+    /// the sector, and sails on from there. What the log last saw is the moment taken back
+    /// to, so nothing undone reads as news. A run that ended in her loss opens again.
+    pub fn rewound(&mut self, run: &Campaign, battle: &Encounter, from: f32, to: f32) {
+        let folder = self.folder.clone();
+        let Some(log) = self.run.as_mut().filter(|r| r.seed == run.seed) else {
+            return;
+        };
+        if log.over {
+            log.over = false;
+            // The leg she was lost in is sailed again: its summary will be written anew.
+            log.legs.pop();
+            if let Some(folder) = folder {
+                let path = folder.join(format!("{}.log", log.code));
+                match std::fs::OpenOptions::new().append(true).open(&path) {
+                    Ok(file) => log.out = Out::File(file),
+                    Err(err) => warn!("Couldn't reopen {}: {err}", path.display()),
+                }
+            }
+        }
+        let leg_open = run.phase() == Phase::Sailing;
+        let fresh = RunLog::new(String::new(), run, battle, Out::Nowhere);
+        log.clock = fresh.clock;
+        log.stage = fresh.stage;
+        log.phase = fresh.phase;
+        log.mode = fresh.mode;
+        log.paused = None;
+        log.low = log.low.min(fresh.low);
+        log.sections = fresh.sections;
+        log.hits = fresh.hits;
+        log.level = fresh.level;
+        log.cargo_points = fresh.cargo_points;
+        log.objectives = fresh.objectives;
+        log.goals = fresh.goals;
+        log.late = fresh.late;
+        log.on_clock = fresh.on_clock;
+        log.fittings = fresh.fittings;
+        log.hull = fresh.hull;
+        log.waters = fresh.waters;
+        log.leg_open |= leg_open;
+        let clock = |secs: f32| {
+            let secs = secs.max(0.) as u32;
+            format!("{}:{:02}", secs / 60, secs % 60)
+        };
+        log.write(
+            "rewind",
+            format!(
+                "back {:.0} s along the timeline, from {} to {}; hull {}%",
+                from - to,
+                clock(from),
+                clock(to),
+                run.hull_percent()
+            ),
+        );
+    }
+
     /// Compare the game with the last look and write down what changed.
     fn observe(&mut self, run: &Campaign, battle: &Encounter, helm: &PlayerHelm) {
-        let live = matches!(run.mode, Mode::Patrol | Mode::Paused);
+        let live = matches!(run.mode, Mode::Patrol | Mode::Paused | Mode::Rewind);
         // Test mode: each sortie is a log of its own, from the moment she sails to the
         // moment it is won, lost or broken off. Her yard is not logged, and a sortie
         // still open with her back in it as she sailed was broken off.
@@ -234,6 +297,10 @@ fn record(
     mut log: ResMut<Logbook>,
     mut commands: Commands,
 ) {
+    // The timeline shows other moments while it is open. Nothing there has happened yet.
+    if run.mode == Mode::Rewind {
+        return;
+    }
     log.observe(&run, &battle, &helm);
     for message in std::mem::take(&mut log.toasts) {
         show_toast(&mut commands, message);
@@ -706,7 +773,11 @@ impl RunLog {
                 if run.stage.is_opening() || run.stage == Stage::CrownDeep {
                     String::new()
                 } else {
-                    format!(" ({})", run.grade.name().to_lowercase())
+                    format!(
+                        " ({}{})",
+                        run.grade.name().to_lowercase(),
+                        if run.punishing { ", punishing" } else { "" }
+                    )
                 },
                 mission.minutes,
                 run.stage.fleet().name().to_lowercase(),
@@ -1464,7 +1535,11 @@ impl RunLog {
                 } else {
                     String::new()
                 }
-            )
+            ) + &if run.survival_points() > 0 {
+                format!(", and coming through punishing pays {}", run.survival_points())
+            } else {
+                String::new()
+            }
         };
         let summary = format!(
             "{why} with {}:{:02} {timing}{score}; hull {}%, lowest {}%; level {}",
@@ -1483,7 +1558,8 @@ impl RunLog {
     fn finish(&mut self, outcome: &str) {
         let legs = count(self.legs.len() as u32, "leg", "legs");
         self.write("run-end", format!("{outcome} after {legs}"));
-        for leg in std::mem::take(&mut self.legs) {
+        // Kept, not taken: a run lost and then rewound sums them up again at its end.
+        for leg in self.legs.clone() {
             self.write("legs", leg);
         }
         let tally = self.total.describe();

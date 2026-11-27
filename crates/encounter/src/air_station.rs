@@ -16,6 +16,8 @@ impl AirRaid {
     }
 }
 
+#[derive(Clone)]
+
 pub struct AirStation {
     /// The hangar occupies the first factory site at this harbour.
     pub port: usize,
@@ -24,6 +26,8 @@ pub struct AirStation {
     next: AirRaid,
     pub(super) rearm: f32,
 }
+
+#[derive(Clone)]
 
 pub struct AttackPlane {
     pub body: Body,
@@ -57,6 +61,7 @@ impl AirStation {
     }
 }
 
+#[derive(Clone)]
 enum Flight {
     Out(Transit),
     Pass { mark: Vec2, released: usize },
@@ -64,6 +69,7 @@ enum Flight {
 }
 
 /// A curved departure or recovery with its end tangent aligned to the next leg.
+#[derive(Clone)]
 pub(super) struct Transit {
     points: [Vec2; 4],
     duration: f32,

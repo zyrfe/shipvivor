@@ -101,6 +101,10 @@ enum Shape {
     MainShot,
     CloseShot,
     EnemyShot,
+    /// The glow in a shell's base, turned to the camera: the enemy's if set.
+    ShotGlow(bool),
+    /// A length of the thin line a shell leaves on its path, counted back from it.
+    ShotGhost(bool, u8),
     /// A light AA round: all tracer, no visible body.
     Tracer,
     /// Dark smoke from a flak burst or a burning aircraft.
@@ -176,6 +180,10 @@ pub struct Kit {
     shell: Handle<Mesh>,
     /// The tracer astern of a shell: her own gold, the enemy's flame.
     trails: [Handle<Mesh>; 2],
+    /// The glow in a shell's base and the lengths of its ghost trail, in the same two
+    /// colours.
+    glows: [Handle<Mesh>; 2],
+    ghosts: [[Handle<Mesh>; crate::ordnance::GHOST_LENGTHS]; 2],
     tracer: Handle<StandardMaterial>,
     spray: Handle<Mesh>,
     ring: Handle<Mesh>,
@@ -379,8 +387,11 @@ pub fn setup(
             .collect(),
         cube: meshes.add(Cuboid::default()),
         shell: meshes.add(crate::ordnance::shell()),
-        trails: [(249, 189, 70), (255, 117, 37)]
-            .map(|(r, g, b)| meshes.add(crate::ordnance::trail(Color::srgb_u8(r, g, b)))),
+        trails: TRACERS.map(|tint| meshes.add(crate::ordnance::trail(tint))),
+        glows: TRACERS.map(|tint| meshes.add(crate::ordnance::glow(tint))),
+        ghosts: TRACERS.map(|tint| {
+            std::array::from_fn(|length| meshes.add(crate::ordnance::ghost(tint, length)))
+        }),
         tracer,
         spray: meshes.add(crate::ordnance::spray()),
         ring: meshes.add(Torus::new(0.95, 1.)),
@@ -415,6 +426,22 @@ pub fn setup(
             .collect(),
     });
 }
+/// A tracer's colour: her own rounds' gold, the enemy's flame.
+const TRACERS: [Color; 2] = [
+    Color::srgb(0.976, 0.741, 0.275),
+    Color::srgb(1., 0.459, 0.145),
+];
+/// The glow in a shell's base, in shell widths across, and the least it is ever drawn:
+/// a share of the view's height in radius, and as much again for each of these inches
+/// of bore, so a far round is still a spark to follow and a heavy one a bigger spark.
+const GLOW: f32 = 1.6;
+const GLOW_FLOOR: (f32, f32) = (0.003, 14.);
+/// A shell's ghost trail: the seconds of flight it hangs on, its radius at the head in
+/// shell widths, and the least that radius is drawn, as a share of the view's height.
+const GHOST_SECONDS: f32 = 0.3;
+const GHOST: f32 = 0.16;
+const GHOST_FLOOR: f32 = 0.0006;
+
 /// The air station's strafer is the attack plane's airframe at this share of its size,
 /// 5 m across. A harrier is drawn at the second share, a little over 3 m across.
 const STRAFER: f32 = 0.315;
@@ -1054,6 +1081,18 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
                 Vec3::ONE,
             );
         }
+        Shape::ShotGlow(hostile) => part(
+            &kit.glows[usize::from(hostile)],
+            &kit.tracer,
+            Vec3::ZERO,
+            Vec3::ONE,
+        ),
+        Shape::ShotGhost(hostile, length) => part(
+            &kit.ghosts[usize::from(hostile)][usize::from(length)],
+            &kit.tracer,
+            Vec3::ZERO,
+            Vec3::ONE,
+        ),
         Shape::Muzzle => {
             part(&kit.ball, &kit.flame, v(0., 0., -1.45), v(1.34, 1.15, 2.2));
             part(&kit.ball, &kit.gold, v(0., 0., -1.8), v(0.98, 0.94, 2.6));
@@ -1261,6 +1300,14 @@ pub fn sync(
     lens: Option<Single<(&Transform, &Projection), (With<FollowCamera>, Without<Actor>)>>,
 ) {
     let mut wanted = HashMap::new();
+    // The camera, and the height of its view a metre off, to size what must stay seen.
+    let eye = lens.as_ref().map(|lens| {
+        let spread = match lens.1 {
+            Projection::Perspective(lens) => 2. * (lens.fov * 0.5).tan(),
+            _ => 1.,
+        };
+        (*lens.0, spread)
+    });
     if !matches!(run.mode, Mode::Title | Mode::Trial) {
         // The mainland is raised as one terrain (see `mainland`), not piece by piece.
         for island in battle
@@ -1616,6 +1663,49 @@ pub fn sync(
                 .looking_to(s.tangent(), Vec3::Y)
                 .with_scale(Vec3::splat(size));
             wanted.insert(Actor(s.body.id, shape), xf);
+            if shape == Shape::Tracer {
+                continue;
+            }
+            // A shell is too small to follow far off, so its base glows and it leaves a
+            // thin line hanging on its path. Neither is ever drawn under a few pixels.
+            let hostile = matches!(shape, Shape::EnemyShot | Shape::ShoreShell);
+            let base = xf.translation - s.tangent() * s.diameter;
+            let (facing, toward, view) = eye.map_or((Quat::IDENTITY, Vec3::ZERO, 0.), |eye| {
+                let to_eye = eye.0.translation - base;
+                (
+                    eye.0.rotation,
+                    to_eye.normalize_or_zero(),
+                    to_eye.length() * eye.1,
+                )
+            });
+            let floor = GLOW_FLOOR.0 * (1. + s.calibre() / GLOW_FLOOR.1);
+            // The glow stands just clear of the shell on the eye's side, so a round
+            // coming straight in doesn't hide its own spark.
+            wanted.insert(
+                Actor(s.body.id, Shape::ShotGlow(hostile)),
+                Transform::from_translation(base + toward * s.diameter * 2.5)
+                    .with_rotation(facing)
+                    .with_scale(Vec3::splat((s.diameter * GLOW).max(view * floor))),
+            );
+            let lengths = crate::ordnance::GHOST_LENGTHS;
+            let mut head = base;
+            for i in 0..lengths {
+                let tail = s.wake(GHOST_SECONDS, (i + 1) as f32 / lengths as f32);
+                let run = head.distance(tail);
+                // Each length keeps its own least width, so the near end of a trail
+                // running away from the eye is no fatter than the far end.
+                let view = eye.map_or(0., |eye| eye.0.translation.distance(head) * eye.1);
+                let width = (s.diameter * GHOST).max(view * GHOST_FLOOR);
+                if run > 0.5 {
+                    wanted.insert(
+                        Actor(s.body.id, Shape::ShotGhost(hostile, i as u8)),
+                        Transform::from_translation(head)
+                            .looking_at(tail, Vec3::Y)
+                            .with_scale(Vec3::new(width, width, run)),
+                    );
+                }
+                head = tail;
+            }
         }
         for e in battle.effects() {
             let age = e.age;

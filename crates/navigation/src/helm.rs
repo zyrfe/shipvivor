@@ -13,6 +13,7 @@ const ORDERS: [(&str, f32); 8] = [
     ("FULL AHEAD", 13.6),
 ];
 
+#[derive(Clone)]
 pub struct Helm {
     pub position: Vec2,
     pub heading: f32,

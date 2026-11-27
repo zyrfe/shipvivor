@@ -469,8 +469,11 @@ pub fn report(
         let sound = match fx.kind {
             EffectKind::Muzzle(Battery::Main) => Sound::MainGun,
             EffectKind::Muzzle(
-                Battery::Secondary | Battery::EnemySecondary | Battery::Aircraft | Battery::AntiAir,
+                Battery::Secondary | Battery::EnemySecondary | Battery::Aircraft,
             ) => Sound::SecondaryGun,
+            // Her light AA is a pom-pom, heard by its beat: the player knows by ear
+            // that she is fighting aircraft.
+            EffectKind::Muzzle(Battery::AntiAir) => Sound::PomPom,
             EffectKind::Muzzle(Battery::Raider) => Sound::RaiderGun,
             EffectKind::Muzzle(Battery::Shore) => Sound::ShoreGun,
             EffectKind::Muzzle(Battery::Heavy) => Sound::HeavyGun,
@@ -808,7 +811,7 @@ fn heard(blow: &Struck) -> Hit {
 pub fn keep_time(run: Res<Campaign>, mut board: ResMut<Soundboard>) {
     let flowing = !matches!(
         run.screen(),
-        Screen::Paused | Screen::PassageMap | Screen::Refit
+        Screen::Paused | Screen::Rewind | Screen::PassageMap | Screen::Refit
     );
     if flowing != board.flowing {
         board.flowing = flowing;
@@ -825,7 +828,13 @@ pub fn keep_time(run: Res<Campaign>, mut board: ResMut<Soundboard>) {
 
 /// A new voyage starts in still air.
 pub fn hush(_: On<Embarked>, board: Res<Soundboard>) {
-    board.cues.send(Cue::Hush);
+    board.silence();
+}
+impl Soundboard {
+    /// Stop every sound in the air, as when the battle jumps in time.
+    pub fn silence(&self) {
+        self.cues.send(Cue::Hush);
+    }
 }
 
 /// A local interface sound that plays while the encounter is paused.

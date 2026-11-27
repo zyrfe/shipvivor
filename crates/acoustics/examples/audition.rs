@@ -27,6 +27,10 @@
 //! her plate turns, from a tap to a deep clang, rounds that get through, from a light
 //! punch to a heavy round through bare plate, and sections lost:
 //! `cargo run -p shipvivor-acoustics --example audition -- hits.wav hits`
+//!
+//! With `aa` only her secondaries and her pom-poms are rendered, under way at half
+//! ahead: the secondaries alone, the pom-poms alone at an aeroplane passing, and both:
+//! `cargo run -p shipvivor-acoustics --example audition -- aa.wav aa`
 use glam::Vec3;
 use shipvivor_acoustics::{
     Air, Alert, Ambience, Bank, Cue, Cues, Harm, Haunt, Hit, Mixer, Place, Rotor, SAMPLE_RATE,
@@ -606,6 +610,101 @@ fn hits(stage: &mut Stage) {
     );
 }
 
+/// Her secondaries and her light AA, each alone and then together, so that the two
+/// can be told apart by ear.
+fn anti_air(stage: &mut Stage) {
+    stage.play(
+        "half ahead rung, and she settles",
+        6.,
+        true,
+        &[(0., Event::Order(0.5))],
+    );
+    let secondary = |side: f32| Vec3::new(6. * side, 5., -8.);
+    let mount = |side: f32| Vec3::new(5. * side, 3.5, 14.);
+    let guns: Vec<(f32, Event)> = (0..4)
+        .flat_map(|n| {
+            let at = 1. + 2.2 * n as f32;
+            [
+                (at, Event::Sound(Sound::SecondaryGun, secondary(1.))),
+                (at + 0.6, Event::Sound(Sound::SecondaryGun, secondary(-1.))),
+            ]
+        })
+        .collect();
+    stage.play("her secondaries, two mounts", 11., true, &guns);
+    let pass = Course::Straight(Vec3::new(-500., 120., -260.), Vec3::new(90., 0., 0.));
+    let poms = |from: f32| {
+        (0..8).flat_map(move |n| {
+            let at = from + 1.1 * n as f32;
+            [
+                (at, Event::Sound(Sound::PomPom, mount(1.))),
+                (at + 0.45, Event::Sound(Sound::PomPom, mount(-1.))),
+            ]
+        })
+    };
+    let raid: Vec<(f32, Event)> = [(0., Event::Plane(Some(pass)))]
+        .into_iter()
+        .chain(poms(2.))
+        .chain([(12., Event::Plane(None))])
+        .collect();
+    stage.play(
+        "her pom-poms, two mounts, at a plane passing",
+        13.,
+        true,
+        &raid,
+    );
+    let both: Vec<(f32, Event)> = [(0., Event::Plane(Some(pass)))]
+        .into_iter()
+        .chain(poms(1.))
+        .chain((0..4).map(|n| {
+            (
+                1.3 + 2.2 * n as f32,
+                Event::Sound(Sound::SecondaryGun, secondary(1.)),
+            )
+        }))
+        .chain([(12., Event::Plane(None))])
+        .collect();
+    stage.play("both at once", 13., true, &both);
+}
+
+/// The radio room's teleprinter printing a FLASH message as the game prints it: the bell
+/// three times, then each character on the line's beat, a space only the selector and
+/// escapement, and a carriage return between lines that takes two and a half beats.
+fn teletype(stage: &mut Stage) {
+    const BEAT: f32 = 0.1;
+    const LINES: [&str; 4] = [
+        "FLASH 140612Z FEB CTF 88",
+        "IRONR EGENT SORTI EDBAS EEBRG",
+        "040RN G1200 YDSXX",
+        "IRON REGENT HAS SAILED FROM BASE E",
+    ];
+    for (name, ship) in [
+        ("teletype, a FLASH message, ship stopped", false),
+        ("teletype again, under way", true),
+    ] {
+        let mut script: Vec<(f32, Event)> = (0..3)
+            .map(|n| {
+                (
+                    0.2 + 0.45 * n as f32,
+                    Event::Notice(Sound::PrinterBell, 1., n),
+                )
+            })
+            .collect();
+        let mut at = 1.8;
+        let mut serial = 0;
+        for line in LINES {
+            for c in line.chars() {
+                let level = if c == ' ' { 0.35 } else { 1. };
+                serial += 1;
+                script.push((at, Event::Notice(Sound::Typebar, level, serial)));
+                at += BEAT;
+            }
+            script.push((at, Event::Notice(Sound::Carriage, 1., serial)));
+            at += 2.5 * BEAT;
+        }
+        stage.play(name, at + 1.5, ship, &script);
+    }
+}
+
 fn main() -> io::Result<()> {
     let path = env::args().nth(1).unwrap_or_else(|| "audition.wav".into());
     let mut stage = Stage::new();
@@ -656,6 +755,18 @@ fn main() -> io::Result<()> {
     }
     if env::args().nth(2).as_deref() == Some("hits") {
         hits(&mut stage);
+        fs::write(&path, wav(&stage.frames))?;
+        println!("wrote {path}");
+        return Ok(());
+    }
+    if env::args().nth(2).as_deref() == Some("aa") {
+        anti_air(&mut stage);
+        fs::write(&path, wav(&stage.frames))?;
+        println!("wrote {path}");
+        return Ok(());
+    }
+    if env::args().nth(2).as_deref() == Some("teletype") {
+        teletype(&mut stage);
         fs::write(&path, wav(&stage.frames))?;
         println!("wrote {path}");
         return Ok(());

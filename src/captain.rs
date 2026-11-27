@@ -51,7 +51,7 @@ pub(crate) enum Expression {
     Delighted,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Watch {
     startle_left: f32,
     delight_left: f32,

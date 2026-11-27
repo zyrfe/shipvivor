@@ -295,9 +295,7 @@ impl ShipView {
                 // contact it rides with.
                 quarry
                     .and_then(|quarry| quarry.frame(battle))
-                    .map_or(contact.point, |(at, _)| {
-                        self.zeroed(player, at, contact.point)
-                    })
+                    .map_or(contact.point, |(at, _)| self.zeroed(player, at, &contact))
             } else if let Some(point) = quarry.and_then(|quarry| quarry.aim_point(battle, player)) {
                 point
             } else if fire_selected {
@@ -316,8 +314,12 @@ impl ShipView {
         }
     }
     /// Where the reticle crosses the upright plane through the contact, square to the
-    /// line of sight. Rock or ice short of her stops the round first.
-    fn zeroed(&self, player: Vec2, at: Vec2, contact: Vec3) -> Vec3 {
+    /// line of sight. Rock short of her stops the round first. Drift ice does not: the
+    /// round arcs over a floe the sightline grazes, and the reticle would otherwise
+    /// jump to every one that drifts across it.
+    fn zeroed(&self, player: Vec2, at: Vec2, contact: &Sighting) -> Vec3 {
+        let ice = contact.ice;
+        let contact = contact.point;
         let pose = self.pose(player);
         let ray = pose.forward().as_vec3();
         let reach = at - pose.translation.xz();
@@ -327,7 +329,9 @@ impl ShipView {
             return contact;
         }
         let range = reach.length();
-        let solid = contact.y > 0.01 && (contact.xz() - pose.translation.xz()).dot(across) < range;
+        let solid = !ice
+            && contact.y > 0.01
+            && (contact.xz() - pose.translation.xz()).dot(across) < range;
         if solid {
             contact
         } else {
@@ -388,13 +392,14 @@ impl ShipView {
             self.soft_target = hit;
             return;
         }
-        let ashore = sight.point.y > 0.01 && !self.scoped;
-        let ships = battle.raiders().iter().map(|r| Quarry::Ship(r.body.id));
-        let candidates: Vec<Quarry> = if ashore {
-            Quarry::batteries(battle).collect()
-        } else {
-            ships.chain(Quarry::batteries(battle)).collect()
-        };
+        // On the shore the free sight looks for harbour guns, and for ships only short of
+        // the rock: one lying in front of it is still hers to find. Drift ice is no shore.
+        let ashore = sight.point.y > 0.01 && !sight.ice && !self.scoped;
+        let shore = sight.point.xz().distance_squared(player);
+        let ships = (battle.raiders().iter())
+            .filter(|r| !ashore || r.body.pos.distance_squared(player) < shore)
+            .map(|r| Quarry::Ship(r.body.id));
+        let candidates: Vec<Quarry> = ships.chain(Quarry::batteries(battle)).collect();
         let pose = self.pose(player);
         let inverse = pose.rotation.inverse();
         let screen =
@@ -430,7 +435,11 @@ impl ShipView {
             let score = miss / radius;
             if score <= 1. && score < best {
                 let ray = (p - pose.translation).normalize_or_zero();
-                if quarry.seen(&battle.sight(pose.translation, ray, p.xz())) {
+                let line = battle.sight(pose.translation, ray, p.xz());
+                // She is kept while something passes in front of her middle for a moment:
+                // drift ice always, and through the scope, which rides her, anything.
+                let held = self.soft_target == Some(quarry) && (self.scoped || line.ice);
+                if held || quarry.seen(&line) {
                     picked = Some(quarry);
                     best = score;
                 }
@@ -522,13 +531,6 @@ impl ShipView {
         Transform::from_translation(eye).looking_to(sight, Vec3::Y)
     }
 
-    pub fn screen_span(&self, ship: Vec2, point: Vec3, width: f32, size: Vec2) -> f32 {
-        let pose = self.pose(ship);
-        let depth = (point - pose.translation)
-            .dot(pose.forward().as_vec3())
-            .max(1.);
-        width * size.y * 0.5 / (depth * (self.fov() * 0.5).tan())
-    }
     /// Unclipped HUD coordinates for geometry in front of the camera.
     pub fn viewport_point(&self, ship: Vec2, point: Vec3, size: Vec2) -> Option<Vec2> {
         let pose = self.pose(ship);

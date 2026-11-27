@@ -81,6 +81,7 @@ const MOORINGS: [(f32, f32); 6] = [
 ];
 
 /// A torpedo boat's part in her base's runs.
+#[derive(Clone)]
 pub(super) struct Attack {
     /// Her base, and where she lies at its mooring.
     pub base: usize,
@@ -127,6 +128,7 @@ impl Attack {
 }
 
 /// A base's torpedo boats.
+#[derive(Clone)]
 pub(super) struct Flotilla {
     /// Where they lie at its mooring.
     pub moorings: Vec<Vec2>,

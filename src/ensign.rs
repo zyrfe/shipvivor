@@ -64,7 +64,7 @@ fn stock() -> Flag {
 fn draw(run: &Campaign, next_run: u64) -> u64 {
     let base = match run.mode {
         Mode::Title | Mode::Trial => next_run,
-        Mode::Patrol | Mode::Paused => run.seed,
+        Mode::Patrol | Mode::Paused | Mode::Rewind => run.seed,
     };
     leg_seed(leg_seed(base, run.stage as u64), RAIDERS)
 }

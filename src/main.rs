@@ -5,6 +5,7 @@ mod blueprint;
 mod camera;
 mod captain;
 mod cards;
+mod crew_book;
 mod damage_control;
 mod damage_fx;
 mod dockyard;
@@ -20,11 +21,14 @@ mod gun_sight;
 mod gunnery;
 mod icefield;
 mod insignia;
+#[cfg(feature = "mcp")]
+mod mcp;
 mod minimap;
 mod mission_hud;
 mod options;
 mod ordnance;
 mod passage;
+mod rewind;
 mod scene;
 mod seascape;
 mod slip_badges;
@@ -54,8 +58,8 @@ use state::{
 };
 
 fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(berth::window()),
             ..default()
         }))
@@ -63,13 +67,16 @@ fn main() {
         .add_plugins(seascape::SeascapePlugin)
         .add_plugins(blueprint::BlueprintPlugin)
         .add_plugins(GamePlugin)
+        .add_plugins(crew_book::CrewBookPlugin)
         .add_plugins(sound::SoundPlugin)
         .add_plugins(snapshot::SnapshotPlugin)
         .add_plugins(telemetry::TelemetryPlugin)
         .add_plugins(icefield::IcefieldPlugin)
         .add_plugins(gunsmoke::GunsmokePlugin)
-        .add_plugins(battle_view::MainlandPlugin)
-        .run();
+        .add_plugins(battle_view::MainlandPlugin);
+    #[cfg(feature = "mcp")]
+    app.add_plugins(mcp::McpPlugin);
+    app.run();
 }
 
 struct GamePlugin;
@@ -95,6 +102,7 @@ impl Plugin for GamePlugin {
             .init_resource::<sound::Soundboard>()
             .init_resource::<alert::BaseAlerts>()
             .init_resource::<flares::Flares>()
+            .add_plugins(rewind::RewindPlugin)
             .add_observer(seascape::embark)
             .add_observer(sound::hush)
             .add_observer(sound::play_notice)
@@ -294,14 +302,14 @@ impl Voyage<'_, '_> {
     /// sails waters charted from the run's seed. The trial and the title keep fixed charts.
     fn outfit(&mut self, run: &mut Campaign) {
         run.watch = Default::default();
-        let passage = Passage::graded(run.stage, run.grade);
+        let passage = Passage::graded(run.stage, run.grade).with_strength(run.strength());
         let chart = match run.mode {
             Mode::Trial => {
                 *self.course = TrialCourse::default();
                 shipvivor_encounter::Chart::classic(self.course.gates().map(|g| g.center))
             }
             Mode::Patrol => passage.chart(run.seed),
-            Mode::Title | Mode::Paused => passage.classic(),
+            Mode::Title | Mode::Paused | Mode::Rewind => passage.classic(),
         };
         // The simulator opens its legs with these same calls.
         let patrol = run.mode == Mode::Patrol;
@@ -433,6 +441,7 @@ fn apply_action(In(action): In<Option<ui::Action>>, mut run: ResMut<Campaign>, m
             voyage.commands.trigger(sound::Notice(cue));
         }
         (Screen::Paused, Action::Resume) => run.mode = Mode::Patrol,
+        (Screen::Paused | Screen::Lost, Action::Rewind) => voyage.commands.trigger(rewind::Open),
         (Screen::Refit, Action::Card(card)) => {
             let before = run.fittings;
             run.install(card);
@@ -483,6 +492,9 @@ fn apply_action(In(action): In<Option<ui::Action>>, mut run: ResMut<Campaign>, m
         }
         (Screen::Intercept(_), Action::Engage) if run.engage_regent() => voyage.outfit(&mut run),
         (Screen::Chart, Action::Depart(next)) if run.depart(next) => voyage.outfit(&mut run),
+        (Screen::Chart, Action::Punish(lane)) => {
+            run.toggle_punishing(lane);
+        }
         _ => {}
     }
 }

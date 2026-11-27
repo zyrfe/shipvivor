@@ -81,6 +81,8 @@ impl IceShape {
     }
 }
 
+#[derive(Clone)]
+
 pub struct Iceberg {
     pub body: Body,
     /// Radius at the waterline in metres.
@@ -152,6 +154,7 @@ impl Iceberg {
 }
 
 /// The current and the ice on it, kept by the battle.
+#[derive(Clone)]
 pub(super) struct Floe {
     pub currents: Currents,
     pub icebergs: Vec<Iceberg>,

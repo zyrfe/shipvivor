@@ -396,6 +396,15 @@ pub fn churn(
     sea.stirred = true;
 }
 
+impl Sea {
+    /// Smooth the water: every wake and track gone, as when the battle jumps in time.
+    pub fn calm(&mut self) {
+        self.wake.clear();
+        self.tracks.clear();
+        self.stirred = true;
+    }
+}
+
 /// A new voyage starts on undisturbed water, in the weather of its stage.
 pub fn embark(
     _: On<Embarked>,
@@ -413,13 +422,13 @@ pub fn embark(
     } else {
         sea.chart = Vec4::ZERO;
     }
-    sea.wake.clear();
-    sea.tracks.clear();
-    sea.stirred = true;
+    sea.calm();
     let weather = match run.mode {
         Mode::Title => Weather::TITLE,
         Mode::Trial => Weather::FAIR,
-        Mode::Patrol | Mode::Paused => crate::passage::Passage::of(run.stage).weather,
+        Mode::Patrol | Mode::Paused | Mode::Rewind => {
+            crate::passage::Passage::of(run.stage).weather
+        }
     };
     if weather != sea.weather {
         sea.set_weather(weather);

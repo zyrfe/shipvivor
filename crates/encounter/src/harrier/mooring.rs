@@ -34,6 +34,7 @@ const SWING_DRAG: f32 = 1.6;
 const MOST_SWING: f32 = 2.5;
 
 /// A harrier lying at its base's mooring.
+#[derive(Clone)]
 pub struct MooredHarrier {
     pub body: Body,
     /// The base it flies from, and its berth there, from 0.
@@ -76,7 +77,7 @@ impl MooredHarrier {
 }
 
 /// Every base's mooring: the harriers lying there, and the berths left empty.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Moorings {
     pub(crate) planes: Vec<MooredHarrier>,
     /// A base, a berth there wrecked at the mooring, and the seconds into the sector
