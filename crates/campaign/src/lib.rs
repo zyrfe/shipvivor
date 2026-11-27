@@ -14,7 +14,7 @@ use shipvivor_artillery::{
 use shipvivor_shipyard::{Component, Design, Frame, Module, Protection, Ship, StrikeCraft};
 pub use workshop::{
     DeckModule, DockJob, MAX_GUN_STATIONS, MAX_LENGTH, MAX_SECTIONS_PER_KIND, MOST_GUN_STATIONS,
-    Refusal,
+    Refusal, deck_ranks, plane_room,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -248,19 +248,66 @@ impl Grade {
 /// one moderate, always open, then two tough ones that pay the same.
 pub const GRADES: [Grade; OFFERED] = [Grade::Moderate, Grade::Tough, Grade::Tough];
 
+/// What holds a sea, as the scouts report it: many light hulls, a few heavy ones, or
+/// some of each. Each round's pool holds three seas of each, and every chart offers one
+/// of each, so the captain picks the fight her guns suit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Fleet {
+    /// Swarms of light hulls: patrol boats, destroyers and torpedo boats, quick off the
+    /// slips and lightly gunned. Light plate everywhere, so a volume of quick fire
+    /// tells, and a heavy gun's slow round is wasted on a boat it would sink anyway.
+    Flotillas,
+    /// Light and heavy together, as most waters are held.
+    Mixed,
+    /// Fewer hulls, most of them cruisers and battleships in line, the battleships
+    /// belted with plate only a big gun's armour-piercing round opens.
+    BattleLine,
+}
+impl Fleet {
+    pub const ALL: [Fleet; 3] = [Fleet::Flotillas, Fleet::Mixed, Fleet::BattleLine];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Flotillas => "Flotillas",
+            Self::Mixed => "Mixed squadrons",
+            Self::BattleLine => "Battle line",
+        }
+    }
+    /// What the scouts saw, short enough for a narrow card.
+    pub fn report(self) -> &'static str {
+        match self {
+            Self::Flotillas => "Swarms of light hulls",
+            Self::Mixed => "Light and heavy",
+            Self::BattleLine => "Few hulls, heavy plate",
+        }
+    }
+    /// The guns that tell against it.
+    pub fn suits(self) -> &'static str {
+        match self {
+            Self::Flotillas => "Suits many quick guns",
+            Self::Mixed => "Suits a balanced ship",
+            Self::BattleLine => "Suits big guns and caps",
+        }
+    }
+}
+const _: () = assert!(Fleet::ALL.len() == OFFERED);
+
 /// Keeps the charted seas' stream apart from anything else drawn from the run seed.
 const ROUTE_STREAM: u64 = 0x726f_7574_6500_0000;
 
 /// The three seas a run charts for `round`, from 1 for the anchorages to [`PATROLS`],
-/// drawn from the round's pool by the run seed with no sea twice, or `None` past the
-/// last patrol. The same seed always charts the same seas, whichever way she came.
+/// one held by each [`Fleet`], drawn from the round's pool by the run seed and set in an
+/// order it also draws, or `None` past the last patrol. The same seed always charts the
+/// same seas, whichever way she came.
 pub fn charted(seed: u64, round: usize) -> Option<[Stage; OFFERED]> {
     let pool = POOLS.get(round.checked_sub(1)?)?;
-    let mut seas = pool.to_vec();
+    let mut fleets = Fleet::ALL.to_vec();
     let mut state = mix(seed ^ ROUTE_STREAM.wrapping_add(round as u64));
     Some(std::array::from_fn(|_| {
-        let at = next(&mut state) % seas.len() as u64;
-        seas.swap_remove(at as usize)
+        let fleet = fleets.swap_remove((next(&mut state) % fleets.len() as u64) as usize);
+        let held: Vec<Stage> = (pool.iter().copied())
+            .filter(|sea| sea.fleet() == fleet)
+            .collect();
+        held[(next(&mut state) % held.len() as u64) as usize]
     }))
 }
 
@@ -296,6 +343,35 @@ impl Stage {
     /// A passage between the anchorage and Crown Deep, which a yard charts and grades.
     fn is_passage(self) -> bool {
         (2..=PATROLS).contains(&self.round())
+    }
+
+    /// What holds this sea. Crown Deep is the Regent's battle line.
+    pub fn fleet(self) -> Fleet {
+        use Fleet::*;
+        match self {
+            Self::IronNarrows | Self::LanternBay | Self::DriftwoodBay => Mixed,
+            Self::EiderSound | Self::SkerryHaven | Self::PtarmiganInlet => Flotillas,
+            Self::BlackcapReach | Self::CairnRoad | Self::SnowmeltNarrows => BattleLine,
+            Self::GreywaterSound | Self::PilotsCut | Self::BrineNarrows => Mixed,
+            Self::GannetSound | Self::AukBay | Self::ShingleRoad => Flotillas,
+            Self::OuterRoad | Self::WalrusReach | Self::NarwhalCut => BattleLine,
+            Self::SealersRoad | Self::FloeRoad | Self::IvorySound => Mixed,
+            Self::KittiwakeSound | Self::SkuaNarrows | Self::HoarfrostBay => Flotillas,
+            Self::RimeGate | Self::BearclawCut | Self::LodestoneReach => BattleLine,
+            Self::FogboundBay | Self::BeaconRoad | Self::WreckersBay => Mixed,
+            Self::PetrelSound | Self::CormorantReach | Self::ShiverNarrows => Flotillas,
+            Self::WhalebackReach | Self::TheGullet | Self::IcefallCut => BattleLine,
+            Self::LongnightRoad | Self::HollowSound | Self::HarrowBay => Mixed,
+            Self::SplinterCut | Self::SleetSound | Self::RavensReach => Flotillas,
+            Self::PolarRoad | Self::AnvilCut | Self::BlackwaterNarrows => BattleLine,
+            Self::TempestRoad | Self::NorthlightReach | Self::ShroudBay => Mixed,
+            Self::TernHaven | Self::HailstoneSound | Self::WolfpackNarrows => Flotillas,
+            Self::FrostlineReach | Self::DevilsThroat | Self::CoffinCut => BattleLine,
+            Self::BorealRoad | Self::RegentsGate | Self::MidwinterRoad => Mixed,
+            Self::CalvingSound | Self::GauntletNarrows | Self::WhiteoutReach => Flotillas,
+            Self::AdmiraltySound | Self::BastionCut | Self::CitadelBay => BattleLine,
+            Self::CrownDeep => BattleLine,
+        }
     }
 
     /// A tough passage takes the ship into enemy air cover.
@@ -518,9 +594,7 @@ pub enum Card {
     Velocity,
     TripleTurrets,
     QuadTurrets,
-    /// Unlocks AP rounds for the main battery. Stock rounds are HE.
-    ArmorPiercing,
-    /// One more wing gun on each beam.
+    /// One more wing gun on each beam, while her deck has room for it.
     MoreSecondaries,
     /// More damage from each secondary hit.
     HeavySecondaries,
@@ -603,7 +677,6 @@ pub const DECK: &[(Card, Rarity)] = &[
     (Card::Armor, Rarity::Uncommon),
     (Card::Hardening, Rarity::Uncommon),
     (Card::MoreSecondaries, Rarity::Uncommon),
-    (Card::ArmorPiercing, Rarity::Uncommon),
     (Card::TwinSecondaries, Rarity::Rare),
 ];
 /// Cards in a level-up hand, when that many fit.
@@ -659,31 +732,48 @@ pub fn drilled(ranks: u16) -> f32 {
 }
 /// The most ranks of each refit the ship can take.
 pub mod limits {
+    use shipvivor_artillery::{AntiAir, Secondaries};
     pub const TRAINING_GEAR: u16 = shipvivor_artillery::MOST_TRAINING_GEAR;
+    /// Ranks of piercing caps: each adds a quarter, so eight treble the stock round's
+    /// penetration.
+    pub const CAPS: u16 = 8;
     /// At the widest beam. A narrower hull carries fewer: see [`crate::ShipBeam::most_armor`].
     pub const ARMOR: u16 = crate::ShipBeam::Capital.most_armor();
-    pub const HARDENING: u16 = 2;
-    pub const AA_MOUNTS: u16 = 2;
-    pub const AA_SHELLS: u16 = 2;
-    pub const AA_LOADERS: u16 = 3;
-    pub const PUMPS: u16 = 3;
+    pub const HARDENING: u16 = 4;
+    /// Secondaries past the stock pair a side, as far as any deck has room. Her own deck
+    /// usually has room for fewer: see `Run::wing_room`.
+    pub const WING_MOUNTS: u16 = (Secondaries::MOST_PER_SIDE - Secondaries::STOCK.per_side) as u16;
+    pub const WING_SHELLS: u16 = 5;
+    pub const WING_LOADERS: u16 = 6;
+    pub const WING_RANGE: u16 = 5;
+    /// Barrels past the first on every secondary: twin, triple, then quadruple mounts.
+    pub const WING_BARRELS: u16 = 3;
+    /// AA pairs past the stock pair, as far as any deck has room. Her own deck usually has
+    /// room for fewer: see `Run::aa_room`.
+    pub const AA_MOUNTS: u16 = ((AntiAir::MOST_MOUNTS - AntiAir::STOCK.mounts) / 2) as u16;
+    pub const AA_SHELLS: u16 = 5;
+    pub const AA_LOADERS: u16 = 6;
+    pub const PUMPS: u16 = 6;
     /// Launchers past the first on each missile rack, missiles past the stock salvo,
-    /// planes past the first and bombs past the first on each plane.
-    pub const LAUNCHERS: u16 = 2;
-    pub const MISSILES: u16 = 2;
-    pub const PLANES: u16 = 2;
-    pub const BOMBS: u16 = 2;
+    /// planes past the first and bombs past the first on each plane. Each plane section
+    /// launches [`PLANES_A_SECTION`] planes, so more than that want another section.
+    pub const LAUNCHERS: u16 = 3;
+    pub const MISSILES: u16 = 4;
+    pub const PLANES: u16 = 5;
+    pub const BOMBS: u16 = 4;
     pub const WING_TURRETS: u16 = 1;
+    /// Catapults on one plane section.
+    pub const PLANES_A_SECTION: u16 = 3;
 }
 /// Each rank of pumps adds this share of the stock pumping.
 const PUMP_STEP: f32 = 0.5;
 /// Each rank of armor plate adds this share of stock strength to every panel, and
-/// this many inches to its thickness. On sound plate the stock beam's two ranks turn
+/// this many inches to its thickness. On sound plate the stock beam's four ranks turn
 /// the enemy's secondaries and aircraft guns, then patrol boats and destroyers. A
 /// cruiser's beam adds cruisers, then battleships and shore guns, and a capital beam
 /// the Parliament's guns. Nothing turns the Regent's.
-const ARMOR_PLATE: f32 = 0.5;
-const ARMOR_INCHES: f32 = 3.;
+const ARMOR_PLATE: f32 = 0.25;
+const ARMOR_INCHES: f32 = 1.5;
 /// Each rank of hardening adds this share of stock strength to every deck fitting.
 const HARDENED_FITTINGS: f32 = 0.5;
 
@@ -697,7 +787,6 @@ pub struct Fittings {
     pub caps: u16,
     pub velocity: u16,
     pub turbines: u16,
-    pub armor_piercing: u16,
     pub wing_mounts: u16,
     pub wing_shells: u16,
     pub wing_loaders: u16,
@@ -729,7 +818,6 @@ impl Fittings {
             Card::Caps => &mut self.caps,
             Card::Velocity => &mut self.velocity,
             Card::Turbines => &mut self.turbines,
-            Card::ArmorPiercing => &mut self.armor_piercing,
             Card::MoreSecondaries => &mut self.wing_mounts,
             Card::HeavySecondaries => &mut self.wing_shells,
             Card::QuickSecondaries => &mut self.wing_loaders,
@@ -769,18 +857,13 @@ impl Fittings {
         };
         round.load_seconds() * drilled(self.loader)
     }
-    /// The main battery round as fitted, filled with HE. The crew loads whichever
-    /// filling is selected, and AP only once it is fitted.
+    /// The main battery round as fitted.
     pub fn round(&self) -> MainShell {
         MainShell {
             bore: self.calibre() - CALIBRES[0],
-            caps: self.caps,
+            caps: self.caps.min(limits::CAPS),
             velocity: self.velocity,
-            ..MainShell::STOCK
         }
-    }
-    pub fn armor_piercing(&self) -> bool {
-        self.armor_piercing > 0
     }
     /// Degrees per second the main battery trains, and elevates in proportion. A larger
     /// bore trains more slowly, and training gear wins it back.
@@ -794,8 +877,10 @@ impl Fittings {
         let stock = AntiAir::STOCK;
         AntiAir {
             mounts: (stock.mounts + 2 * usize::from(self.aa_mounts)).min(AntiAir::MOST_MOUNTS),
-            damage: stock.damage.saturating_add(self.aa_shells),
-            reload: stock.reload * drilled(self.aa_loaders),
+            damage: stock
+                .damage
+                .saturating_add(self.aa_shells.min(limits::AA_SHELLS)),
+            reload: stock.reload * drilled(self.aa_loaders.min(limits::AA_LOADERS)),
             range: stock.range,
         }
     }
@@ -829,11 +914,16 @@ impl Fittings {
         };
         Secondaries {
             per_side: (stock + usize::from(self.wing_mounts)).min(Secondaries::MOST_PER_SIDE),
-            damage: (Secondaries::STOCK.damage.saturating_add(self.wing_shells))
+            damage: (Secondaries::STOCK.damage)
+                .saturating_add(self.wing_shells.min(limits::WING_SHELLS))
                 .saturating_add(damage),
-            reload: Secondaries::STOCK.reload * drilled(self.wing_loaders) * load,
-            range: Secondaries::STOCK.range + WING_RANGE_STEP * f32::from(self.wing_range) + reach,
-            barrels: if self.wing_twin > 0 { 2 } else { 1 },
+            reload: Secondaries::STOCK.reload
+                * drilled(self.wing_loaders.min(limits::WING_LOADERS))
+                * load,
+            range: Secondaries::STOCK.range
+                + WING_RANGE_STEP * f32::from(self.wing_range.min(limits::WING_RANGE))
+                + reach,
+            barrels: 1 + usize::from(self.wing_twin.min(limits::WING_BARRELS)),
             turrets,
         }
     }
@@ -854,10 +944,14 @@ impl Fittings {
     /// A hand drawn from `key`: up to [`HAND`] different cards from the [`DECK`] that the
     /// ship can take, each draw weighted by rarity. Fewer are dealt when fewer fit.
     pub fn deal(&self, key: u64) -> Vec<Card> {
+        self.deal_where(key, |_| true)
+    }
+    /// A hand as [`Fittings::deal`] draws it, from only the cards `room` also allows.
+    pub fn deal_where(&self, key: u64, room: impl Fn(Card) -> bool) -> Vec<Card> {
         let pool = DECK
             .iter()
             .copied()
-            .filter(|&(card, _)| self.can_fit(card))
+            .filter(|&(card, _)| self.can_fit(card) && room(card))
             .collect();
         draw(pool, key)
     }
@@ -866,14 +960,17 @@ impl Fittings {
     /// no limit.
     pub fn ranks(&self, card: Card) -> Option<(u16, u16)> {
         use Card::*;
-        let most_per_side = (Secondaries::MOST_PER_SIDE - Secondaries::STOCK.per_side) as u16;
         Some(match card {
-            MoreSecondaries => (self.wing_mounts.min(most_per_side), most_per_side),
-            HeavySecondaries => (self.wing_shells, 2),
-            QuickSecondaries => (self.wing_loaders, 3),
-            SecondaryRange => (self.wing_range, 2),
-            TwinSecondaries => (self.wing_twin, 1),
+            MoreSecondaries => (
+                self.wing_mounts.min(limits::WING_MOUNTS),
+                limits::WING_MOUNTS,
+            ),
+            HeavySecondaries => (self.wing_shells, limits::WING_SHELLS),
+            QuickSecondaries => (self.wing_loaders, limits::WING_LOADERS),
+            SecondaryRange => (self.wing_range, limits::WING_RANGE),
+            TwinSecondaries => (self.wing_twin, limits::WING_BARRELS),
             TrainingGear => (self.training_gear, limits::TRAINING_GEAR),
+            Caps => (self.caps, limits::CAPS),
             Armor => (self.armor, limits::ARMOR),
             Hardening => (self.hardening, limits::HARDENING),
             MoreAntiAir => (self.aa_mounts, limits::AA_MOUNTS),
@@ -891,17 +988,15 @@ impl Fittings {
     pub fn can_fit(&self, card: Card) -> bool {
         use Card::*;
         match card {
-            // Caps drive AP only, and stop helping once it reaches the capital grade.
-            Caps => self.armor_piercing() && self.caps.saturating_add(self.round().bore / 2) < 2,
-            ArmorPiercing => !self.armor_piercing(),
+            Caps => self.caps < limits::CAPS,
             Shells => CALIBRES
                 .get(usize::from(self.shells) + 1)
                 .is_some_and(|&inch| inch <= self.capacity()),
             MoreSecondaries => self.secondaries().per_side < Secondaries::MOST_PER_SIDE,
-            HeavySecondaries => self.wing_shells < 2,
-            QuickSecondaries => self.wing_loaders < 3,
-            SecondaryRange => self.wing_range < 2,
-            TwinSecondaries => self.wing_twin == 0,
+            HeavySecondaries => self.wing_shells < limits::WING_SHELLS,
+            QuickSecondaries => self.wing_loaders < limits::WING_LOADERS,
+            SecondaryRange => self.wing_range < limits::WING_RANGE,
+            TwinSecondaries => self.wing_twin < limits::WING_BARRELS,
             TrainingGear => self.training_gear < limits::TRAINING_GEAR,
             Armor => self.armor < self.beam.most_armor(),
             Hardening => self.hardening < limits::HARDENING,
@@ -949,6 +1044,8 @@ pub struct Objectives {
     /// Harbour guns silenced. Each pays [`GUN_XP`]. They fight on apart from their yard,
     /// so they are worth taking out or worth steering clear of.
     pub guns: u16,
+    /// Fuel trucks blown up on an airfield. Each pays [`VEHICLE_XP`].
+    pub vehicles: u16,
 }
 pub const CRATE_XP: u32 = 10;
 /// Experience for each coaster sunk.
@@ -957,9 +1054,12 @@ pub const COASTER_XP: u32 = 5;
 pub const PLANE_XP: u32 = 3;
 /// Experience for each harbour gun silenced.
 pub const GUN_XP: u32 = 4;
+/// Experience for each fuel truck blown up on an airfield.
+pub const VEHICLE_XP: u32 = 2;
 /// Experience for each torpedo boat sunk. She is a nuisance and no raider.
 pub const TORPEDO_BOAT_XP: u32 = 5;
 
+#[derive(Clone)]
 pub struct Run {
     phase: Phase,
     pub stage: Stage,
@@ -1184,7 +1284,8 @@ impl Run {
     /// same choices always deal the same hands.
     pub fn offers(&self) -> Vec<Card> {
         let hand = mix(u64::from(self.hands).wrapping_add(HAND_STREAM));
-        self.fittings.deal(mix(self.seed ^ hand))
+        self.fittings
+            .deal_where(mix(self.seed ^ hand), |card| self.has_room(card))
     }
     /// Commit one gameplay tick. A lethal hit ends the run before any rewards.
     ///
@@ -1257,6 +1358,8 @@ impl Run {
         self.experience += u32::from(gains.planes) * PLANE_XP;
         self.objectives.guns = self.objectives.guns.saturating_add(gains.guns);
         self.experience += u32::from(gains.guns) * GUN_XP;
+        self.objectives.vehicles = self.objectives.vehicles.saturating_add(gains.vehicles);
+        self.experience += u32::from(gains.vehicles) * VEHICLE_XP;
         while self.experience >= self.next_level_xp() {
             self.experience -= self.next_level_xp();
             self.level += 1;
@@ -1396,7 +1499,6 @@ impl Run {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shipvivor_artillery::Ammo;
 
     #[test]
     fn stars_and_wrecked_yards_pay_the_yard_once_and_unspent_points_sail_on() {
@@ -1570,44 +1672,38 @@ mod tests {
     }
 
     #[test]
-    fn ammunition_cards_change_distinct_properties_and_never_offer_a_spent_grade() {
+    fn ammunition_cards_change_distinct_properties_and_never_offer_a_spent_rank() {
         let dealt = |fit: Fittings| (0..400).flat_map(|key| fit.deal(key)).collect::<Vec<_>>();
         let stock = Fittings::default();
-        // The bore is yard work. Caps wait for AP.
+        // The bore is yard work. Caps and velocity both come in a hand.
         let hands = dealt(stock);
-        assert!(hands.contains(&Card::ArmorPiercing) && hands.contains(&Card::Velocity));
-        assert!(!hands.contains(&Card::Shells) && !hands.contains(&Card::Caps));
-        assert_eq!(stock.round().ammo, Ammo::He);
+        assert!(hands.contains(&Card::Caps) && hands.contains(&Card::Velocity));
+        assert!(!hands.contains(&Card::Shells));
         let heavy = stock.with(Card::Shells).round();
         assert!(heavy.calibre_inches() > stock.round().calibre_inches());
         assert_eq!(heavy.speed(), stock.round().speed());
-        let ap = |f: Fittings| MainShell {
-            ammo: Ammo::Ap,
-            ..f.round()
-        };
-        let armed = stock.with(Card::ArmorPiercing);
-        let hands = dealt(armed);
-        assert!(armed.armor_piercing() && !hands.contains(&Card::ArmorPiercing));
-        assert!(hands.contains(&Card::Caps));
-        let capped = armed.with(Card::Caps);
-        assert_ne!(ap(capped).penetration(), ap(armed).penetration());
-        assert_eq!(capped.round().penetration(), stock.round().penetration());
+        // Caps drive the round through heavier plate and change nothing else.
+        let capped = stock.with(Card::Caps);
+        assert!(capped.round().penetration() > stock.round().penetration());
         assert_eq!(capped.round().breach_force(), stock.round().breach_force());
+        assert_eq!(capped.round().reach(), stock.round().reach());
+        // Velocity carries it farther and harder.
         let fast = stock.with(Card::Velocity).round();
         assert!(fast.speed() > stock.round().speed());
-        assert_eq!(fast.penetration(), stock.round().penetration());
+        assert!(fast.penetration() > stock.round().penetration());
         let max = Fittings {
-            armor_piercing: 1,
-            caps: 1,
+            caps: limits::CAPS,
             shells: 4,
             velocity: 4,
             ..stock
         };
+        assert_eq!(max.ranks(Card::Caps), Some((limits::CAPS, limits::CAPS)));
+        assert_eq!(max.with(Card::Caps).round(), max.round());
         assert!((0..50).all(|key| max.deal(key).len() == HAND));
         assert!(
             dealt(max)
                 .iter()
-                .all(|card| !matches!(card, Card::ArmorPiercing | Card::Caps | Card::Shells))
+                .all(|card| !matches!(card, Card::Caps | Card::Shells))
         );
     }
     #[test]
@@ -1678,32 +1774,30 @@ mod tests {
         // Every close-range card is dealt while it can still improve the battery.
         let hands: Vec<_> = (0..400).flat_map(|key| stock.deal(key)).collect();
         assert!(close.iter().all(|card| hands.contains(card)));
-        let mut full = stock;
-        for card in [
-            MoreSecondaries,
-            MoreSecondaries,
-            HeavySecondaries,
-            HeavySecondaries,
-            QuickSecondaries,
-            QuickSecondaries,
-            QuickSecondaries,
-            SecondaryRange,
-            SecondaryRange,
-            TwinSecondaries,
-        ] {
-            full = full.with(card);
-        }
+        let full = [
+            (MoreSecondaries, 2),
+            (HeavySecondaries, limits::WING_SHELLS),
+            (QuickSecondaries, limits::WING_LOADERS),
+            (SecondaryRange, limits::WING_RANGE),
+            (TwinSecondaries, limits::WING_BARRELS),
+        ]
+        .into_iter()
+        .flat_map(|(card, ranks)| std::iter::repeat_n(card, usize::from(ranks)))
+        .fold(stock, Fittings::with);
         let fit = full.secondaries();
-        // The two she was built with a side, and two more abeam.
-        assert_eq!((fit.per_side, fit.damage, fit.barrels), (4, 3, 2));
-        assert!((fit.range - 240.).abs() < 1e-5);
-        // Three ranks of loaders, each taking the same share off.
-        assert!((fit.reload - Secondaries::STOCK.reload * drilled(3)).abs() < 1e-5);
+        // The two she was built with a side and two more, five more damage a hit, and
+        // four barrels on every mount.
+        assert_eq!((fit.per_side, fit.damage, fit.barrels), (4, 6, 4));
+        assert!((fit.range - 360.).abs() < 1e-5);
+        // Six ranks of loaders, each taking the same share off.
+        assert!((fit.reload - Secondaries::STOCK.reload * drilled(6)).abs() < 1e-5);
         assert!((drilled(3) - 0.85_f32.powi(3)).abs() < 1e-6);
+        // Only her deck room stops another pair, and a longer hull has more: see
+        // `a_full_deck_waits_for_a_longer_hull_before_mounting_more_secondaries`.
         assert!(
             (0..400)
                 .flat_map(|key| full.deal(key))
-                .all(|card| !close.contains(&card))
+                .all(|card| card == MoreSecondaries || !close.contains(&card))
         );
     }
     #[test]
@@ -1784,7 +1878,9 @@ mod tests {
         let plate = run.ship.design().plate_strength(1);
         run.install(Card::Armor);
         assert!(run.ship.design().plate_strength(1) > plate);
-        run.fittings = run.fittings.with(Card::Hardening).with(Card::Hardening);
+        for _ in 0..limits::HARDENING {
+            run.fittings = run.fittings.with(Card::Hardening);
+        }
         run.tick(0.1, Objectives::default(), 0);
         assert_eq!(
             run.ship.design().strength(Component::Engine),
@@ -1792,32 +1888,37 @@ mod tests {
         );
     }
     #[test]
-    fn pumps_stop_at_three_ranks_and_reach_her_pumping_as_they_are_fitted() {
+    fn pumps_stop_at_their_last_rank_and_reach_her_pumping_as_they_are_fitted() {
         assert_eq!(Card::Pumps.rarity(), Some(Rarity::Common));
         let mut run = Run::default();
         assert_eq!(run.ship.design().pumps(), 1.);
-        // 180 XP is four levels, a hand each.
-        run.tick(
-            0.,
-            Objectives {
-                crates: 18,
-                ..Default::default()
-            },
-            0,
-        );
+        // Crates' experience until a hand is owed.
+        let level_up = |run: &mut Run| {
+            while run.fittings_remaining() == 0 {
+                let crates = Objectives {
+                    crates: 3,
+                    ..Default::default()
+                };
+                run.tick(0., crates, 0);
+            }
+        };
         for rank in 1..=limits::PUMPS {
+            level_up(&mut run);
             seed_dealing(&mut run, Card::Pumps);
             run.install(Card::Pumps);
             assert_eq!(run.fittings.ranks(Card::Pumps), Some((rank, limits::PUMPS)));
             assert_eq!(run.ship.design().pumps(), 1. + 0.5 * f32::from(rank));
         }
-        // A fourth rank is neither fitted nor dealt.
+        // Another rank is neither fitted nor dealt.
         assert!(!run.fittings.can_fit(Card::Pumps));
         assert_eq!(run.fittings.with(Card::Pumps), run.fittings);
         assert!((0..200).all(|key| !run.fittings.deal(key).contains(&Card::Pumps)));
+        level_up(&mut run);
         run.install(run.offers()[0]);
-        assert_eq!(run.phase(), Phase::Sailing);
-        assert_eq!(run.ship.design().pumps(), 2.5);
+        assert_eq!(
+            run.ship.design().pumps(),
+            1. + 0.5 * f32::from(limits::PUMPS)
+        );
 
         // The yard sells them in the engine bay, and she sails with them.
         let mut run = Run::default();
@@ -1842,20 +1943,19 @@ mod tests {
             assert!(DECK.iter().any(|&(card, _)| card == upgrade));
         }
         assert_eq!(stock.with(Card::MoreAntiAir).anti_air().mounts, 4);
+        // Her deck room, which a longer hull adds to, stops the mounts well short of this:
+        // see `a_longer_hull_makes_room_for_more_aa_and_a_plane_section_for_more_planes`.
         let full = [
-            Card::MoreAntiAir,
-            Card::MoreAntiAir,
-            Card::HeavyAntiAir,
-            Card::HeavyAntiAir,
-            Card::QuickAntiAir,
-            Card::QuickAntiAir,
-            Card::QuickAntiAir,
+            (Card::MoreAntiAir, limits::AA_MOUNTS),
+            (Card::HeavyAntiAir, limits::AA_SHELLS),
+            (Card::QuickAntiAir, limits::AA_LOADERS),
         ]
         .into_iter()
+        .flat_map(|(card, ranks)| std::iter::repeat_n(card, usize::from(ranks)))
         .fold(stock, Fittings::with);
         let aa = full.anti_air();
-        assert_eq!((aa.mounts, aa.damage), (AntiAir::MOST_MOUNTS, 3));
-        assert!((aa.reload - AntiAir::STOCK.reload * drilled(3)).abs() < 1e-5);
+        assert_eq!((aa.mounts, aa.damage), (AntiAir::MOST_MOUNTS, 6));
+        assert!((aa.reload - AntiAir::STOCK.reload * drilled(6)).abs() < 1e-5);
         for upgrade in [Card::MoreAntiAir, Card::HeavyAntiAir, Card::QuickAntiAir] {
             assert!(!full.can_fit(upgrade));
         }
@@ -1995,8 +2095,9 @@ mod tests {
             }
             (fit.armor, fit.protection(Protection::BREAKWATER).thickness)
         };
-        assert_eq!(most(ShipBeam::Escort), (2, 7.));
-        assert_eq!(most(ShipBeam::Cruiser), (4, 13.));
+        // Twice the ranks of half the plate each: the same thickness at each beam.
+        assert_eq!(most(ShipBeam::Escort), (4, 7.));
+        assert_eq!(most(ShipBeam::Cruiser), (8, 13.));
         assert_eq!(most(ShipBeam::Capital), (limits::ARMOR, 19.));
         // On her stock beam she can turn a destroyer's round, but not a cruiser's.
         let mut run = Run::default();
@@ -2247,6 +2348,10 @@ mod tests {
                 let three = charted(seed, round).unwrap();
                 assert!(three.iter().all(|sea| sea.round() == round), "{three:?}");
                 assert!(three[0] != three[1] && three[1] != three[2] && three[0] != three[2]);
+                // One of each fleet, so the two tough passages are never the same fight.
+                let mut fleets = three.map(Stage::fleet).to_vec();
+                fleets.sort_by_key(|&fleet| fleet as usize);
+                assert_eq!(fleets, Fleet::ALL, "{three:?}");
                 assert_eq!(charted(seed, round), Some(three));
                 for sea in three {
                     if !seen[round - 1].contains(&sea) {
@@ -2257,6 +2362,12 @@ mod tests {
             assert!(charted(seed, 0).is_none() && charted(seed, ROUNDS).is_none());
         }
         assert!(seen.iter().all(|seas| seas.len() == POOL), "{seen:?}");
+        for pool in POOLS {
+            for fleet in Fleet::ALL {
+                let held = pool.iter().filter(|sea| sea.fleet() == fleet).count();
+                assert_eq!(held, POOL / OFFERED, "{fleet:?} in {pool:?}");
+            }
+        }
         // Each yard charts one moderate passage, always open, then two tough ones for
         // three stars that pay alike.
         let exits = Run::default().exits().unwrap();

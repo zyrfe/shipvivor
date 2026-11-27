@@ -75,12 +75,21 @@ enum Need {
     Stock(DockModule),
 }
 
-/// What the work picked out waits on, when the yard offers it: a broader beam for thicker
-/// plate, a heavier bore or more barrels; fewer barrels for a bore no beam carries in
-/// these; and a longer hull, by a section from the stock, for a broader beam. A wait on
-/// work that waits in turn beckons the first step, which beckons the next once picked.
+/// What the work picked out waits on, when the yard offers it. Work it waits on that
+/// cannot be ordered yet itself, because it waits in turn, beckons the step she can take
+/// first: a section from the stock to lengthen her for the broader beam a bore needs.
 fn need(run: &Campaign) -> Option<Need> {
-    let job = run.dock_job()?;
+    let first = wait(run, run.dock_job()?)?;
+    match first {
+        Need::Job(next) if run.quote(next).is_none() => wait(run, next).or(Some(first)),
+        _ => Some(first),
+    }
+}
+
+/// What `job` waits on, when the yard offers it: a broader beam for thicker plate, a
+/// heavier bore or more barrels; fewer barrels for a bore no beam carries in these; and a
+/// longer hull, by a section from the stock, for a broader beam.
+fn wait(run: &Campaign, job: DockJob) -> Option<Need> {
     let widen = Some(Need::Job(DockJob::WidenBeam));
     match run.refusal(job) {
         Some(Refusal::Beam(_)) => return widen,
@@ -91,6 +100,8 @@ fn need(run: &Campaign) -> Option<Need> {
                 .find(|&module| run.stock_refusal(module).is_none())
                 .map(Need::Stock);
         }
+        // Another section of that kind, which the stock beckons.
+        Some(Refusal::Section(module)) => return Some(Need::Stock(module)),
         Some(_) => return None,
         None if job.fits(run) => return None,
         None => {}
@@ -776,7 +787,7 @@ fn proposal_box(run: &Campaign, job: DockJob) -> Option<(Vec3, Vec3)> {
             | Card::QuickSecondaries
             | Card::HeavySecondaries,
         ) if fits => {
-            let deck = shipvivor_encounter::DeckOffsets::for_design(design);
+            let stations = design.wing_stations();
             let index = if job == DockJob::Fitting(Card::MoreSecondaries) {
                 2 * run
                     .display_fittings()
@@ -786,7 +797,8 @@ fn proposal_box(run: &Campaign, job: DockJob) -> Option<(Vec3, Vec3)> {
             } else {
                 0
             };
-            let (x, fore) = deck.wing_position(index);
+            let station = stations.get(index).or(stations.last())?;
+            let (x, fore) = (station.abeam, station.fore);
             (
                 coords(0., 2.05, -fore),
                 coords(x.abs() * 2. + 1.4, 1.45, 3.),
@@ -794,13 +806,14 @@ fn proposal_box(run: &Campaign, job: DockJob) -> Option<(Vec3, Vec3)> {
         }
         DockJob::Fitting(Card::MoreAntiAir | Card::HeavyAntiAir | Card::QuickAntiAir) if fits => {
             // The pair the card adds, or the first pair for an upgrade to every gun.
-            let deck = shipvivor_encounter::DeckOffsets::for_design(design);
+            let tubs = design.aa_stations();
             let index = if job == DockJob::Fitting(Card::MoreAntiAir) {
                 run.fittings.anti_air().mounts
             } else {
                 0
             };
-            let (x, fore) = deck.aa_position(index);
+            let tub = tubs.get(index).or(tubs.last())?;
+            let (x, fore) = (tub.abeam, tub.fore);
             (
                 coords(0., 3.55, -fore),
                 coords(x.abs() * 2. + 1.4, 1.3, 2.2),
@@ -863,13 +876,13 @@ pub fn stage(
     mut cages: Query<(&Cage, &mut Transform, &mut Visibility), Without<Basin>>,
     mut buttons: Query<
         (
-            &YardButton,
-            &RelativeCursorPosition,
+            Option<&YardButton>,
+            Option<&RelativeCursorPosition>,
             &mut BackgroundColor,
             &mut BorderColor,
             Has<Beckon>,
         ),
-        Without<StockTile>,
+        (Without<StockTile>, Or<(With<YardButton>, With<Beckon>)>),
     >,
     mut tiles: Query<(
         &StockTile,
@@ -926,10 +939,18 @@ pub fn stage(
             visible.set_if_neq(Visibility::Hidden);
         }
     }
-    // Work that the work picked out waits on strobes, so it can be found.
+    // Work that the work picked out waits on strobes, so it can be found, even when the
+    // points left cannot pay for it and it takes no click.
     let pulse = strobe(clock.elapsed_secs());
     for (button, mouse, mut bg, mut edge, beckons) in &mut buttons {
-        let base = button_paint(button.selected, button.confirm, mouse.cursor_over());
+        let base = match button {
+            Some(button) => button_paint(
+                button.selected,
+                button.confirm,
+                mouse.is_some_and(|m| m.cursor_over()),
+            ),
+            None => panel(),
+        };
         if beckons {
             let (fill, rim) = beckon_paint(base, pulse);
             bg.set_if_neq(BackgroundColor(fill));
@@ -1031,7 +1052,9 @@ pub fn place(
             })
             .flatten()
     };
-    let mut listed = 0.;
+    // The callout keeps room for one row of the selected section's orders, so the first
+    // orders made on it fill that room and leave its tiles where they were.
+    let mut listed = LEDGER_ROOM;
     for (ledger, mut node, computed) in &mut ledgers {
         let Some(anchor) = keel(ledger.0) else {
             node.display = Display::None;
@@ -1042,7 +1065,7 @@ pub fn place(
         node.left = px(anchor.x - 0.5 * extent.x);
         node.top = px(anchor.y + 8.);
         if ledger.0 == run.dock_module {
-            listed = extent.y + 8.;
+            listed = listed.max(extent.y + 8.);
         }
     }
     let anchor = keel(run.dock_module);
@@ -1140,6 +1163,9 @@ pub fn place(
 const OPTIONS_WIDTH: f32 = 372.;
 /// Width of the column of figures for the refit under the cursor.
 const FIGURES_WIDTH: f32 = 250.;
+/// Height the callout keeps above it for one row of the selected section's orders: a
+/// 24-pixel order, the list's padding and rule, and the gap under it.
+const LEDGER_ROOM: f32 = 24. + 8. + 2. + 8.;
 
 /// What the hover tag and the callout call a section.
 fn section_name(run: &Campaign, at: usize) -> &'static str {
@@ -1354,6 +1380,8 @@ fn spacer(cmd: &mut Commands, parent: Entity) {
     );
 }
 
+/// The yard's panels. With `ask`, the way out carries the playtest feedback sheet for the
+/// round just sailed.
 pub fn screen(
     cmd: &mut Commands,
     root: Entity,
@@ -1361,6 +1389,7 @@ pub fn screen(
     battle: &Encounter,
     art: &Insignia,
     reason: LegEnd,
+    ask: bool,
 ) {
     // The length a section carried over a seam would add, measured under where it goes.
     let measure = cmd
@@ -1448,7 +1477,7 @@ pub fn screen(
     ));
 
     ledgers(cmd, root, run, art);
-    floor(cmd, root, run, art);
+    floor(cmd, root, run, art, ask);
     callout(cmd, root, run, art);
     // Drawn last, so the carried section passes over every panel.
     cmd.spawn((
@@ -1479,6 +1508,10 @@ fn ledgers(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
     sections.sort_unstable();
     sections.dedup();
     for at in sections {
+        // The selected section's orders run across in a row over its callout, in the room
+        // the callout keeps for them, so ordering does not move the tiles. The others are
+        // stacked under their sections.
+        let across = at == run.dock_module;
         let list = cmd
             .spawn((
                 Ledger(at),
@@ -1487,8 +1520,19 @@ fn ledgers(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
                 Node {
                     position_type: PositionType::Absolute,
                     display: Display::None,
-                    flex_direction: FlexDirection::Column,
+                    flex_direction: if across {
+                        FlexDirection::Row
+                    } else {
+                        FlexDirection::Column
+                    },
+                    flex_wrap: FlexWrap::Wrap,
+                    max_width: if across {
+                        px(OPTIONS_WIDTH + FIGURES_WIDTH)
+                    } else {
+                        Val::Auto
+                    },
                     row_gap: px(3),
+                    column_gap: px(3),
                     padding: UiRect::all(px(4)),
                     border: UiRect::top(px(2)),
                     ..default()
@@ -1632,19 +1676,30 @@ fn callout(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
         run.beam_class().most_turrets(),
     );
     catalog::options(cmd, options, run, art, &jobs);
-    // The callout keeps one size whatever is picked, so a second click lands on the tile
-    // the first one did.
+    // The callout keeps one size whatever its figures show, so the tiles stay put from one
+    // order to the next.
     cmd.entity(callout).entry::<Node>().and_modify(|mut node| {
         node.min_height = px(CALLOUT_HEIGHT);
     });
 
-    // The figures for the refit picked out. Their column keeps its room when nothing is
-    // picked.
-    match run.dock_job().filter(|job| jobs.contains(job)) {
-        Some(job) => order_card(cmd, callout, run, art, job, true),
-        None => {
+    // The figures for the refit picked out with the keys, or else for the order just made
+    // here, read against the ship as she stood before it. Their column keeps its room when
+    // there is neither.
+    let receipt = run.dock_receipt.as_ref().filter(|receipt| !receipt.on_hull);
+    match (run.dock_job().filter(|job| jobs.contains(job)), receipt) {
+        (Some(job), _) => order_card(cmd, callout, run, art, job, true, None),
+        (None, Some(receipt)) => order_card(
+            cmd,
+            callout,
+            &receipt.before(),
+            art,
+            receipt.job,
+            true,
+            Some(receipt.spent),
+        ),
+        (None, None) => {
             let spec = figures(cmd, callout, true);
-            text(cmd, spec, "Click a refit", 13., muted());
+            text(cmd, spec, "Click a refit to order it", 13., muted());
         }
     }
 }
@@ -1677,7 +1732,9 @@ fn figures(cmd: &mut Commands, parent: Entity, column: bool) -> Entity {
     .id()
 }
 
-/// A refit's figures: its name, what it changes, and what it costs.
+/// A refit's figures: its name, what it changes, and what it costs. Picked out with the
+/// keys, its price orders it. Already ordered, `booked` holds the points the order took,
+/// and `run` is the yard as it stood before it, so the figures read as the change it made.
 fn order_card(
     cmd: &mut Commands,
     parent: Entity,
@@ -1685,6 +1742,7 @@ fn order_card(
     art: &Insignia,
     job: DockJob,
     column: bool,
+    booked: Option<i32>,
 ) {
     let spec = figures(cmd, parent, column);
     text(cmd, spec, job_name(job, run), 16., paper());
@@ -1710,9 +1768,44 @@ fn order_card(
             12.,
         );
     }
-    // A fitting at its last rank is done, not locked. Work the yard can make is ordered
-    // from its price.
-    let done = catalog::fully_fitted(job, run);
+    // Ordered: the points it took, or gave back by taking back an earlier order. It stands
+    // where the price would, at the price's height, so nothing moves.
+    if let Some(spent) = booked {
+        let chip = node(
+            cmd,
+            spec,
+            Node {
+                height: px(34),
+                padding: UiRect::axes(px(10), px(0)),
+                column_gap: px(6),
+                align_items: AlignItems::Center,
+                border: UiRect::all(px(1)),
+                ..default()
+            },
+            Color::NONE,
+        );
+        cmd.entity(chip).insert(BorderColor::all(cyan()));
+        if spent == 0 {
+            text(cmd, chip, "Free", 14., cyan());
+        } else {
+            icon(cmd, chip, art.order.clone(), cyan(), 14.);
+            text(cmd, chip, spent.unsigned_abs().to_string(), 15., cyan());
+        }
+        let words = if spent < 0 {
+            "  Refunded"
+        } else {
+            "  On order"
+        };
+        text(cmd, chip, words, 14., cyan());
+        return;
+    }
+    // A fitting at its last rank, or a bore she already mounts, is done, not locked. Work
+    // the yard can make is ordered from its price: what it books, less what any order it
+    // takes back gives.
+    let quote = run.quote(job);
+    let enabled = quote.is_some();
+    let done = catalog::fully_fitted(job, run) || !enabled && fits && left.is_some();
+    let cost = quote.map_or(i32::from(cost), |spent| spent.max(0));
     let price = button(
         cmd,
         spec,
@@ -1756,16 +1849,16 @@ fn order_card(
     } else {
         text(cmd, price, "Free", 14., ink);
     }
-    if left.is_none() {
-        text(cmd, price, " Short of points", 13., ink);
-    } else {
+    if enabled {
         text(cmd, price, "  Order  [Enter]", 14., ink);
+    } else {
+        text(cmd, price, " Short of points", 13., ink);
     }
 }
 
 /// The floor of the yard: work on the hull as a whole, the stock of whole sections to
 /// drag onto the ship, and the way out: build the orders, then sail.
-fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
+fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia, ask: bool) {
     let floor = cmd
         .spawn((
             Floor,
@@ -1815,10 +1908,10 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
     };
 
     // The hull as a whole: how long and how wide she is, and the work on both. The
-    // figures for the work picked out float above the panel, so nothing moves.
+    // figures for the hull work just ordered float above the panel, so nothing moves.
     let hull = shelf(cmd, brass());
-    let picked = run.dock_job().filter(|job| run.hull_jobs().contains(job));
-    if let Some(job) = picked {
+    let receipt = run.dock_receipt.as_ref().filter(|receipt| receipt.on_hull);
+    if let Some(receipt) = receipt {
         let float = cmd
             .spawn((
                 Solid,
@@ -1837,7 +1930,15 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
                 ChildOf(hull),
             ))
             .id();
-        order_card(cmd, float, run, art, job, false);
+        order_card(
+            cmd,
+            float,
+            &receipt.before(),
+            art,
+            receipt.job,
+            false,
+            Some(receipt.spent),
+        );
     }
     let head = title(cmd, hull, art.hull.clone(), "HULL");
     spacer(cmd, head);
@@ -1897,22 +1998,15 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
     let need = need(run);
     for job in run.hull_jobs() {
         let refused = run.refusal(job);
-        let chosen = picked == Some(job);
-        let tint = if refused.is_some() || !job.fits(run) {
-            rule()
-        } else {
-            paper()
-        };
-        // A click picks the work out to read its figures, and a second orders it.
+        // A click orders the work at once. Work the yard cannot make, or the points left
+        // cannot pay for, takes no click.
+        let orderable = run.quote(job).is_some();
+        let tint = if orderable { paper() } else { rule() };
         let tile = button(
             cmd,
             works,
-            Some(if chosen {
-                Action::Draft(job)
-            } else {
-                Action::Pick(job)
-            }),
-            chosen,
+            orderable.then_some(Action::Draft(job)),
+            false,
             false,
             Node {
                 width: px(64),
@@ -1947,10 +2041,10 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
         };
         icon(cmd, tile, image, tint, 22.);
         if refused.is_none() && job.fits(run) {
-            let ink = if run.points_after(job).is_none() {
-                cards::Change::Cost.color()
-            } else {
+            let ink = if orderable {
                 brass()
+            } else {
+                cards::Change::Cost.color()
             };
             price_tag(cmd, tile, art, job.cost(), ink);
         }
@@ -2051,9 +2145,10 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
                         (Some(art.beam.clone()), format!("{:.1}", beam.metres()))
                     }
                     Refusal::Longest => (Some(art.length.clone()), "Max".to_string()),
-                    Refusal::Full(_) | Refusal::Length(_) | Refusal::Widest => {
-                        (None, "Full".to_string())
-                    }
+                    Refusal::Full(_)
+                    | Refusal::Length(_)
+                    | Refusal::Section(_)
+                    | Refusal::Widest => (None, "Full".to_string()),
                 };
                 if let Some(image) = image {
                     icon(cmd, caption, image, muted(), 9.);
@@ -2064,13 +2159,13 @@ fn floor(cmd: &mut Commands, root: Entity, run: &Campaign, art: &Insignia) {
     }
 
     spacer(cmd, floor);
-    finish(cmd, floor, run, art);
+    finish(cmd, floor, run, art, ask);
 }
 
 /// The way out of the yard, big enough to find at a glance, with the points left to spend
 /// above it: lock in the orders, then sail. It does its own work whatever refit is picked
 /// out, and says that points left over are banked for the next yard.
-fn finish(cmd: &mut Commands, parent: Entity, run: &Campaign, art: &Insignia) {
+fn finish(cmd: &mut Commands, parent: Entity, run: &Campaign, art: &Insignia, ask: bool) {
     let plan = run.plan();
     let points = run.points();
     let plural = |n: usize| if n == 1 { "" } else { "s" };
@@ -2084,6 +2179,24 @@ fn finish(cmd: &mut Commands, parent: Entity, run: &Campaign, art: &Insignia) {
         },
         Color::NONE,
     );
+    // How the round just sailed played, scored on the way out: a click saves it.
+    if ask {
+        let shelf = cmd
+            .spawn((
+                Solid,
+                RelativeCursorPosition::default(),
+                Node {
+                    padding: UiRect::all(px(10)),
+                    border: UiRect::top(px(2)),
+                    ..default()
+                },
+                BackgroundColor(panel()),
+                BorderColor::all(rule()),
+                ChildOf(stack),
+            ))
+            .id();
+        crate::ui::feedback::sheet(cmd, shelf, &format!("RATE ROUND {}", run.stage.round()));
+    }
     // The points left once the orders are built, and what the orders cost.
     let purse = cmd
         .spawn((

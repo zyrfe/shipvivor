@@ -1684,3 +1684,210 @@ fn a_horn_follows_its_ship_says_nothing_unless_blown_and_a_hush_stops_it() {
     assert_eq!(peak(&listen(&mut mixer, 1.)), 0.);
     assert!(!mixer.blowing());
 }
+
+/// A round of `calibre` inches into `plate` inches of plate, doing `dealt` damage if
+/// it gets through.
+fn round(calibre: f32, plate: f32, dealt: f32) -> Hit {
+    let turned = calibre <= plate;
+    Hit {
+        calibre: Some(calibre),
+        plate,
+        turned,
+        dealt: if turned { 0. } else { dealt },
+        harm: Harm::None,
+    }
+}
+/// How loud a hit plays one sound, and how fast, or nothing if it does not play it.
+fn voice(hit: Hit, sound: Sound) -> Option<(f32, f32)> {
+    hit.voices()
+        .find(|&(s, ..)| s == sound)
+        .map(|(_, level, pace)| (level, pace))
+}
+fn strength(hit: Hit, sound: Sound) -> f32 {
+    voice(hit, sound).map_or(0., |(level, _)| level)
+}
+
+#[test]
+fn a_light_round_taps_heavy_plate_and_a_heavy_one_on_thin_plate_is_all_tear() {
+    use Sound::*;
+    // A secondary's round on a capital ship's beam barely ticks, and is gone at once.
+    let tick = round(2.8, 19., 0.);
+    assert!(strength(tick, Tap) > 10. * strength(tick, Clank));
+    assert!(
+        [Pierce, Blast, Shudder]
+            .iter()
+            .all(|&s| voice(tick, s).is_none())
+    );
+    // A cruiser's round on plate that only just turns it clanks, and harder than a
+    // light round on plate that only just turns that.
+    let held = round(8., 10., 0.);
+    assert!(strength(held, Clank) > 3. * strength(held, Tap));
+    assert!(strength(held, Clank) > 2. * strength(round(3., 3.5, 0.), Clank));
+    // The heavier round is played slower, and so deeper and longer.
+    let pace = |hit: Hit| voice(hit, Clank).map(|(_, pace)| pace).unwrap();
+    assert!(pace(round(15., 19., 0.)) < 0.7 && pace(round(3., 4., 0.)) > 1.3);
+    // A round that only just gets through still clanks as it goes. One far too heavy
+    // for the plate tears it and hardly rings it, and both burst inside her.
+    let barely = round(3.1, 3., 1.);
+    assert!(strength(barely, Clank) > strength(barely, Pierce));
+    let punched = round(12., 1., 11.);
+    assert!(strength(punched, Pierce) > 3. * strength(punched, Clank));
+    assert!(voice(barely, Blast).is_some() && voice(punched, Blast).is_some());
+    // The burst inside is as loud as the damage, and heavy damage shakes her frames.
+    assert!(strength(round(8., 1., 12.), Blast) > 2. * strength(round(8., 1., 2.), Blast));
+    assert!(voice(round(8., 1., 2.), Shudder).is_none());
+    assert!(voice(round(8., 1., 12.), Shudder).is_some());
+    // A section lost gives way, and a magazine going up does that and bursts again.
+    let costly = |harm| Hit {
+        harm,
+        ..round(8., 1., 12.)
+    };
+    assert!(voice(costly(Harm::Knocked), Gutted).is_none());
+    assert!(voice(costly(Harm::Wrecked), Gutted).is_some());
+    let blasts = |hit: Hit| hit.voices().filter(|&(s, ..)| s == Blast).count();
+    assert_eq!(
+        (
+            blasts(costly(Harm::Wrecked)),
+            blasts(costly(Harm::Detonated))
+        ),
+        (1, 2)
+    );
+    // A ram or a bomb makes its own sound, and is heard here only for what it did.
+    let rammed = Hit {
+        calibre: None,
+        plate: 1.,
+        turned: false,
+        dealt: 16.,
+        harm: Harm::Wrecked,
+    };
+    let heard: Vec<Sound> = rammed.voices().map(|(s, ..)| s).collect();
+    assert_eq!(heard, [Shudder, Gutted]);
+}
+
+/// What the bridge hears of a hit this many metres off on the starboard beam.
+fn struck(hit: Hit, abeam: f32, secs: f32) -> Vec<[f32; 2]> {
+    let (cues, mut mixer) = desk(Air::SCALED);
+    cues.send(Cue::Hit {
+        position: Vec3::new(abeam, 0., 0.),
+        serial: 0,
+        hit,
+    });
+    listen(&mut mixer, secs)
+}
+fn left(heard: &[[f32; 2]]) -> Vec<f32> {
+    heard.iter().map(|frame| frame[0]).collect()
+}
+
+#[test]
+fn a_tap_is_quiet_bright_and_short_and_a_round_that_gets_in_bursts_low_after_it() {
+    let tap = struck(round(2.8, 19., 0.), 12., 2.);
+    let clank = struck(round(8., 10., 0.), 12., 2.);
+    // The tap is far quieter than a clank, brighter, and over sooner.
+    assert!(
+        peak(&tap) < 0.5 * peak(&clank),
+        "{} {}",
+        peak(&tap),
+        peak(&clank)
+    );
+    assert!(brightness(&tap) > 1.5 * brightness(&clank));
+    let tail = |heard: &[[f32; 2]]| {
+        let start = (onset(heard) * RATE) as usize + (0.15 * RATE) as usize;
+        level(&heard[start..start + (0.4 * RATE) as usize]) / peak(heard)
+    };
+    assert!(
+        tail(&tap) < 0.6 * tail(&clank),
+        "{} {}",
+        tail(&tap),
+        tail(&clank)
+    );
+    // The same round through thin plate bursts inside her: after the punch the sound
+    // is low and heavy, far more of it than the clank leaves behind.
+    let holed = struck(round(8., 1., 10.), 12., 2.);
+    let after = |heard: &[[f32; 2]]| {
+        let start = (onset(heard) * RATE) as usize + (0.06 * RATE) as usize;
+        left(&heard[start..start + (0.5 * RATE) as usize])
+    };
+    let (burst, rung) = (after(&holed), after(&clank));
+    let power = |s: &[f32]| s.iter().map(|x| x * x).sum::<f32>();
+    assert!(power(&low(&burst, 250.)) > 3. * power(&low(&rung, 250.)));
+    // Smothered by the steel round it: little of it lies high.
+    assert!(above(&burst, 2000.) < 0.1, "{}", above(&burst, 2000.));
+    // A section lost goes on giving way long after a round that did little harm.
+    let wrecked = struck(
+        Hit {
+            harm: Harm::Wrecked,
+            ..round(8., 1., 16.)
+        },
+        12.,
+        4.,
+    );
+    let light = struck(round(3., 1., 1.), 12., 4.);
+    let late = |heard: &[[f32; 2]]| level(&heard[(1.5 * RATE) as usize..(2.5 * RATE) as usize]);
+    assert!(
+        late(&wrecked) > 10. * late(&light),
+        "{} {}",
+        late(&wrecked),
+        late(&light)
+    );
+    assert!(level(&wrecked) > 2. * level(&light));
+}
+
+#[test]
+fn a_full_air_gives_up_its_faintest_sound_so_a_blow_on_her_outlasts_far_splashes() {
+    let (cues, mut mixer) = desk(Air::SCALED);
+    let far = |n: u64| {
+        let bearing = n as f32 * 0.37;
+        Vec3::new(bearing.sin(), 0., -bearing.cos()) * 450.
+    };
+    let splash = |cues: &Cues, n: u64| {
+        cues.send(Cue::Emit {
+            sound: Sound::Splash,
+            position: far(n),
+            serial: n,
+        })
+    };
+    for n in 0..64 {
+        splash(&cues, n);
+    }
+    listen(&mut mixer, 0.05);
+    assert_eq!(mixer.sounding(), 64);
+    cues.send(Cue::Hit {
+        position: Vec3::new(3., 0., 6.),
+        serial: 0,
+        hit: Hit {
+            calibre: Some(12.),
+            plate: 1.,
+            turned: false,
+            dealt: 16.,
+            harm: Harm::Wrecked,
+        },
+    });
+    // A fast-firing battery's rounds keep falling far off, eight a second. The round
+    // bursts inside her through them, and the section goes on giving way long after
+    // the burst's tail has faded to no more than a far splash.
+    let fall = |cues: &Cues, mixer: &mut Mixer, rounds: std::ops::Range<u64>| {
+        for n in rounds {
+            splash(cues, n);
+            listen(mixer, 0.125);
+        }
+    };
+    fall(&cues, &mut mixer, 64..68);
+    assert_eq!(mixer.making(Sound::Blast).0, 1);
+    fall(&cues, &mut mixer, 68..88);
+    assert_eq!(mixer.making(Sound::Gutted).0, 1);
+    // A sound fainter than everything in a full air finds no voice, and takes none.
+    let (cues, mut mixer) = desk(Air::SCALED);
+    for n in 0..64 {
+        let at = Vec3::new(n as f32 % 8. - 4., 3., (n / 8) as f32 * 2. - 8.);
+        cues.send(Cue::Emit {
+            sound: Sound::MainGun,
+            position: at,
+            serial: n,
+        });
+    }
+    listen(&mut mixer, 0.02);
+    splash(&cues, 99);
+    listen(&mut mixer, 0.02);
+    assert_eq!(mixer.making(Sound::Splash).0, 0);
+    assert_eq!(mixer.making(Sound::MainGun).0, 64);
+}

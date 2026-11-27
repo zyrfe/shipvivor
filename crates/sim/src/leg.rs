@@ -249,7 +249,6 @@ pub fn sail(setup: Setup) -> Report {
 
 /// Sail one leg from a fresh, stock ship for at most `limit` seconds.
 pub fn sail_for(setup: Setup, limit: f32) -> Report {
-    let started = std::time::Instant::now();
     let mut run = Run::default();
     run.stage = setup.stage;
     run.grade = setup.grade;
@@ -259,12 +258,23 @@ pub fn sail_for(setup: Setup, limit: f32) -> Report {
         run.course.push(setup.stage);
     }
     run.seed = setup.seed;
+    sail_leg(&mut run, setup, &mut Bot::new(setup.temperament), limit, 1.)
+}
+
+/// Sail the leg `run` stands at the start of, with `bot` at the helm, for at most `limit`
+/// seconds, until it ends: in her yard, at the intercept, won or lost. The run is left
+/// as the leg left it. `pressure` scales the harm the enemy does her beyond the round's
+/// own [`crate::sector::PRESSURE`] (see `Battle::with_pressure`).
+pub fn sail_leg(run: &mut Run, setup: Setup, bot: &mut Bot, limit: f32, pressure: f32) -> Report {
+    let started = std::time::Instant::now();
     let sector = Sector::of(setup.stage, setup.grade);
     let chart = sector.chart(setup.seed);
-    let mut battle = open_battle(&sector, &chart, &run, Rewards::Direct, true);
+    let battle = open_battle(&sector, &chart, run, Rewards::Direct, true);
+    // The round's own pressure, turned further by the simulation's.
+    let own = battle.pressure();
+    let mut battle = battle.with_pressure(own * pressure);
     let mut helm = helm_at_start(&chart, &battle, true);
     Bot::work_up(&mut helm);
-    let mut bot = Bot::new(setup.temperament);
     let minutes = setup.stage.mission().minutes;
     let max_steps = (limit / STEP).round() as usize;
 
@@ -315,7 +325,7 @@ pub fn sail_for(setup: Setup, limit: f32) -> Report {
                     break;
                 };
                 run.install(card);
-                fit_player(&mut battle, &run);
+                fit_player(&mut battle, run);
                 report.cards.push(format!("{card:?}"));
                 continue;
             }
@@ -336,20 +346,19 @@ pub fn sail_for(setup: Setup, limit: f32) -> Report {
         report.kills = u32::from(run.objectives.kills);
         report.yards = battle.ruined_yards();
         report.level = run.level;
-        let command = bot.decide(&run, &battle, &helm, held, STEP);
+        let command = bot.decide(run, &battle, &helm, held, STEP);
         let ring = isize::from(command.notch) - isize::from(helm.notch());
         if ring != 0 {
             helm.ring(ring);
         }
-        held = steer(&run, &battle, &mut helm, command.rudder, STEP, true);
+        held = steer(run, &battle, &mut helm, command.rudder, STEP, true);
         let ev = engage(
-            &run,
+            run,
             &mut battle,
             &mut helm,
             STEP,
             command.aim,
             None,
-            command.ammo,
         );
         // Main-battery hits, counted as the game's run logs count them: the armour
         // effects her main guns raised this step.
@@ -367,7 +376,7 @@ pub fn sail_for(setup: Setup, limit: f32) -> Report {
                     )
             })
             .count() as u32;
-        let launched = settle(&mut run, &mut battle, &helm, STEP, &ev, command.torpedo);
+        let launched = settle(run, &mut battle, &helm, STEP, &ev, command.torpedo);
         t += STEP;
         report.yards = battle.ruined_yards();
         if run.phase() == Phase::Sailing {

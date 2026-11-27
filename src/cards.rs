@@ -7,7 +7,7 @@ use bevy::{
     window::{CursorGrabMode, CursorOptions},
 };
 use shipvivor_campaign::{CALIBRES, Card, Fittings, LOADER_CUT, Rarity, Run, limits};
-use shipvivor_encounter::{Ammo, MainShell};
+use shipvivor_encounter::ArmorGrade;
 use shipvivor_navigation::Helm;
 use shipvivor_shipyard::{
     BOMB_DAMAGE, Component, Design, INFLOW, MISSILE_DAMAGE, PUMP, Protection,
@@ -16,6 +16,8 @@ use std::borrow::Cow;
 
 const KNOTS_PER_MPS: f32 = 1.94384;
 const WIDTH: f32 = 268.;
+/// The most ranks a card shows as diamonds.
+const MOST_DIAMONDS: u16 = 12;
 const HEIGHT: f32 = 380.;
 /// Seconds between one card landing and the next.
 const STAGGER: f32 = 0.09;
@@ -133,8 +135,7 @@ impl Face {
         self.rank.0 == 0
             && matches!(
                 card,
-                Card::ArmorPiercing
-                    | Card::TwinSecondaries
+                Card::TwinSecondaries
                     | Card::SecondaryTurrets
                     | Card::TripleTurrets
                     | Card::QuadTurrets
@@ -178,11 +179,35 @@ fn knots(f: Fittings) -> String {
         Helm::FULL_AHEAD * f.speed_factor() * KNOTS_PER_MPS
     )
 }
-fn ap(f: Fittings) -> MainShell {
-    MainShell {
-        ammo: Ammo::Ap,
-        ..f.round()
+/// Metres out at which a card reckons what the main battery's round pierces.
+const PIERCING_RANGE: f32 = 400.;
+/// Inches of plate the main battery's round goes through, [`PIERCING_RANGE`] out.
+fn piercing(f: Fittings) -> f32 {
+    let round = f.round();
+    round.penetration_at(PIERCING_RANGE / round.speed())
+}
+fn pierces(f: Fittings) -> String {
+    format!("{:.1} in", piercing(f))
+}
+/// The heaviest plate the main battery's round opens [`PIERCING_RANGE`] out.
+fn opens(f: Fittings) -> &'static str {
+    [
+        ArmorGrade::Capital,
+        ArmorGrade::Reinforced,
+        ArmorGrade::Light,
+    ]
+    .into_iter()
+    .find(|grade| piercing(f) >= grade.inches())
+    .map_or("None", ArmorGrade::label)
+}
+/// The piercing rows for a card that changes the main battery's round: inches of plate
+/// pierced, and the heaviest grade opened once that changes.
+fn piercing_stats(now: Fittings, next: Fittings) -> Vec<Stat> {
+    let mut stats = vec![stat("Pierces", pierces(now), pierces(next), Change::Gain)];
+    if opens(now) != opens(next) {
+        stats.push(stat("Opens", opens(now), opens(next), Change::Gain));
     }
+    stats
 }
 
 pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
@@ -191,6 +216,11 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
     let (wing, wing_next) = (now.secondaries(), next.secondaries());
     let (flak, flak_next) = (now.anti_air(), next.anti_air());
     let (craft, craft_next) = (now.strike_craft(), next.strike_craft());
+    // The most ranks of a card that wants room which her deck or her plane sections
+    // have room for.
+    let room = |most: u16| {
+        Some(shipvivor_campaign::deck_ranks(card, design).map_or(most, |room| most.min(room)))
+    };
     match card {
         // Turrets of different bores load at their own pace, so each bore aboard has
         // its own line.
@@ -239,33 +269,19 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
                     Cost,
                 ),
                 stat("Traverse", traverse(now), traverse(next), Cost),
-            ],
+            ]
+            .into_iter()
+            .chain(piercing_stats(now, next))
+            .collect(),
             flavour: "A heavier shell loads and trains more slowly.",
         },
-        Card::Caps => {
-            let (before, after) = (ap(now).penetration(), ap(next).penetration());
-            let (a, b) = if before != after {
-                (before, after)
-            } else {
-                (ap(now).at_contact(1.), ap(next).at_contact(1.))
-            };
-            Face {
-                kind: Kind::Ammunition,
-                name: "Piercing Caps",
-                rank: (now.caps, None),
-                stats: vec![stat(
-                    if before != after {
-                        "AP opens"
-                    } else {
-                        "AP at range"
-                    },
-                    a.plate_label(),
-                    b.plate_label(),
-                    Gain,
-                )],
-                flavour: "Hardened caps carry the AP round through heavier plate.",
-            }
-        }
+        Card::Caps => Face {
+            kind: Kind::Ammunition,
+            name: "Piercing Caps",
+            rank: (now.caps, Some(limits::CAPS)),
+            stats: piercing_stats(now, next),
+            flavour: "Hardened caps drive every round through heavier plate.",
+        },
         Card::Velocity => Face {
             kind: Kind::Ammunition,
             name: "Shell Velocity",
@@ -283,8 +299,11 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
                     metres(next.round().reach()),
                     Gain,
                 ),
-            ],
-            flavour: "A flatter arc, a shorter lead and a longer reach.",
+            ]
+            .into_iter()
+            .chain(piercing_stats(now, next))
+            .collect(),
+            flavour: "A flatter arc, a shorter lead, a longer reach and a harder blow.",
         },
         Card::Turbines => Face {
             kind: Kind::Machinery,
@@ -309,47 +328,31 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
             )],
             flavour: "Wider gunhouses, more barrels in every salvo.",
         },
-        Card::ArmorPiercing => Face {
-            kind: Kind::Ammunition,
-            name: "Armor-Piercing",
-            rank: (now.armor_piercing, Some(1)),
-            stats: vec![
-                stat(
-                    "AP opens",
-                    "",
-                    format!("{} plate", ap(next).penetration().plate_label()),
-                    New,
-                ),
-                stat("Light hulls", "", "Half damage", Cost),
-                stat("Switch", "", "Q key", New),
-            ],
-            flavour: "Load AP for armour, HE for everything else.",
-        },
         Card::MoreSecondaries => Face {
             kind: Kind::Secondaries,
             name: "More Secondaries",
-            rank: (now.wing_mounts, Some(2)),
+            rank: (now.wing_mounts, room(limits::WING_MOUNTS)),
             stats: vec![stat("Guns a side", wing.per_side, wing_next.per_side, Gain)],
-            flavour: "Another shielded gun each beam, by the bridge and then aft.",
+            flavour: "Another gun each beam, out along the deck edge from the bridge. A longer hull has room for more.",
         },
         Card::HeavySecondaries => Face {
             kind: Kind::Secondaries,
             name: "Heavier Secondaries",
-            rank: (now.wing_shells, Some(2)),
+            rank: (now.wing_shells, Some(limits::WING_SHELLS)),
             stats: vec![stat("Damage", wing.damage, wing_next.damage, Gain)],
             flavour: "A heavier round for the close-range guns.",
         },
         Card::QuickSecondaries => Face {
             kind: Kind::Secondaries,
             name: "Secondary Loaders",
-            rank: (now.wing_loaders, Some(3)),
+            rank: (now.wing_loaders, Some(limits::WING_LOADERS)),
             stats: quicker([("Each gun".into(), wing.reload, wing_next.reload)]),
             flavour: "Ready-use lockers beside every gun.",
         },
         Card::SecondaryRange => Face {
             kind: Kind::Secondaries,
             name: "Rangefinders",
-            rank: (now.wing_range, Some(2)),
+            rank: (now.wing_range, Some(limits::WING_RANGE)),
             stats: vec![stat(
                 "Reach",
                 format!("{:.0} m", wing.range),
@@ -360,10 +363,14 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
         },
         Card::TwinSecondaries => Face {
             kind: Kind::Secondaries,
-            name: "Twin Secondaries",
-            rank: (now.wing_twin, Some(1)),
+            name: match wing_next.barrels {
+                ..=2 => "Twin Secondaries",
+                3 => "Triple Secondaries",
+                _ => "Quad Secondaries",
+            },
+            rank: (now.wing_twin, Some(limits::WING_BARRELS)),
             stats: vec![stat("Barrels", wing.barrels, wing_next.barrels, Gain)],
-            flavour: "Every wing gun becomes a twin mount. Both barrels fire.",
+            flavour: "Another barrel on every wing gun. They all fire together.",
         },
         Card::TrainingGear => Face {
             kind: Kind::Gunnery,
@@ -421,9 +428,9 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
         Card::MoreAntiAir => Face {
             kind: Kind::AntiAir,
             name: "More AA Guns",
-            rank: (now.aa_mounts, Some(limits::AA_MOUNTS)),
+            rank: (now.aa_mounts, room(limits::AA_MOUNTS)),
             stats: vec![stat("Guns", flak.mounts, flak_next.mounts, Gain)],
-            flavour: "Another pair of guns, abaft the after funnel and then between the funnels.",
+            flavour: "Another pair of guns in tubs raised over the deck. A longer hull has room for more.",
         },
         Card::HeavyAntiAir => Face {
             kind: Kind::AntiAir,
@@ -488,7 +495,7 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
         Card::MorePlanes => Face {
             kind: Kind::StrikeCraft,
             name: "More Planes",
-            rank: (now.planes, Some(limits::PLANES)),
+            rank: (now.planes, room(limits::PLANES)),
             stats: vec![stat("Planes", craft.planes, craft_next.planes, Gain)],
             flavour: "Another catapult and floatplane. Each hunts the nearest raider the others are not after.",
         },
@@ -761,6 +768,11 @@ fn spawn_card(
         ))
         .id();
     match face.rank {
+        // More ranks than diamonds fit across the card are counted in words.
+        (owned, Some(most)) if most > MOST_DIAMONDS => {
+            let words = format!("RANK {} OF {most}", (owned + 1).min(most));
+            text(cmd, ranks, words, 12., tint);
+        }
         (owned, Some(most)) => {
             for i in 0..most {
                 let (fill, glow) = if i < owned {

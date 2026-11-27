@@ -26,7 +26,10 @@ const SIRENS: usize = 4;
 /// Three bases' spotters, an air station's attacker and eight harriers.
 pub const AIRCRAFT: usize = 12;
 const NOTICES: usize = 8;
-const QUEUE: usize = 1024;
+/// Cues the game may send before the mixer next looks. A stalled frame makes the game
+/// catch up a dozen ticks and more at once, each reporting every shell in the air, and
+/// a heavy fight has a hundred and more of those.
+const QUEUE: usize = 4096;
 /// Seconds to close or open the output when world time holds or resumes.
 const GATE: f32 = 0.008;
 const MASTER: f32 = 0.7;
@@ -162,6 +165,11 @@ impl Mixer {
         self.flights.len()
     }
 
+    /// Whether the flight of the shell with this serial is being followed.
+    pub fn following(&self, serial: u64) -> bool {
+        self.flights.iter().any(|flight| flight.serial == serial)
+    }
+
     /// Sirens that are turning, or have stopped with their last sound still on its way.
     pub fn wailing(&self) -> usize {
         self.sirens.iter().filter(|siren| !siren.spent()).count()
@@ -279,12 +287,22 @@ impl Mixer {
                 sound,
                 position,
                 serial,
-            } => self.emit(sound, position, serial, 1.),
+            } => self.emit(sound, position, serial, 1., 1.),
             Cue::Notice {
                 sound,
                 level,
                 serial,
-            } => self.emit(sound, Vec3::ZERO, serial, level.clamp(0., 1.)),
+            } => self.emit(sound, Vec3::ZERO, serial, level.clamp(0., 1.), 1.),
+            Cue::Hit {
+                position,
+                serial,
+                hit,
+            } => {
+                for (n, (sound, level, pace)) in hit.voices().enumerate() {
+                    let serial = serial.wrapping_add(n as u64);
+                    self.emit(sound, position, serial, level, f64::from(pace));
+                }
+            }
             Cue::Shell {
                 serial,
                 position,
@@ -383,16 +401,18 @@ impl Mixer {
         }
     }
 
-    /// A sound made once, at `strength` times its usual level.
-    fn emit(&mut self, sound: Sound, position: Vec3, serial: u64, strength: f32) {
+    /// A sound made once, at `strength` times its usual level and played `pace` times
+    /// as fast as it was cast.
+    fn emit(&mut self, sound: Sound, position: Vec3, serial: u64, strength: f32, pace: f64) {
         let levels = sound.levels().map(|level| level * strength);
         // A small spread of playback speed keeps repeated takes from sounding identical.
         let detune = (serial.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40) as f64 / (1 << 24) as f64;
-        let speed = if sound.tuned() {
-            1.
-        } else {
-            0.96 + 0.08 * detune
-        };
+        let speed = pace
+            * if sound.tuned() {
+                1.
+            } else {
+                0.96 + 0.08 * detune
+            };
         let cast = Bank::index(sound, serial);
         let audible = |gains: [f32; 3]| (0..3).any(|layer| levels[layer] * gains[layer] >= FAINT);
         if sound.notice() {
@@ -454,17 +474,21 @@ impl Mixer {
         }
     }
 
-    /// Give a new sound a voice. A full pool drops the voice that has been audible longest.
+    /// Give a new sound a voice. A full pool gives up the voice heard least, which is
+    /// the one the rest would mask, unless the new sound would be heard less still. So
+    /// in a heavy fight her own deck is heard over a far splash, and a blow on her goes
+    /// on giving way while her guns fire.
     fn admit(&mut self, voice: Voice) {
         if self.voices.len() == VOICES {
-            let air = &self.air;
-            let longest = (0..VOICES)
-                .max_by(|&a, &b| {
-                    let (a, b) = (self.voices[a].spent(air), self.voices[b].spent(air));
-                    a.total_cmp(&b)
-                })
+            let (bank, air) = (&self.bank, &self.air);
+            let heard = |voice: &Voice| voice.loudness(bank.cast(voice.cast()), air);
+            let (least, faintest) = (self.voices.iter().map(heard).enumerate())
+                .min_by(|a, b| a.1.total_cmp(&b.1))
                 .expect("a full pool has voices");
-            self.voices.swap_remove(longest);
+            if heard(&voice) < faintest {
+                return;
+            }
+            self.voices.swap_remove(least);
         }
         self.voices.push(voice);
     }

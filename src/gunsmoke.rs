@@ -339,6 +339,19 @@ pub(crate) fn gather(
     }
     smoke.puffs.retain(|puff| puff.age < puff.life);
     for fx in battle.effects().iter().filter(|fx| fx.age == 0.) {
+        // Fuel going up flashes upward and throws up a small mushroom cloud.
+        if let EffectKind::FuelBlast { depot } = fx.kind {
+            let at = Vec3::new(fx.body.pos.x, fx.height, fx.body.pos.y);
+            smoke.flashes.push(Flash {
+                at,
+                aim: Vec3::Y,
+                age: 0.,
+                heavy: depot,
+                shore: true,
+            });
+            mushroom(&mut smoke.puffs, fx.body.id, at, depot);
+            continue;
+        }
         let EffectKind::Muzzle(battery) = fx.kind else {
             continue;
         };
@@ -388,6 +401,65 @@ fn puff_out(puffs: &mut Vec<Puff>, id: u64, at: Vec3, aim: Vec3, heavy: bool) {
             size: PUFF_SIZE[kind] * (1. - 0.18 * reach),
             seed,
             thick: 1. - 0.2 * reach,
+        });
+    }
+}
+
+/// Fuel going up on an airfield: a cap of thick smoke thrown up and out in a ring over a
+/// narrower stem, and dust skirting out along the ground beneath, which rolls up into a
+/// small mushroom cloud and drifts off downwind. The depot's stands twice a truck's height.
+fn mushroom(puffs: &mut Vec<Puff>, id: u64, at: Vec3, depot: bool) {
+    use std::f32::consts::TAU;
+    let scale = if depot { 2.1 } else { 1. };
+    // A puff thrown at some speed comes to rest about this share of it away.
+    let carry = 1. / (1. / THROW.1).ln();
+    let seed = |k: u64| (id.wrapping_mul(0x9E37_79B9).wrapping_add(k * 131) >> 7) as u8;
+    let cap = 13. * scale;
+    let ring = 3.4 * scale;
+    let base = at + Vec3::Y * 1.2;
+    for k in 0..7_u64 {
+        let around = k as f32 * TAU / 6. + (id % 7) as f32;
+        let (out, up) = if k < 6 {
+            (Vec3::new(around.cos(), 0., around.sin()), cap)
+        } else {
+            (Vec3::ZERO, cap + 2.6 * scale)
+        };
+        puffs.push(Puff {
+            at: base,
+            thrown: (Vec3::Y * up + out * ring) / carry,
+            drift: Vec3::ZERO,
+            age: 0.,
+            life: 12. * scale.sqrt(),
+            size: 2.5 * scale,
+            seed: seed(k),
+            thick: 1.,
+        });
+    }
+    for k in 0..4_u64 {
+        let up = cap * (0.18 + 0.19 * k as f32);
+        puffs.push(Puff {
+            at: base,
+            thrown: Vec3::Y * up / carry,
+            drift: Vec3::ZERO,
+            age: 0.,
+            life: 9. * scale.sqrt(),
+            size: 1.5 * scale * (1.1 - 0.12 * k as f32),
+            seed: seed(10 + k),
+            thick: 0.85,
+        });
+    }
+    for k in 0..4_u64 {
+        let around = k as f32 * TAU / 4. + 0.4;
+        let out = Vec3::new(around.cos(), 0., around.sin());
+        puffs.push(Puff {
+            at: at + Vec3::Y * 0.4,
+            thrown: (out * 6. * scale + Vec3::Y * 0.4) / carry,
+            drift: Vec3::ZERO,
+            age: 0.,
+            life: 6. * scale.sqrt(),
+            size: 1.6 * scale,
+            seed: seed(20 + k),
+            thick: 0.55,
         });
     }
 }

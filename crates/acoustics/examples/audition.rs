@@ -22,9 +22,15 @@
 //! With `shore` only a shore gun heard at three ranges, a triple's salvo and a heavy
 //! battery are rendered:
 //! `cargo run -p shipvivor-acoustics --example audition -- shore.wav shore`
+//!
+//! With `hits` only rounds striking her are rendered, under way at half ahead: rounds
+//! her plate turns, from a tap to a deep clang, rounds that get through, from a light
+//! punch to a heavy round through bare plate, and sections lost:
+//! `cargo run -p shipvivor-acoustics --example audition -- hits.wav hits`
 use glam::Vec3;
 use shipvivor_acoustics::{
-    Air, Alert, Ambience, Bank, Cue, Cues, Haunt, Mixer, Place, Rotor, SAMPLE_RATE, Sound, console,
+    Air, Alert, Ambience, Bank, Cue, Cues, Harm, Haunt, Hit, Mixer, Place, Rotor, SAMPLE_RATE,
+    Sound, console,
 };
 use std::{env, fs, io};
 
@@ -57,6 +63,8 @@ enum Event {
     Plane(Option<Course>),
     /// The game speaking at a strength of its own, in this take.
     Notice(Sound, f32, u64),
+    /// A blow on her, at a point on her, as her plating took it.
+    Hit(Hit, Vec3),
 }
 
 /// The way an aeroplane flies.
@@ -148,6 +156,14 @@ impl Stage {
                         level,
                         serial,
                     }),
+                    Event::Hit(hit, position) => {
+                        self.serial += 1;
+                        self.cues.send(Cue::Hit {
+                            position,
+                            serial: self.serial,
+                            hit,
+                        });
+                    }
                     Event::Order(throttle) => {
                         self.throttle = throttle;
                         self.emit(Sound::Telegraph, BRIDGE);
@@ -450,6 +466,146 @@ fn countdown(stage: &mut Stage) {
     }
 }
 
+/// A run of blows on her under one title: each named, as her plating took it, and where.
+type Volley = (&'static str, Vec<(&'static str, Hit, Vec3)>);
+
+/// Rounds striking her under way at half ahead, a few seconds apart, each where it
+/// struck: on her side amidships to starboard, forward to port, or aft. Every hit is
+/// printed with the second it is heard at.
+fn hits(stage: &mut Stage) {
+    // A round of `calibre` inches into `plate` inches of plate, doing `dealt` damage
+    // if it gets through, and costing her `harm`.
+    let round = |calibre: f32, plate: f32, dealt: f32, harm| Hit {
+        calibre: Some(calibre),
+        plate,
+        turned: calibre <= plate,
+        dealt: if calibre <= plate { 0. } else { dealt },
+        harm,
+    };
+    let none = Harm::None;
+    let (amidships, forward, aft) = (
+        Vec3::new(2.4, 2.2, 4.),
+        Vec3::new(-2.2, 2.2, -10.),
+        Vec3::new(2., 2.2, 14.),
+    );
+    let groups: [Volley; 3] = [
+        (
+            "rounds her plate turns",
+            vec![
+                (
+                    "a secondary's 2.8-inch round on 19 inches: a tap",
+                    round(2.8, 19., 0., none),
+                    amidships,
+                ),
+                (
+                    "the same round on 4 inches",
+                    round(2.8, 4., 0., none),
+                    forward,
+                ),
+                (
+                    "a destroyer's 5-inch on 7 inches",
+                    round(5., 7., 0., none),
+                    amidships,
+                ),
+                (
+                    "a cruiser's 8-inch on 10 inches: the old clank",
+                    round(8., 10., 0., none),
+                    aft,
+                ),
+                (
+                    "a battleship's 12-inch on 13 inches: a deep clang",
+                    round(12., 13., 0., none),
+                    amidships,
+                ),
+                (
+                    "a heavy battery's 15-inch on 19 inches",
+                    round(15., 19., 0., none),
+                    forward,
+                ),
+            ],
+        ),
+        (
+            "rounds that get through",
+            vec![
+                (
+                    "a 2.8-inch through stock plate, a scratch",
+                    round(2.8, 1., 0.5, none),
+                    amidships,
+                ),
+                (
+                    "a 5-inch that only just gets through 4.5 inches",
+                    round(5., 4.5, 3., none),
+                    forward,
+                ),
+                (
+                    "an 8-inch through stock plate",
+                    round(8., 1., 6., none),
+                    amidships,
+                ),
+                (
+                    "a 12-inch through stock plate",
+                    round(12., 1., 11., none),
+                    aft,
+                ),
+                (
+                    "a 15-inch through bare plate, a gun knocked out",
+                    round(15., 0., 24., Harm::Knocked),
+                    amidships,
+                ),
+            ],
+        ),
+        (
+            "sections lost",
+            vec![
+                (
+                    "an 8-inch that wrecks a section",
+                    round(8., 1., 14., Harm::Wrecked),
+                    amidships,
+                ),
+                (
+                    "a 12-inch into a magazine",
+                    round(12., 1., 20., Harm::Detonated),
+                    aft,
+                ),
+            ],
+        ),
+    ];
+    stage.play(
+        "under way at half ahead",
+        3.,
+        true,
+        &[(0., Event::Order(0.5))],
+    );
+    for (title, group) in &groups {
+        let gap = if *title == "sections lost" { 6. } else { 3. };
+        let start = stage.frames.len() as f32 / SAMPLE_RATE as f32;
+        let script: Vec<(f32, Event)> = (group.iter().enumerate())
+            .map(|(n, &(name, hit, at))| {
+                println!("{:>8.1} s  {name}", start + 0.5 + gap * n as f32);
+                (0.5 + gap * n as f32, Event::Hit(hit, at))
+            })
+            .collect();
+        stage.play(title, 0.5 + gap * group.len() as f32, true, &script);
+    }
+    // Then each alone, with her machinery stopped, four seconds apart.
+    let Stage { frames, .. } = std::mem::replace(stage, Stage::new());
+    stage.frames = frames;
+    let start = stage.frames.len() as f32 / SAMPLE_RATE as f32;
+    let alone: Vec<_> = groups.iter().flat_map(|(_, group)| group).collect();
+    let script: Vec<(f32, Event)> = (alone.iter().enumerate())
+        .map(|(n, &&(name, hit, at))| {
+            println!("{:>8.1} s  alone: {name}", start + 0.5 + 4. * n as f32);
+            (0.5 + 4. * n as f32, Event::Hit(hit, at))
+        })
+        .collect();
+    stage.play(
+        "each alone, machinery stopped",
+        0.5 + 4. * alone.len() as f32,
+        false,
+        &script,
+    );
+}
+
 fn main() -> io::Result<()> {
     let path = env::args().nth(1).unwrap_or_else(|| "audition.wav".into());
     let mut stage = Stage::new();
@@ -494,6 +650,12 @@ fn main() -> io::Result<()> {
     }
     if env::args().nth(2).as_deref() == Some("shore") {
         shore_guns(&mut stage);
+        fs::write(&path, wav(&stage.frames))?;
+        println!("wrote {path}");
+        return Ok(());
+    }
+    if env::args().nth(2).as_deref() == Some("hits") {
+        hits(&mut stage);
         fs::write(&path, wav(&stage.frames))?;
         println!("wrote {path}");
         return Ok(());

@@ -185,7 +185,7 @@ fn stat_art(label: &str, card: Card, art: &Insignia) -> Option<Handle<Image>> {
         "Range" => art.fitting(Card::SecondaryRange),
         "Reload" if secondary => art.fitting(Card::QuickSecondaries),
         "Reload" => art.fitting(Card::Loader),
-        "AP opens" | "AP at range" => art.fitting(Card::ArmorPiercing),
+        "Pierces" => art.fitting(Card::Caps),
         "Speed" | "Top speed" => art.fitting(Card::Velocity),
         "Barrels" if secondary => art.fitting(Card::TwinSecondaries),
         "Barrels" => art.fitting(Card::TripleTurrets),
@@ -577,6 +577,10 @@ pub(super) fn refusal(cmd: &mut Commands, spec: Entity, art: &Insignia, why: Ref
             format!("{:.0} m at most", shipvivor_campaign::MAX_LENGTH),
         ),
         Refusal::Widest => (None, "Widest beam fitted".to_string()),
+        Refusal::Section(module) => (
+            Some(super::catalog::stock_art(module, art)),
+            "Needs another".to_string(),
+        ),
     };
     if let Some(image) = image {
         icon(cmd, row, image, brass(), 14.);

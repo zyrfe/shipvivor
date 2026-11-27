@@ -81,6 +81,40 @@ fn gates_and_their_bearings_only_appear_in_the_helm_trial() {
 }
 
 #[test]
+fn every_flagship_escort_fits_one_line_of_a_passage_card() {
+    for round in 2..=shipvivor_campaign::PATROLS {
+        for fleet in shipvivor_campaign::Fleet::ALL {
+            let escort = shipvivor_sim::sector::doctrine(fleet).escort(round);
+            let line = format!(
+                "Escort: {}",
+                ui::escorted(escort).expect("a flagship's escort")
+            );
+            // A card's detail holds about 35 characters of its typeface to a line.
+            assert!(line.len() <= 35, "round {round} {fleet:?}: {line}");
+        }
+    }
+}
+
+#[test]
+fn every_passage_verdict_fits_one_line_of_a_passage_card() {
+    use shipvivor_sim::{Need, Outlook, Rating};
+    for rating in Rating::ALL {
+        for first in Need::ALL {
+            for second in Need::ALL.into_iter().filter(|&n| n != first) {
+                let outlook = Outlook {
+                    cost: 1.,
+                    rating,
+                    needs: vec![first, second],
+                };
+                let line = ui::verdict(&outlook);
+                assert!(line.len() <= ui::CARD_LINE, "{line}");
+                assert!(line.contains(first.name()), "{line}");
+            }
+        }
+    }
+}
+
+#[test]
 fn the_passage_chart_and_enemy_air_cover_follow_the_passages_actually_sailed() {
     use shipvivor_campaign::{GRADES, Objectives, PATROLS, Stage, anchorages, charted};
     let keys = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3];
@@ -224,15 +258,18 @@ fn the_departure_chart_waits_for_a_choice_on_new_and_replayed_runs() {
     assert_eq!(w.resource::<Campaign>().screen(), Screen::Title);
     press(w, KeyCode::Enter);
     press(w, KeyCode::Digit3);
-    assert_eq!(w.resource::<Campaign>().stage, Stage::BlackcapReach);
+    let first = shipvivor_campaign::anchorages(TEST_SEED);
+    assert_eq!(w.resource::<Campaign>().stage, first[2]);
     w.resource_mut::<Campaign>()
         .tick(1., Objectives::default(), 1000);
     assert_eq!(w.resource::<Campaign>().screen(), Screen::Lost);
     press(w, KeyCode::Enter);
     assert_eq!(w.resource::<Campaign>().screen(), Screen::Departure);
+    // The replay charts its own anchorages from its own seed.
+    let next = w.resource::<ChartSeeds>().peek();
     press(w, KeyCode::Digit1);
     let run = w.resource::<Campaign>();
-    assert_eq!(run.stage, Stage::LanternBay);
+    assert_eq!(run.stage, shipvivor_campaign::anchorages(next)[0]);
     assert_eq!(run.screen(), Screen::Sailing);
     assert_ne!(run.seed, TEST_SEED);
     assert!(run.ship.afloat());
@@ -451,12 +488,7 @@ fn shell_refit(w: &World) -> shipvivor_campaign::DockJob {
     w.resource::<Campaign>()
         .dock_jobs()
         .into_iter()
-        .find(|job| {
-            matches!(
-                job,
-                DockJob::Fitting(Card::ArmorPiercing | Card::Caps | Card::Velocity)
-            )
-        })
+        .find(|job| matches!(job, DockJob::Fitting(Card::Caps | Card::Velocity)))
         .expect("a turret bay is selected")
 }
 
@@ -788,9 +820,10 @@ fn a_run_reaches_the_regent_through_the_helm_and_keeps_its_refits() {
             assert_eq!(w.resource::<Campaign>().screen(), Screen::Chart);
             assert_eq!(w.resource::<Campaign>().points(), carried);
             let tally = (w.resource::<Campaign>().hits, w.resource::<Campaign>().sunk);
+            let moderate = w.resource::<Campaign>().exits().unwrap()[0].stage;
             press(w, KeyCode::Digit1);
             let run = w.resource::<Campaign>();
-            assert_eq!(run.stage, shipvivor_campaign::Stage::OuterRoad);
+            assert_eq!(run.stage, moderate);
             assert_eq!(run.elapsed, 0.);
             assert_eq!((run.hits, run.sunk), tally);
             assert_eq!(run.fittings, docked);
@@ -837,9 +870,9 @@ fn a_run_reaches_the_regent_through_the_helm_and_keeps_its_refits() {
     let run = w.resource::<Campaign>();
     assert_eq!(run.stage, Stage::CrownDeep);
     // Field refits on the second leg add to the shells she was given, and take nothing away.
-    let shells = |f: shipvivor_campaign::Fittings| (f.armor_piercing, f.caps, f.velocity);
+    let shells = |f: shipvivor_campaign::Fittings| (f.caps, f.velocity);
     let (now, then) = (shells(run.fittings), shells(docked));
-    assert!(now.0 >= then.0 && now.1 >= then.1 && now.2 >= then.2);
+    assert!(now.0 >= then.0 && now.1 >= then.1);
     assert_eq!(run.screen(), Screen::Sailing);
     assert_eq!(
         w.resource::<Encounter>()
@@ -1075,7 +1108,7 @@ fn destroying_every_yard_brings_the_ship_through_drydock_even_past_the_clock() {
             );
         }
         press(w, KeyCode::Enter);
-        assert_eq!(w.resource::<Campaign>().fittings.armor_piercing(), paid);
+        assert_eq!(w.resource::<Campaign>().fittings.caps > 0, paid);
         let left = if paid { points - shells.cost() } else { points };
         assert_eq!(w.resource::<Campaign>().points(), left);
         if paid {
@@ -1095,16 +1128,18 @@ fn destroying_every_yard_brings_the_ship_through_drydock_even_past_the_clock() {
         press(w, KeyCode::Enter);
         assert_eq!(w.resource::<Campaign>().screen(), Screen::Chart);
         assert_eq!(w.resource::<Campaign>().points(), left);
+        // The tough passages want three stars. The moderate one is always open.
         press(w, KeyCode::Digit3);
         assert_eq!(w.resource::<Campaign>().screen(), Screen::Chart);
+        let moderate = w.resource::<Campaign>().exits().unwrap()[0].stage;
         press(w, KeyCode::Digit1);
         let run = w.resource::<Campaign>();
         assert_eq!(
             (run.screen(), run.stage, run.elapsed),
-            (Screen::Sailing, Stage::OuterRoad, 0.)
+            (Screen::Sailing, moderate, 0.)
         );
         assert_eq!(w.resource::<Encounter>().ruined_yards(), 0);
-        assert_eq!(run.fittings.armor_piercing(), paid);
+        assert_eq!(run.fittings.caps > 0, paid);
         assert_eq!((run.points(), run.objectives.yards), (left, 0));
     }
 }
@@ -1236,17 +1271,15 @@ fn helm_mouse_look_drives_render_and_fire_then_releases_to_menus() {
 fn chart_and_telegraph_follow_the_playable_sector() {
     use shipvivor_campaign::Grade;
     use shipvivor_encounter::{FLAGSHIP_EARLIEST, FLAGSHIP_SORTIE, SPAWN_STANDOFF};
-    // Every sea of every pool, sailed moderate and tough.
+    // Every sea of every pool, once each, turn about moderate and tough and from three
+    // run seeds, which keeps sixty-odd seas quick to check.
     let sailings = [
         (TEST_SEED, Grade::Moderate),
         (2, Grade::Tough),
         (3, Grade::Moderate),
     ];
-    for (stage, seed, grade) in shipvivor_campaign::POOLS
-        .into_iter()
-        .flatten()
-        .flat_map(|stage| sailings.map(|(seed, grade)| (stage, seed, grade)))
-    {
+    for (i, stage) in shipvivor_campaign::POOLS.into_iter().flatten().enumerate() {
+        let (seed, grade) = sailings[i % sailings.len()];
         let passage = Passage::graded(stage, grade);
         let chart = passage.chart(seed);
         let battle = passage.battle(&chart);
@@ -2515,8 +2548,7 @@ fn click_fires_one_barrel_double_click_the_rest_and_holding_ripples() {
 }
 
 #[test]
-fn ap_card_unlocks_q_and_the_secondary_hand_mounts_more_wing_guns() {
-    use shipvivor_encounter::Ammo;
+fn caps_need_no_key_and_the_secondary_hand_mounts_more_wing_guns() {
     let mut app = headless_game();
     let w = app.world_mut();
     start_in_narrows(w);
@@ -2532,9 +2564,7 @@ fn ap_card_unlocks_q_and_the_secondary_hand_mounts_more_wing_guns() {
     w.run_schedule(Update);
     // She is built with a gun a side amidships and another on the bow.
     assert_eq!(shown_wing_guns(w), 4);
-    // Q does nothing until AP is fitted.
-    press(w, KeyCode::KeyQ);
-    assert_eq!(w.resource::<Guns>().ammo, Ammo::He);
+    // There is no filling to choose: every round is the one the guns are fitted for.
     assert!(!texts(w).iter().any(|t| t.contains("LOAD")));
 
     w.resource_mut::<Campaign>().tick(
@@ -2546,9 +2576,9 @@ fn ap_card_unlocks_q_and_the_secondary_hand_mounts_more_wing_guns() {
         0,
     );
     w.run_schedule(Update);
-    // Four levels: armor-piercing shells, more secondaries and quick loaders twice.
+    // Four levels: piercing caps, more secondaries and quick loaders twice.
     for card in [
-        shipvivor_campaign::Card::ArmorPiercing,
+        shipvivor_campaign::Card::Caps,
         shipvivor_campaign::Card::MoreSecondaries,
         shipvivor_campaign::Card::Loader,
         shipvivor_campaign::Card::Loader,
@@ -2556,23 +2586,20 @@ fn ap_card_unlocks_q_and_the_secondary_hand_mounts_more_wing_guns() {
         pick(w, card);
     }
     let fittings = w.resource::<Campaign>().fittings;
-    assert!(fittings.armor_piercing());
+    assert_eq!(fittings.caps, 1);
     assert_eq!(fittings.secondaries().per_side, 3);
     assert_eq!(w.resource::<Campaign>().screen(), Screen::Sailing);
     assert_eq!(w.resource::<Encounter>().wing_guns().len(), 6);
     w.run_schedule(Update);
     assert_eq!(shown_wing_guns(w), 6);
 
-    press(w, KeyCode::KeyQ);
-    assert_eq!(w.resource::<Guns>().ammo, Ammo::Ap);
     w.run_schedule(Update);
     let shown = texts(w);
-    assert!(shown.iter().any(|t| t == "LOAD AP"), "{shown:?}");
-    assert!(shown.iter().any(|t| t.contains("Q  HE / AP")));
-    // Barrels loaded before the switch still hold HE.
-    assert!(shown.iter().any(|t| t.starts_with("HE ")), "{shown:?}");
-    press(w, KeyCode::KeyQ);
-    assert_eq!(w.resource::<Guns>().ammo, Ammo::He);
+    assert!(
+        !shown
+            .iter()
+            .any(|t| t.contains("LOAD") || t.contains("HE / AP"))
+    );
 }
 
 #[test]
@@ -2716,8 +2743,9 @@ fn both_dock_sections_move_the_after_gun_and_sail_on_the_longer_hull() {
     // Enter builds it, and the next sails with the point left over banked.
     press(w, KeyCode::Enter);
     press(w, KeyCode::Enter);
+    let moderate = w.resource::<Campaign>().exits().unwrap()[0].stage;
     press(w, KeyCode::Digit1);
-    assert_eq!(w.resource::<Campaign>().stage, Stage::OuterRoad);
+    assert_eq!(w.resource::<Campaign>().stage, moderate);
     assert_eq!(w.resource::<ShipView>().hull_extension, 10.);
     assert_eq!(w.query::<&damage_control::Cell>().iter(w).count(), 8);
     assert_eq!(w.resource::<Campaign>().fittings.turbines, 1);
@@ -3062,7 +3090,7 @@ fn a_lean_yard_adds_a_turret_that_stays_fitted_until_she_sails() {
 }
 
 #[test]
-fn a_click_picks_a_refit_out_and_a_second_click_orders_it() {
+fn a_click_orders_a_refit_at_once_and_books_its_points() {
     use shipvivor_campaign::{Card, DeckModule, DockJob};
     let mut app = headless_game();
     let w = app.world_mut();
@@ -3095,31 +3123,140 @@ fn a_click_picks_a_refit_out_and_a_second_click_orders_it() {
         .iter()
         .position(|&job| job == split)
         .unwrap();
-    // The first click shows what the split does, and spends nothing.
-    act(w, ui::Action::Preview(index));
-    assert_eq!(w.resource::<Campaign>().dock_job(), Some(split));
-    assert!(w.resource::<Campaign>().plan().is_none());
-    assert_eq!(w.resource::<Campaign>().points(), 5);
-    assert!(
-        w.query::<&Text>()
+    let clickable = |w: &mut World| {
+        w.query::<&ui::Action>()
             .iter(w)
-            .any(|t| t.0 == "Split into wing turrets")
-    );
-    // The second orders it.
+            .copied()
+            .collect::<Vec<_>>()
+    };
+    assert!(clickable(w).contains(&ui::Action::Order(index)));
+    // One click orders the split and books its points, with nothing picked out, and its
+    // figures stay up to say what it did.
     act(w, ui::Action::Order(index));
     assert_eq!(w.resource::<Campaign>().points(), 3);
     assert_eq!(w.resource::<Campaign>().dock_job(), None);
-    // Hull work is picked out and ordered the same way, from the hull panel.
+    assert_eq!(
+        w.resource::<Campaign>().plan().map(|p| p.orders().len()),
+        Some(1)
+    );
+    let texts = |w: &mut World| {
+        w.query::<&Text>()
+            .iter(w)
+            .map(|t| t.0.clone())
+            .collect::<Vec<_>>()
+    };
+    assert!(texts(w).iter().any(|t| t == "Split into wing turrets"));
+    assert!(texts(w).iter().any(|t| t == "  On order"));
+    // Hull work is ordered at once the same way, from the hull panel.
     let armor = DockJob::Fitting(Card::Armor);
-    act(w, ui::Action::Pick(armor));
-    assert_eq!(w.resource::<Campaign>().dock_job(), Some(armor));
-    assert_eq!(w.resource::<Campaign>().points(), 3);
     act(w, ui::Action::Draft(armor));
     assert_eq!(w.resource::<Campaign>().points(), 1);
     assert_eq!(
         w.resource::<Campaign>().plan().map(|p| p.orders().len()),
         Some(2)
     );
+    // Fittings the last point cannot cover take no click, here or on the section. Merging
+    // the wings back does, for it takes back the split and gives its points back.
+    let run = w.resource::<Campaign>();
+    let short: Vec<_> = run
+        .dock_jobs()
+        .into_iter()
+        .enumerate()
+        .filter(|&(_, job)| {
+            matches!(job, DockJob::Fitting(_)) && job.fits(run) && run.points_after(job).is_none()
+        })
+        .map(|(i, _)| ui::Action::Order(i))
+        .collect();
+    assert!(!short.is_empty());
+    let merge = run
+        .dock_jobs()
+        .iter()
+        .position(|&job| {
+            job == DockJob::Replace {
+                at: 1,
+                with: DeckModule::CentreBattery,
+            }
+        })
+        .map(ui::Action::Order)
+        .unwrap();
+    let actions = clickable(w);
+    assert!(!actions.contains(&ui::Action::Draft(armor)));
+    assert!(short.iter().all(|action| !actions.contains(action)));
+    assert!(actions.contains(&merge));
+    // A click on the order under the section takes it back, and its points with it.
+    act(w, ui::Action::Undo(0));
+    assert_eq!(w.resource::<Campaign>().points(), 3);
+}
+
+#[test]
+fn six_inch_guns_then_twin_barrels_then_lock_in() {
+    use shipvivor_campaign::DockJob;
+    use shipvivor_encounter::TurretLayout;
+    let mut app = headless_game();
+    let w = app.world_mut();
+    start_in_narrows(w);
+    // Both stars and five wrecked yards pay fourteen points.
+    w.resource_mut::<Campaign>().tick(
+        1.,
+        Objectives {
+            kills: 4,
+            yards: 5,
+            ..default()
+        },
+        0,
+    );
+    clear_leg(&mut w.resource_mut::<Campaign>());
+    w.run_schedule(Update);
+    while w.resource::<Campaign>().screen() == Screen::Refit {
+        press(w, KeyCode::Digit1);
+    }
+    assert!(matches!(
+        w.resource::<Campaign>().screen(),
+        Screen::Drydock(_)
+    ));
+    let act = |w: &mut World, action: ui::Action| {
+        w.run_system_cached_with(apply_action, Some(action))
+            .unwrap();
+        w.run_schedule(Update);
+    };
+    let tile = |w: &World, wanted: fn(&DockJob) -> bool| {
+        w.resource::<Campaign>()
+            .dock_jobs()
+            .iter()
+            .position(wanted)
+            .map(ui::Action::Order)
+            .expect("the forward turret offers it")
+    };
+    visit(w, 1);
+    let points = w.resource::<Campaign>().points();
+    let six = tile(w, |job| matches!(job, DockJob::Calibre { to: 6, .. }));
+    act(w, six);
+    let twin = tile(w, |job| {
+        matches!(
+            job,
+            DockJob::Barrels {
+                to: TurretLayout::Twin,
+                ..
+            }
+        )
+    });
+    act(w, twin);
+    // Two clicks, two orders, their points booked, and nothing waiting on a second press.
+    let run = w.resource::<Campaign>();
+    let booked = run.plan().map_or(0, |plan| plan.cost());
+    assert_eq!(run.plan().map(|plan| plan.orders().len()), Some(2));
+    assert!(booked > 0);
+    assert_eq!(run.points(), points - booked);
+    assert_eq!(run.dock_job(), None);
+    // Lock in builds them.
+    act(w, ui::Action::Sail);
+    let run = w.resource::<Campaign>();
+    assert!(run.plan().is_none());
+    assert!(matches!(run.screen(), Screen::Drydock(_)));
+    let house = run.ship.design().modules()[1].gunhouse;
+    assert_eq!(house.bore, 6);
+    assert_eq!(house.barrels, TurretLayout::Twin);
+    assert_eq!(run.points(), points - booked);
 }
 
 #[test]
@@ -3247,8 +3384,9 @@ fn work_that_waits_on_other_work_beckons_it_step_by_step() {
             .collect::<Vec<_>>()
     };
     assert!(beckoned(w).is_empty());
-    // An 8-inch bore is too heavy for the forward turret on an escort's beam, so the
-    // hull's broader beam beckons, and nothing else.
+    // An 8-inch bore is too heavy for the forward turret on an escort's beam. The broader
+    // beam it waits on cannot be ordered yet either, for it waits on a longer hull, so a
+    // section from the stock beckons: the step she can take first, and nothing else.
     visit(w, 1);
     let bore = w.resource::<Campaign>().ship.design().modules()[1]
         .gunhouse
@@ -3260,12 +3398,6 @@ fn work_that_waits_on_other_work_beckons_it_step_by_step() {
     };
     choose(w, eight);
     assert!(!eight.fits(w.resource::<Campaign>()));
-    assert_eq!(beckoned(w), [Some(ui::Action::Pick(DockJob::WidenBeam))]);
-    // Picked out, the broader beam waits on a longer hull, so a section from the stock
-    // beckons in its turn.
-    w.run_system_cached_with(apply_action, Some(ui::Action::Pick(DockJob::WidenBeam)))
-        .unwrap();
-    w.run_schedule(Update);
     assert!(w.resource::<Campaign>().widen_refusal().is_some());
     assert_eq!(beckoned(w), [None]);
     assert_eq!(
@@ -3273,6 +3405,18 @@ fn work_that_waits_on_other_work_beckons_it_step_by_step() {
             .iter(w)
             .count(),
         1
+    );
+    // The bore she cannot carry takes no click.
+    let index = w
+        .resource::<Campaign>()
+        .dock_jobs()
+        .iter()
+        .position(|&job| job == eight)
+        .unwrap();
+    assert!(
+        !w.query::<&ui::Action>()
+            .iter(w)
+            .any(|&action| action == ui::Action::Order(index))
     );
     // Work the ship can take beckons nothing.
     press(w, KeyCode::Escape);

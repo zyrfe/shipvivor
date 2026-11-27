@@ -5,11 +5,14 @@
 //! sectors through exactly the same steps.
 pub mod bot;
 pub mod leg;
+pub mod outlook;
+pub mod run;
 pub mod sector;
 pub mod voyage;
 
 #[cfg(test)]
 mod tests;
 
+pub use outlook::{Need, Outlook, Rating, outlook};
 pub use sector::{Charted, Kind, Sector, TOUGH_HEAD_START, TOUGH_RAID_PACE, Weather};
 pub use voyage::{engage, fit_player, helm_at_start, hull_shape, open_battle, settle, steer};

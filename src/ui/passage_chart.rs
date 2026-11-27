@@ -1,15 +1,43 @@
 //! A chart plate supplies the coastline. Ink the passages, fixes and soundings for this run.
 use super::*;
 use crate::state::{ChartRoll, Mode};
-use shipvivor_campaign::{OFFERED, charted};
+use shipvivor_campaign::{Fleet, OFFERED, charted};
+use shipvivor_encounter::EnemyClass;
+use shipvivor_sim::Rating;
 
 const WIDTH: f32 = 538.;
 const HEIGHT: f32 = WIDTH * 2. / 3.;
-const UNROLLED_HEIGHT: f32 = HEIGHT + 62.;
+/// The plate with its title above and its legend and key below.
+const UNROLLED_HEIGHT: f32 = HEIGHT + 104. + GAUGE_KEY + OUTLOOK_ROWS;
+/// Room under the key for the gauge's row, and at sea for a line on each passage on
+/// offer, which has no card beside it there.
+const GAUGE_KEY: f32 = 20.;
+const OUTLOOK_ROWS: f32 = 3. * 19. + 6.;
 const SEA_INK: Color = Color::srgb_u8(22, 75, 80);
 const FADED: Color = Color::srgb_u8(87, 114, 111);
 const PENCIL: Color = Color::srgb_u8(147, 55, 41);
 pub(super) const PAPER: Color = Color::srgb_u8(238, 237, 211);
+/// The gauge's ink on the paper, from an easy passage to a deadly one.
+const DANGER: [Color; 4] = [
+    Color::srgb_u8(46, 118, 70),
+    Color::srgb_u8(170, 124, 22),
+    Color::srgb_u8(196, 86, 28),
+    Color::srgb_u8(158, 26, 34),
+];
+fn danger(rating: Rating) -> Color {
+    DANGER[rating.level() - 1]
+}
+/// How `exit` looks for her as she stands: at sea, as the yard she is bound for will
+/// leave her, its repairs done.
+pub(super) fn outlook(run: &Campaign, exit: &shipvivor_campaign::Exit) -> shipvivor_sim::Outlook {
+    if run.phase() == shipvivor_campaign::Phase::Sailing {
+        let mut docked = shipvivor_campaign::Run::clone(run);
+        docked.ship.dock(f32::from(shipvivor_campaign::DOCK_REPAIR));
+        shipvivor_sim::outlook(&docked, exit)
+    } else {
+        shipvivor_sim::outlook(run, exit)
+    }
+}
 
 fn absolute(x: f32, y: f32, width: f32, height: f32) -> Node {
     Node {
@@ -155,8 +183,10 @@ fn anchorage_pin(
     p: Vec2,
     stage: Stage,
     number: usize,
-    face: &Handle<Font>,
+    rating: Rating,
+    art: &crate::insignia::Insignia,
 ) {
+    let face = &art.display_face;
     let pin = cmd
         .spawn((
             Node {
@@ -199,6 +229,8 @@ fn anchorage_pin(
         TextFont::from_font_size(16.).with_font(face.clone()),
         TextLayout::no_wrap(),
     ));
+    stamp(cmd, pin, &art.fleet(stage.fleet()), SEA_INK);
+    stamp(cmd, pin, &art.gauge(rating.level()), danger(rating));
 }
 
 /// Where the fixes of a run stand on the plate: the anchorages down the left, a column
@@ -254,6 +286,17 @@ impl Plate {
     fn pin(&self, lane: usize) -> Vec2 {
         Vec2::new(94., self.at(self.charted(1)[lane]).y)
     }
+    /// The flagship that sails in `round`, from 1 for the anchorages to [`ROUNDS`]. Every
+    /// passage of a round has the same one.
+    fn boss(&self, round: usize) -> Option<EnemyClass> {
+        match round {
+            ROUNDS => Some(EnemyClass::Regent),
+            _ => {
+                let sea = charted(self.seed, round)?[0];
+                shipvivor_sim::Sector::of(sea, shipvivor_campaign::Grade::Moderate).boss()
+            }
+        }
+    }
 }
 
 const ROMAN: [&str; ROUNDS] = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII"];
@@ -301,7 +344,8 @@ fn plot(cmd: &mut Commands, parent: Entity, run: &Campaign, art: &crate::insigni
     }
     let north = text(cmd, sheet, "N", 11., SEA_INK);
     cmd.entity(north).insert(absolute(20., 300., 15., 14.));
-    // The rounds are numbered along the head of the plate.
+    // The rounds are numbered along the head of the plate, each with the stamp of the
+    // flagship that sails there, so the run's bosses read at a glance.
     let present = (!departing).then(|| run.stage.round());
     for (i, numeral) in ROMAN.iter().enumerate() {
         let colour = if present == Some(i + 1) {
@@ -316,6 +360,13 @@ fn plot(cmd: &mut Commands, parent: Entity, run: &Campaign, art: &crate::insigni
             TextLayout::justify(Justify::Center),
             absolute(x - 20., 14., 40., 14.),
         ));
+        if let Some(image) = plate.boss(i + 1).and_then(|boss| art.boss(boss)) {
+            let ink = if colour == PENCIL { PENCIL } else { SEA_INK };
+            let emblem = cmd
+                .spawn((absolute(x + 12., 15., 12., 12.), ChildOf(sheet)))
+                .id();
+            stamp(cmd, emblem, &image, ink);
+        }
     }
 
     // Her course so far, from the anchorage through each passage taken.
@@ -385,7 +436,8 @@ fn plot(cmd: &mut Commands, parent: Entity, run: &Campaign, art: &crate::insigni
         for (lane, &sea) in plate.charted(round).iter().enumerate() {
             let p = plate.at(sea);
             if departing && round == 1 {
-                anchorage_pin(cmd, sheet, plate.pin(lane), sea, lane + 1, face);
+                let rating = shipvivor_sim::outlook::anchorage(run, sea).rating;
+                anchorage_pin(cmd, sheet, plate.pin(lane), sea, lane + 1, rating, art);
                 continue;
             }
             let mark = if sea == run.stage && !departing {
@@ -503,6 +555,8 @@ fn offer_tab(
         TextFont::from_font_size(13.).with_font(art.display_face.clone()),
         TextLayout::no_wrap(),
     ));
+    // What holds it: flotillas, mixed squadrons or a battle line.
+    stamp(cmd, tab, &art.fleet(sea.fleet()), ink);
     let face = &art.display_face;
     if !open {
         stamp(cmd, tab, &art.lock, ink);
@@ -514,6 +568,10 @@ fn offer_tab(
     if exit.under_air_cover() {
         stamp(cmd, tab, &art.floatplane, if open { PENCIL } else { FADED });
     }
+    // How hard it looks for her as she stands.
+    let rating = outlook(run, &exit).rating;
+    let gauge = if open { danger(rating) } else { FADED };
+    stamp(cmd, tab, &art.gauge(rating.level()), gauge);
 }
 
 /// One of the 12-pixel stamps, inked onto a tab.
@@ -556,6 +614,131 @@ fn figure(
     cmd.entity(number)
         .insert(TextFont::from_font_size(12.).with_font(face.clone()));
     stamp(cmd, row, image, ink);
+}
+
+/// The plate's key to its stamps: what holds each passage and the guns that tell
+/// against it, the flagships over the round numbers, and the gauge of how hard each
+/// passage looks for her.
+fn key(
+    cmd: &mut Commands,
+    parent: Entity,
+    art: &crate::insignia::Insignia,
+    ink: Color,
+    inset: f32,
+) {
+    let fleets = [
+        (Fleet::Flotillas, "Flotillas, quick guns"),
+        (Fleet::Mixed, "Mixed"),
+        (Fleet::BattleLine, "Battle line, big guns"),
+    ]
+    .map(|(fleet, label)| (art.fleet(fleet), label));
+    let flagships = [
+        EnemyClass::Commodore,
+        EnemyClass::Parliament,
+        EnemyClass::Regent,
+    ]
+    .map(|boss| (art.boss(boss), crate::mission_hud::ship_class(boss)));
+    let flagships = flagships
+        .into_iter()
+        .filter_map(|(image, label)| Some((image?, label)));
+    for entries in [fleets.to_vec(), flagships.collect()] {
+        let row = cmd
+            .spawn((
+                Node {
+                    column_gap: px(14.),
+                    align_items: AlignItems::Center,
+                    margin: UiRect::left(px(inset)),
+                    ..default()
+                },
+                ChildOf(parent),
+            ))
+            .id();
+        for (image, label) in entries {
+            let entry = cmd
+                .spawn((
+                    Node {
+                        column_gap: px(4.),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    ChildOf(row),
+                ))
+                .id();
+            stamp(cmd, entry, &image, ink);
+            text(cmd, entry, label, 13., ink);
+        }
+    }
+    // The gauge in its own inks, then what it measures.
+    let row = cmd
+        .spawn((
+            Node {
+                column_gap: px(14.),
+                align_items: AlignItems::Center,
+                margin: UiRect::left(px(inset)),
+                ..default()
+            },
+            ChildOf(parent),
+        ))
+        .id();
+    for rating in Rating::ALL {
+        let entry = cmd
+            .spawn((
+                Node {
+                    column_gap: px(4.),
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                ChildOf(row),
+            ))
+            .id();
+        stamp(cmd, entry, &art.gauge(rating.level()), danger(rating));
+        text(cmd, entry, rating.name(), 13., ink);
+    }
+    text(cmd, row, "for your ship as she stands", 13., ink);
+}
+
+/// At sea the chart has no cards beside it, so each passage on offer gets a line under
+/// the key: how hard it looks for her as she stands, and what would help her most.
+fn outlooks(cmd: &mut Commands, parent: Entity, run: &Campaign) {
+    let Some(exits) = run.exits() else {
+        return;
+    };
+    let column = cmd
+        .spawn((
+            Node {
+                margin: UiRect::new(px(12.), px(12.), px(6.), px(0.)),
+                ..column(2.)
+            },
+            ChildOf(parent),
+        ))
+        .id();
+    for (lane, exit) in exits.iter().enumerate() {
+        let outlook = outlook(run, exit);
+        let row = cmd
+            .spawn((
+                Node {
+                    column_gap: px(8.),
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                ChildOf(column),
+            ))
+            .id();
+        text(
+            cmd,
+            row,
+            format!("{}  {}", lane + 1, exit.stage.mission().name),
+            13.,
+            SEA_INK,
+        );
+        text(
+            cmd,
+            row,
+            super::verdict(&outlook),
+            13.,
+            danger(outlook.rating),
+        );
+    }
 }
 
 fn legend(run: &Campaign) -> &'static str {
@@ -649,11 +832,13 @@ pub(super) fn unfurl(
         .insert(TextFont::from_font_size(21.).with_font(art.display_face.clone()));
     text(cmd, head, "Tab / Esc   Stow chart", 13., SEA_INK);
     plot(cmd, paper, run, art);
-    let key = text(cmd, paper, legend(run), 13., SEA_INK);
-    cmd.entity(key).insert(Node {
+    let legend = text(cmd, paper, legend(run), 13., SEA_INK);
+    cmd.entity(legend).insert(Node {
         margin: UiRect::axes(px(12), px(4)),
         ..default()
     });
+    key(cmd, paper, art, SEA_INK, 12.);
+    outlooks(cmd, paper, run);
     cmd.spawn((
         RollPart::Curl,
         Node {
@@ -731,6 +916,7 @@ pub(super) fn table(
     let plate = cmd.spawn((column(7.), ChildOf(row))).id();
     plot(cmd, plate, run, art);
     text(cmd, plate, legend(run), 13., pale());
+    key(cmd, plate, art, pale(), 0.);
     cmd.spawn((
         Node {
             flex_grow: 1.,

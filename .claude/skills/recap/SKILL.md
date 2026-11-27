@@ -63,6 +63,13 @@ Read each log whole. They run to a few hundred lines.
 
 Use the `tally` lines for totals. Add up pulses only for a leg that has no tally.
 
+Then look for `<CODE>.feedback.toml` beside the log. It holds the scores the user gave in
+the game: in the yard after a round (`[[round]]`, by `number` and `sea`) and on the report
+at the end of the run (`[match]`, with `outcome`). Each metric (`challenge`,
+`frustration`, `engagement`, `motivation`) runs from -3 to +3, 0 is neutral, and a metric
+left out was not scored. A table's `screenshots` are the captures taken in that round. No
+file means nothing was scored, or the option is off on the title's Options screen.
+
 ## 3. Recap
 
 - Open with one line: how the run ended (won, lost, given up), on which leg, after how
@@ -78,6 +85,10 @@ Use the `tally` lines for totals. Add up pulses only for a leg that has no tally
 
 ## 4. Talk about how it felt
 
+- If the user scored the rounds, start from their scores: read each round's numbers
+  against what its leg shows (high frustration where the hull took a beating, low
+  engagement over a long quiet stretch) and ask about the scores that stand out or
+  change most from round to round. Don't ask again for what a score already says.
 - Pick the two or three moments most likely to have felt good or bad. Look for a long
   quiet stretch, a burst of heavy hits, most hits bouncing, a near sinking, a fight that
   dragged on, or a refit that changed things. Ask about each in one short question.

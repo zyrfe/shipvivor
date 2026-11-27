@@ -76,15 +76,35 @@ pub fn catapult_layout(planes: usize) -> &'static [(f32, f32)] {
         _ => &[(-0.75, -1.6), (0.9, 0.), (-0.75, 1.6)],
     }
 }
+/// Planes on plane section `section` of `sections`, when she carries `planes` in all.
+/// They are shared out as evenly as they go, the forward sections taking any over.
+pub fn planes_on(planes: usize, sections: usize, section: usize) -> usize {
+    if sections == 0 {
+        return 0;
+    }
+    planes / sections + usize::from(section < planes % sections)
+}
+/// Her place in the ship's list of floatplanes of the plane on catapult `slot` of plane
+/// section `section`, if that catapult carries one.
+pub fn plane_index(planes: usize, sections: usize, section: usize, slot: usize) -> Option<usize> {
+    (slot < planes_on(planes, sections, section)).then(|| {
+        (0..section)
+            .map(|s| planes_on(planes, sections, s))
+            .sum::<usize>()
+            + slot
+    })
+}
 /// Where each launcher on a missile rack stands, in metres forward of the section's
-/// middle and to starboard. Two stand abreast, and a third on the centreline ahead,
-/// each far enough from the others that their boxes clear on any bearing.
+/// middle and to starboard. Two stand abreast, a third on the centreline ahead, and a
+/// fourth makes two pairs, each far enough from the others that their boxes clear on
+/// any bearing.
 pub fn launcher_layout(launchers: usize) -> &'static [(f32, f32)] {
     match launchers {
         0 => &[],
         1 => &[(0., 0.)],
         2 => &[(0., -1.4), (0., 1.4)],
-        _ => &[(-1.15, -1.35), (-1.15, 1.35), (1.15, 0.)],
+        3 => &[(-1.15, -1.35), (-1.15, 1.35), (1.15, 0.)],
+        _ => &[(-1.2, -1.35), (-1.2, 1.35), (1.2, -1.35), (1.2, 1.35)],
     }
 }
 
@@ -280,8 +300,20 @@ impl Battle {
                         .map(move |&(f, a)| (berth, (fore + f, abeam + a)))
                 })
         };
+        // The planes are shared out between the plane sections.
+        let sections = stations(design, Component::Catapult);
+        let count = sections.len();
+        let catapults =
+            sections
+                .into_iter()
+                .enumerate()
+                .flat_map(move |(k, (berth, (fore, abeam)))| {
+                    catapult_layout(planes_on(craft.planes, count, k))
+                        .iter()
+                        .map(move |&(f, a)| (berth, (fore + f, abeam + a)))
+                });
         let old = std::mem::take(&mut self.floatplanes);
-        self.floatplanes = spread(Component::Catapult, catapult_layout(craft.planes))
+        self.floatplanes = catapults
             .take(craft.planes)
             .enumerate()
             .map(|(i, (catapult, station))| {
@@ -524,7 +556,7 @@ impl Battle {
                 let along = r.body.forward() * 0.4;
                 r.afloat() && r.hull_span(at - along, at + along).is_some()
             }) {
-                raider.hit_hull(at, BOMB_DAMAGE);
+                raider.hit_hull(at, f32::from(BOMB_DAMAGE));
                 events.hits += 1;
                 EffectKind::Burst
             } else {
@@ -638,7 +670,7 @@ impl Battle {
                 .min_by(|a, b| a.0.total_cmp(&b.0));
             let struck = match hull {
                 Some((t, i)) if land.is_none_or(|l| t < l) => {
-                    self.raiders[i].hit_hull(from.lerp(to, t), MISSILE_DAMAGE);
+                    self.raiders[i].hit_hull(from.lerp(to, t), f32::from(MISSILE_DAMAGE));
                     events.hits += 1;
                     Some((t, EffectKind::Burst, 1.8))
                 }

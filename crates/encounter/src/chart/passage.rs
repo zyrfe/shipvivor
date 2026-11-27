@@ -243,8 +243,15 @@ pub(super) fn sketch(rng: &mut Rng, waters: &Waters) -> Passage {
     let harbours = bases(rng, &frame, &channel, &berths);
     let gates = marks(rng, &frame, &channel, &berths, &harbours);
     let pickets = stations(&gates, frame.across);
-    let keepout = Keepout::new(waters, Course::Passage, &gates, &harbours, &pickets);
-    let coast = shores(rng, waters, &frame, &channel, &keepout);
+    let mut keepout = Keepout::new(waters, Course::Passage, &gates, &harbours, &pickets);
+    // An airfield takes the shore beside its base's cove, and the hills stand back
+    // from it as they do from a base, which leaves its cliffs close behind it.
+    let fields = airfields(rng, &frame, &channel, &berths, &keepout);
+    for field in &fields {
+        keepout.stations.push((field.pos, field.radius * 0.85));
+    }
+    let mut coast = shores(rng, waters, &frame, &channel, &keepout);
+    coast.extend(fields);
     let islets = islands(rng, waters, &frame, &channel, &gates, &keepout, &coast, end);
     // Outside, the current sets along the coast and across the mouth, one way or the
     // other. It does not run into a channel closed at its head.
@@ -360,6 +367,62 @@ fn bases(rng: &mut Rng, frame: &Frame, channel: &Channel, berths: &[Berth]) -> V
             }
         })
         .collect()
+}
+
+/// The flat island of each airfield base: on the shoulder of its cove, up or down the
+/// channel from its harbour, wherever it leaves the fairways, the marks, the slips and
+/// the other bases their water.
+fn airfields(
+    rng: &mut Rng,
+    frame: &Frame,
+    channel: &Channel,
+    berths: &[Berth],
+    keepout: &Keepout,
+) -> Vec<Islet> {
+    let mut fields: Vec<Islet> = vec![];
+    for (own, b) in berths.iter().enumerate() {
+        if b.works != crate::AIRFIELD_WORKS {
+            continue;
+        }
+        let half = channel.coves[own].2;
+        let first = rng.sign();
+        let radius = crate::AIRFIELD_RADIUS;
+        let sited = [0.6, 0.8, 1., 1.2].into_iter().find_map(|reach| {
+            [first, -first].into_iter().find_map(|way| {
+                let s = b.s + way * (half * reach + radius * 0.3);
+                let out = channel.normal(frame, s, b.side);
+                let field = Islet {
+                    pos: channel.point(frame, s, b.side) + out * radius * 0.3,
+                    radius,
+                    kind: LandmarkKind::Airfield,
+                    heading: heading(out),
+                };
+                field_open(keepout, &field, own, &fields).then_some(field)
+            })
+        });
+        fields.extend(sited);
+    }
+    fields
+}
+
+/// Room for an airfield's island for base `own`, clear of the gates and their
+/// approaches, the stations, the fairways, every slip, the other bases and `fields`
+/// already sited, with a strait to its own harbour.
+fn field_open(keepout: &Keepout, field: &Islet, own: usize, fields: &[Islet]) -> bool {
+    let (p, r) = (field.pos, field.radius);
+    keepout.gates.iter().all(|g| g.distance(p) >= r + 60.)
+        && (keepout.gate_lanes.iter()).all(|&(a, b)| super::segment_distance(p, a, b) >= r + 26.)
+        && (keepout.stations.iter()).all(|&(at, room)| at.distance(p) >= r + room)
+        && keepout
+            .harbours
+            .iter()
+            .enumerate()
+            .all(|(i, (centre, apron))| {
+                let room = if i == own { ISLAND_RADIUS + STRAIT } else { 105. };
+                centre.distance(p) >= r + room && apron.iter().all(|a| a.distance(p) >= r + 40.)
+            })
+        && keepout.clear_of_fairways(field)
+        && (fields.iter()).all(|o| o.pos.distance(p) >= r + o.radius + STRAIT)
 }
 
 /// The marks: off each base in turn, and through each narrows on the way to the next

@@ -193,7 +193,8 @@ impl Design {
 
     /// The commodore's battleship: a battleship lengthened by a turret, with superfiring
     /// pairs fore and aft, a magazine under each end pair, the director over the after
-    /// engine, and a tougher hull and turrets in the same capital-grade citadel.
+    /// engine, and tougher turrets in the same capital-grade citadel. Her hull is twice a
+    /// battleship's, so she outlasts one by about two thirds again under the same guns.
     pub fn commodore() -> Self {
         let mut ship = enemy(
             "Commodore",
@@ -208,7 +209,7 @@ impl Design {
                 Module::new(Stern, []),
             ],
             58.,
-            (Wide, 24.),
+            (Wide, 36.),
             7.,
             0.6,
         );
@@ -217,9 +218,10 @@ impl Design {
     }
 
     /// The flagship: ten turrets of 7 points each, in pairs across the hull with one
-    /// at each end, and a light hull behind them. A turret stands four stock rounds,
-    /// as the Regent's do. Her turrets screen her hull while most of them stand, so
-    /// a module stands a heavy round once it's open, and four times that screened.
+    /// at each end, and a hull as stout as a battleship's behind them. Their reinforced
+    /// plate stands six stock rounds, as the Regent's does. Her turrets screen her hull
+    /// while most of them stand, and her capital belt holds what lighter guns throw at
+    /// it, so she outlasts a battleship two to three times over.
     pub fn flagship() -> Self {
         let pair = || Module::new(Wide, [MainGun, MainGun]);
         enemy(
@@ -235,13 +237,14 @@ impl Design {
                 Module::new(Stern, [MainGun]),
             ],
             81.,
-            (Wide, 6.),
+            (Wide, 24.),
             7.,
             0.,
         )
     }
 
-    /// The Regent has five paired gun decks, two end turrets and a deep hull beneath them.
+    /// The Regent has five paired gun decks, two end turrets and a deep hull beneath them,
+    /// the stoutest afloat: she outlasts a battleship about four times over.
     pub fn iron_regent() -> Self {
         let pair = || Module::new(Wide, [MainGun, MainGun]);
         enemy(
@@ -258,7 +261,7 @@ impl Design {
                 Module::new(Stern, [MainGun]),
             ],
             168.,
-            (Wide, 18.),
+            (Wide, 40.),
             7.,
             0.,
         )

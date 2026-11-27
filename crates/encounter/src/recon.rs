@@ -630,11 +630,11 @@ mod tests {
         assert!(b.raiders[0].has_contact);
         b.update_lookouts(0., observer + Vec2::X * 680.);
         assert!(!b.raiders[0].has_contact);
-        b.landmarks.push(Landmark {
-            body: crate::body(&mut b.serial, observer + Vec2::X * 130., 0.),
-            radius: 35.,
-            kind: LandmarkKind::Stacks,
-        });
+        b.landmarks.push(Landmark::new(
+            crate::body(&mut b.serial, observer + Vec2::X * 130., 0.),
+            35.,
+            LandmarkKind::Stacks,
+        ));
         b.update_lookouts(0., mark);
         assert!(!b.raiders[0].has_contact);
         assert!(sees(observer, 47., mark, 650., &b.ports, &b.landmarks, &[]));

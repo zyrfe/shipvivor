@@ -393,6 +393,17 @@ fn threats(battle: &Battle, player: Vec2, log: &mut FireLog) -> Vec<Threat> {
             });
         }
     }
+    // An airfield's bombers and torpedo planes, coming for her with their load.
+    for plane in battle.warplanes() {
+        if plane.attacking() && in_sight(plane.body.pos) {
+            out.push(Threat {
+                at: plane.body.pos,
+                emblem: Emblem::Plane,
+                heading: Some(plane.body.heading),
+                quiet: quiet(Source::Aircraft(plane.body.id)),
+            });
+        }
+    }
     for &(source, at) in &log.0 {
         if let Source::Stray(origin) = source {
             out.push(Threat {

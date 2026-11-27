@@ -8,12 +8,16 @@ pub struct GameOptions {
     /// Whether experience comes straight from sinking ships and wrecking yards, or from
     /// the packages their wrecks leave to tow in.
     pub rewards: Rewards,
+    /// Whether the yard after each round and the report at the end of a run ask for
+    /// four quick playtest scores. See [`crate::feedback`].
+    pub feedback: bool,
 }
 
 impl GameOptions {
     /// What a player who has never opened the options screen gets.
     pub const STOCK: Self = Self {
         rewards: Rewards::Direct,
+        feedback: true,
     };
 
     /// One `key = value` line per option.
@@ -22,7 +26,8 @@ impl GameOptions {
             Rewards::Direct => "direct",
             Rewards::Packages => "packages",
         };
-        format!("rewards = {rewards}\n")
+        let feedback = if self.feedback { "on" } else { "off" };
+        format!("rewards = {rewards}\nfeedback = {feedback}\n")
     }
 
     /// Options from their lines. A line that is not understood keeps the stock choice.
@@ -35,6 +40,8 @@ impl GameOptions {
             match (key.trim(), value.trim()) {
                 ("rewards", "direct") => options.rewards = Rewards::Direct,
                 ("rewards", "packages") => options.rewards = Rewards::Packages,
+                ("feedback", "on") => options.feedback = true,
+                ("feedback", "off") => options.feedback = false,
                 _ => {}
             }
         }
@@ -92,9 +99,16 @@ mod tests {
     fn rewards_default_to_direct_and_survive_a_round_trip() {
         assert_eq!(GameOptions::default().rewards, Rewards::Direct);
         for rewards in [Rewards::Direct, Rewards::Packages] {
-            let options = GameOptions { rewards };
-            assert_eq!(GameOptions::parse(&options.code()), options);
+            for feedback in [true, false] {
+                let options = GameOptions { rewards, feedback };
+                assert_eq!(GameOptions::parse(&options.code()), options);
+            }
         }
+        // Feedback is asked for unless it was turned off, so options kept before it
+        // existed ask for it.
+        assert!(GameOptions::STOCK.feedback);
+        assert!(GameOptions::parse("rewards = packages").feedback);
+        assert!(!GameOptions::parse("feedback = off").feedback);
         assert_eq!(GameOptions::parse(""), GameOptions::STOCK);
         assert_eq!(
             GameOptions::parse("rewards = gold\nnoise"),
@@ -112,6 +126,7 @@ mod tests {
         let path = folder.join("deeper").join("options.txt");
         let packages = GameOptions {
             rewards: Rewards::Packages,
+            feedback: false,
         };
         keep_at(&path, &packages).unwrap();
         let kept = GameOptions::parse(&std::fs::read_to_string(&path).unwrap());

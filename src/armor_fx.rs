@@ -53,34 +53,101 @@ pub fn spark_mesh() -> Mesh {
     mesh.finish()
 }
 
-/// Decal in local XY, with the raised torn lip facing +Z.
+/// A mark a round left on plate, in local XY, facing +Z, a unit across: a crater where
+/// the plate held, or a hole where it went in.
 pub fn scar(open: bool) -> Mesh {
+    if open { hole() } else { crater() }
+}
+
+/// Where a round burst against plate that held it: a shallow dish blackened by the
+/// burst, ringed by a lip of bare steel the paint was blasted off, inside a star of
+/// soot thrown out across the paint.
+fn crater() -> Mesh {
     let mut mesh = Facets::default();
-    let rim = if open {
-        Color::srgb_u8(159, 107, 71)
-    } else {
-        Color::srgb_u8(151, 160, 157)
+    let soot = Color::srgb_u8(38, 40, 42);
+    let scuff = Color::srgb_u8(176, 178, 170);
+    let bruise = Color::srgb_u8(92, 94, 92);
+    let floor = Color::srgb_u8(46, 46, 48);
+    const SIDES: usize = 14;
+    let at = |i: usize, radius: f32, lift: f32| {
+        let a = i as f32 * std::f32::consts::TAU / SIDES as f32;
+        // No crater is quite round.
+        let r = radius * (1. + 0.09 * (a * 3.).sin() + 0.05 * (a * 5. + 1.).cos());
+        Vec3::new(a.cos() * r, a.sin() * r, lift)
     };
-    let soot = Color::srgb_u8(59, 63, 66);
-    let core = if open {
-        Color::srgb_u8(22, 26, 29)
-    } else {
-        Color::srgb_u8(75, 84, 88)
+    for i in 0..SIDES {
+        let j = (i + 1) % SIDES;
+        // The star of soot: spokes of uneven length.
+        let reach = 0.95 + 0.25 * ((i * 7 % 5) as f32 / 4.);
+        let mid = at(i, 0.8, 0.004).lerp(at(j, 0.8, 0.004), 0.5);
+        let tip = mid.normalize() * reach + Vec3::Z * 0.004;
+        mesh.triangle([at(j, 0.8, 0.004), at(i, 0.8, 0.004), tip], soot);
+        // The lip rises from the paint to its crest, and drops into the dish.
+        mesh.quad(
+            [
+                at(i, 0.86, 0.006),
+                at(j, 0.86, 0.006),
+                at(j, 0.64, 0.12),
+                at(i, 0.64, 0.12),
+            ],
+            bruise,
+        );
+        mesh.quad(
+            [
+                at(i, 0.64, 0.12),
+                at(j, 0.64, 0.12),
+                at(j, 0.36, 0.05),
+                at(i, 0.36, 0.05),
+            ],
+            if i % 3 == 0 { bruise } else { scuff },
+        );
+        mesh.triangle(
+            [at(i, 0.36, 0.05), at(j, 0.36, 0.05), Vec3::Z * 0.035],
+            floor,
+        );
+    }
+    mesh.finish()
+}
+
+/// Where a round went in: a black hole into her, its torn edges curled back out of it
+/// in bare and burnt steel, inside a halo of scorched paint.
+fn hole() -> Mesh {
+    let mut mesh = Facets::default();
+    let halo = Color::srgb_u8(30, 29, 28);
+    let singed = Color::srgb_u8(64, 60, 56);
+    let torn = Color::srgb_u8(156, 112, 80);
+    let burnt = Color::srgb_u8(70, 52, 42);
+    let dark = Color::srgb_u8(6, 6, 7);
+    const SIDES: usize = 16;
+    let at = |i: usize, radius: f32, lift: f32| {
+        let a = i as f32 * std::f32::consts::TAU / SIDES as f32;
+        let r = radius * (1. + 0.14 * (a * 3. + 0.5).sin() + 0.08 * (a * 7.).cos());
+        Vec3::new(a.cos() * r, a.sin() * r, lift)
     };
-    let ring = |i: usize| {
-        let a = i as f32 * std::f32::consts::TAU / 11.;
-        let radius = if i.is_multiple_of(3) { 0.81 } else { 1. };
-        Vec3::new(a.cos() * radius, a.sin() * radius * 0.73, 0.)
-    };
-    for i in 0..11 {
-        let a = ring(i);
-        let b = ring((i + 1) % 11);
-        let h = if open { 0.19 } else { 0.045 };
-        let c = a * 0.66 + Vec3::Z * h;
-        let d = b * 0.66 + Vec3::Z * h;
-        mesh.triangle([a, b, d], soot);
-        mesh.triangle([a, d, c], if i % 4 == 0 { rim } else { soot });
-        mesh.triangle([c, d, Vec3::Z * 0.02], if i % 3 == 1 { rim } else { core });
+    for i in 0..SIDES {
+        let j = (i + 1) % SIDES;
+        // The scorch, ragged at its edge.
+        let edge = 0.95 + 0.25 * ((i * 5 % 7) as f32 / 6.);
+        let (out_i, out_j) = (at(i, 1., 0.004) * edge, at(j, 1., 0.004) * edge);
+        mesh.triangle_colors([out_i, out_j, at(j, 0.62, 0.004)], [singed, singed, halo]);
+        mesh.triangle_colors(
+            [out_i, at(j, 0.62, 0.004), at(i, 0.62, 0.004)],
+            [singed, halo, halo],
+        );
+        // The petals of torn plate, every other one bent farther back.
+        let curl = if i % 2 == 0 { 0.2 } else { 0.11 };
+        let tip = at(i, 0.74, curl).lerp(at(j, 0.74, curl), 0.5) * Vec3::new(1.08, 1.08, 1.);
+        mesh.triangle_colors(
+            [at(j, 0.42, 0.015), at(i, 0.42, 0.015), tip],
+            [burnt, burnt, torn],
+        );
+        mesh.triangle([at(i, 0.42, 0.015), at(i, 0.62, 0.008), tip], burnt);
+        mesh.triangle([tip, at(j, 0.62, 0.008), at(j, 0.42, 0.015)], burnt);
+        // The hole, black right through.
+        mesh.triangle(
+            [at(i, 0.42, 0.012), at(j, 0.42, 0.012), Vec3::Z * 0.012],
+            dark,
+        );
     }
     mesh.finish()
 }

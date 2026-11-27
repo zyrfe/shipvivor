@@ -87,7 +87,11 @@ pub struct Tracks {
 /// A slow battleship at her best throws as full a wake as a torpedo boat: it is
 /// how the player reads her.
 fn wash(pace: f32) -> f32 {
-    if pace < 0.02 { 0. } else { pace.min(1.).powf(0.6) }
+    if pace < 0.02 {
+        0.
+    } else {
+        pace.min(1.).powf(0.6)
+    }
 }
 
 /// Seconds a hull's white water lasts: longer behind a bigger one, so each
@@ -134,7 +138,9 @@ impl Tracks {
             });
             let spacing = track.life / (TRACK - 1) as f32;
             if (track.crumbs.front()).is_none_or(|&(_, laid, _)| now - laid >= spacing) {
-                track.crumbs.push_front((ship.pos - ahead * ship.hull.stern, now, wash));
+                track
+                    .crumbs
+                    .push_front((ship.pos - ahead * ship.hull.stern, now, wash));
                 track.crumbs.truncate(TRACK - 1);
             }
         }
@@ -164,10 +170,16 @@ impl Tracks {
                 wakes.hulls[2 * slot] = a.pos.extend(a.ahead.x).extend(a.ahead.y);
                 wakes.hulls[2 * slot + 1] = Vec4::new(track.half_beam, a.bow, a.reach, a.wash);
                 // The arms of the V, at their widest, with their broken edges.
-                cover(a.pos + a.ahead * a.bow, 1.5 * a.reach + 2. * track.half_beam + 1.);
+                cover(
+                    a.pos + a.ahead * a.bow,
+                    1.5 * a.reach + 2. * track.half_beam + 1.,
+                );
             }
-            let live = track.afloat.map(|a| (a.pos - a.ahead * a.stern, 0., a.wash));
-            let laid = (track.crumbs.iter()).map(|&(at, laid, wash)| (at, self.seconds - laid, wash));
+            let live = track
+                .afloat
+                .map(|a| (a.pos - a.ahead * a.stern, 0., a.wash));
+            let laid =
+                (track.crumbs.iter()).map(|&(at, laid, wash)| (at, self.seconds - laid, wash));
             let mut points = 0;
             for (at, age, wash) in live.into_iter().chain(laid).take(TRACK) {
                 let age = (age / track.life).min(1.);

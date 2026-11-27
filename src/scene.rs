@@ -8,7 +8,7 @@ use bevy::{asset::RenderAssetUsages, prelude::*, render::render_resource::Primit
 pub(crate) use hull::deck_height;
 use hull::extended_hull_mesh;
 use shipvivor_campaign::DockModule;
-use shipvivor_encounter::{AaMount, AntiAir, DeckOffsets, Hull, Rack, Station, TurretLayout};
+use shipvivor_encounter::{AntiAir, DeckOffsets, Hull, Rack, Station, TurretLayout};
 use shipvivor_navigation::Helm;
 
 #[derive(Component)]
@@ -168,9 +168,10 @@ pub struct WingHouse {
 }
 
 /// The size the wing guns' gunhouses are drawn at, against a main turret's at the same
-/// bore, and how far inboard of its station each on the forecastle stands.
+/// bore, and the least room, at the stock beam, between a gunhouse's centre and the
+/// deck edge: a little more than its ring's radius.
 const WING_TURRET_SCALE: f32 = 0.75;
-const WING_TURRET_INSET: f32 = 0.8;
+const WING_HOUSE_CLEARANCE: f32 = 0.72;
 
 /// The rangefinder tower raised on the bridge roof: a tier for each rangefinder
 /// fitted, and the spotting top that rides on the highest.
@@ -182,7 +183,9 @@ pub struct TowerTier(u16);
 pub struct SpottingTop;
 /// Height of the bridge roof the tower stands on, and of the top of each tier.
 const BRIDGE_ROOF: f32 = 4.57;
-const TIER_TOPS: [f32; 2] = [5.55, 6.85];
+const TIER_TOPS: [f32; 5] = [5.55, 6.85, 8.0, 9.0, 9.85];
+/// How broad each tier of the tower is, narrowing as it climbs.
+const TIER_WIDTHS: [f32; 5] = [1.9, 1.45, 1.15, 0.9, 0.72];
 
 /// The tower stands as many tiers high as rangefinders are fitted, with the spotting
 /// top on the highest.
@@ -286,7 +289,8 @@ pub fn place_wing_guns(
 ) {
     let yard = matches!(run.screen(), crate::state::Screen::Drydock(_));
     let secondaries = run.display_fittings().secondaries();
-    let deck = yard.then(|| DeckOffsets::for_design(&run.display_design()));
+    let design = run.display_design();
+    let stations = yard.then(|| design.wing_stations());
     let fitted = if yard {
         secondaries
     } else {
@@ -299,29 +303,34 @@ pub fn place_wing_guns(
             Visibility::Hidden
         });
     }
-    // A gunhouse is broader than a shielded mount, so on the forecastle, where the hull
-    // narrows, it is drawn a little inboard of the gun's station.
-    let inset = |index: usize, x: f32| {
-        let forecastle = shipvivor_encounter::WingGun::station(index).1 > 5.;
-        if fitted.turrets && forecastle {
-            x - x.signum() * WING_TURRET_INSET
+    // A gunhouse is broader than a shielded mount, so where the hull narrows it is drawn
+    // inboard of the gun's station, far enough to stand on her deck.
+    let beam = design.beam_factor();
+    let inset = |fore: f32, x: f32| {
+        if fitted.turrets {
+            let edge = (design.deck_edge(fore) - WING_HOUSE_CLEARANCE) * beam;
+            x.signum() * x.abs().min(edge)
         } else {
             x
         }
     };
+    // On the deck, which rises towards the stem.
+    let stand = |pose: &mut Transform, fore: f32, x: f32, bearing: f32| {
+        pose.translation = Vec3::new(inset(fore, x), hull::deck_height(-fore) + 0.09, -fore);
+        pose.rotation = Quat::from_rotation_y(-bearing);
+    };
     for (gun, mut pose, mut shown) in &mut guns {
-        if let Some(deck) = deck {
-            let (x, fore) = deck.wing_position(gun.0);
-            let x = inset(gun.0, x);
-            *shown = if gun.0 < secondaries.per_side * 2 {
-                Visibility::Inherited
-            } else {
-                Visibility::Hidden
+        if let Some(stations) = &stations {
+            // Guns past her deck room wait ashore for a longer hull.
+            let station = stations
+                .get(gun.0)
+                .filter(|_| gun.0 < secondaries.per_side * 2);
+            let Some(station) = station else {
+                shown.set_if_neq(Visibility::Hidden);
+                continue;
             };
-            pose.translation.z = -fore;
-            pose.translation.x = x;
-            let home = shipvivor_encounter::WingGun::home(gun.0);
-            pose.rotation = Quat::from_rotation_y(-home);
+            shown.set_if_neq(Visibility::Inherited);
+            stand(&mut pose, station.fore, station.abeam, station.home);
             continue;
         }
         let Some(mount) = battle.wing_guns().get(gun.0) else {
@@ -329,9 +338,12 @@ pub fn place_wing_guns(
             continue;
         };
         shown.set_if_neq(Visibility::Inherited);
-        pose.translation.z = -mount.deck_fore();
-        pose.translation.x = inset(gun.0, mount.deck_x());
-        pose.rotation = Quat::from_rotation_y(-mount.deck_bearing());
+        stand(
+            &mut pose,
+            mount.deck_fore(),
+            mount.deck_x(),
+            mount.deck_bearing(),
+        );
     }
     for (barrel, mut shown) in &mut barrels {
         shown.set_if_neq(
@@ -354,6 +366,9 @@ impl AaPosition {
 }
 #[derive(Component)]
 pub struct AaTrain(usize);
+/// The column an AA tub off the bridge wings is raised on, from the deck beneath it.
+#[derive(Component)]
+pub struct AaColumn(usize);
 #[derive(Component)]
 pub struct AaCradle(usize);
 /// Height of an AA tub's floor: the bridge wing deck, with the others raised to match.
@@ -368,19 +383,19 @@ pub fn place_aa_guns(
     mut tubs: Query<(&AaPosition, &mut Transform, &mut Visibility)>,
     mut trains: Query<(&AaTrain, &mut Transform), (Without<AaPosition>, Without<AaCradle>)>,
     mut cradles: Query<(&AaCradle, &mut Transform), (Without<AaPosition>, Without<AaTrain>)>,
+    mut columns: Query<
+        (&AaColumn, &mut Transform, &mut Visibility),
+        (Without<AaPosition>, Without<AaTrain>, Without<AaCradle>),
+    >,
 ) {
     let yard = matches!(run.screen(), crate::state::Screen::Drydock(_));
-    let deck = yard.then(|| {
-        (
-            DeckOffsets::for_design(&run.display_design()),
-            run.display_fittings().anti_air().mounts,
-        )
-    });
+    let stations = run.display_design().aa_stations();
+    let fitted = yard.then(|| run.display_fittings().anti_air().mounts);
     // Where each mount stands, where it points from the bow, and how high it is laid.
     let lay = |i: usize| -> Option<(f32, f32, f32, f32)> {
-        if let Some((deck, fitted)) = deck {
-            let (x, fore) = deck.aa_position(i);
-            (i < fitted).then(|| (x, fore, x.signum() * 1.1, 0.5))
+        if let Some(fitted) = fitted {
+            let tub = stations.get(i).filter(|_| i < fitted)?;
+            Some((tub.abeam, tub.fore, tub.abeam.signum() * 1.1, 0.5))
         } else {
             battle
                 .aa_mounts()
@@ -396,6 +411,18 @@ pub fn place_aa_guns(
         shown.set_if_neq(Visibility::Inherited);
         pose.translation.x = x;
         pose.translation.z = -fore;
+    }
+    // A tub off the bridge wings stands on a column from the deck to the wings' height.
+    for (column, mut pose, mut shown) in &mut columns {
+        let raised = stations.get(column.0).is_some_and(|tub| !tub.bridge_wing);
+        let Some((_, fore, _, _)) = lay(column.0).filter(|_| raised) else {
+            shown.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        shown.set_if_neq(Visibility::Inherited);
+        let deck = hull::deck_height(-fore);
+        pose.translation.y = 0.5 * (deck + AA_FLOOR);
+        pose.scale.y = AA_FLOOR - deck;
     }
     for (train, mut pose) in &mut trains {
         if let Some((_, _, bearing, _)) = lay(train.0) {
@@ -674,7 +701,7 @@ pub fn setup(
         .id();
     let bridge_z = -3.1;
     let mut floor = BRIDGE_ROOF;
-    for (rank, (top, width)) in TIER_TOPS.into_iter().zip([1.9, 1.45]).enumerate() {
+    for (rank, (top, width)) in TIER_TOPS.into_iter().zip(TIER_WIDTHS).enumerate() {
         let tier = commands
             .spawn((
                 TowerTier(rank as u16 + 1),
@@ -996,13 +1023,12 @@ pub fn setup(
         }
     }
 
+    // A model for every station any hull has room for, placed by `place_wing_guns`.
     for i in 0..shipvivor_encounter::Secondaries::MOST_PER_SIDE * 2 {
-        let (x, fore) = shipvivor_encounter::WingGun::station(i);
-        // On the deck, which rises towards the stem under the bow pair.
         let wing = commands
             .spawn((
                 WingPosition(i),
-                Transform::from_xyz(x, hull::deck_height(-fore) + 0.09, -fore),
+                Transform::default(),
                 Visibility::Hidden,
                 ChildOf(ship),
             ))
@@ -1034,8 +1060,21 @@ pub fn setup(
                 ChildOf(shield),
             ));
         }
-        // One barrel on a single mount, or a pair side by side once twinned.
-        for (fitted, x) in [(1, 0.), (2, -0.18), (2, 0.18)] {
+        // One barrel on a single mount, or two, three or four side by side behind the
+        // shield as more are fitted.
+        let shielded = [
+            (1, 0.),
+            (2, -0.18),
+            (2, 0.18),
+            (3, -0.3),
+            (3, 0.),
+            (3, 0.3),
+            (4, -0.39),
+            (4, -0.13),
+            (4, 0.13),
+            (4, 0.39),
+        ];
+        for (fitted, x) in shielded {
             commands.spawn((
                 WingBarrel {
                     barrels: fitted,
@@ -1082,7 +1121,12 @@ pub fn setup(
                 ChildOf(gunhouse),
             ));
         }
-        for (fitted, layout) in [(1, TurretLayout::Single), (2, TurretLayout::Twin)] {
+        for (fitted, layout) in [
+            (1, TurretLayout::Single),
+            (2, TurretLayout::Twin),
+            (3, TurretLayout::Triple),
+            (4, TurretLayout::Quad),
+        ] {
             for tube in 0..fitted {
                 let tubes = commands
                     .spawn((
@@ -1112,31 +1156,26 @@ pub fn setup(
             }
         }
     }
+    // A tub for every station any hull has room for, placed by `place_aa_guns`.
     for i in 0..AntiAir::MOST_MOUNTS {
-        let (x, fore) = AaMount::station(i);
         let tub = commands
             .spawn((
                 AaPosition(i),
-                Transform::from_xyz(x, 0., -fore),
+                Transform::default(),
                 Visibility::Hidden,
                 ChildOf(ship),
             ))
             .id();
         // The bridge wings carry their own pair. The others stand on a column raised
         // from the main deck to the same height.
-        if !AaMount::on_bridge_wing(i) {
-            let deck = hull::deck_height(-fore);
-            commands.spawn((
-                Mesh3d(drum.clone()),
-                MeshMaterial3d(steel.clone()),
-                Transform::from_xyz(0., 0.5 * (deck + AA_FLOOR), 0.).with_scale(Vec3::new(
-                    0.42,
-                    AA_FLOOR - deck,
-                    0.42,
-                )),
-                ChildOf(tub),
-            ));
-        }
+        commands.spawn((
+            AaColumn(i),
+            Mesh3d(drum.clone()),
+            MeshMaterial3d(steel.clone()),
+            Transform::from_scale(Vec3::new(0.42, 1., 0.42)),
+            Visibility::Hidden,
+            ChildOf(tub),
+        ));
         for (mesh, mat, at, scale) in [
             (&drum, &iron, AA_FLOOR - 0.04, Vec3::new(1.12, 0.08, 1.12)),
             (&drum, &pale, AA_FLOOR + 0.16, Vec3::new(1.1, 0.34, 1.1)),
@@ -1151,8 +1190,7 @@ pub fn setup(
         let train = commands
             .spawn((
                 AaTrain(i),
-                Transform::from_xyz(0., AA_FLOOR, 0.)
-                    .with_rotation(Quat::from_rotation_y(-x.signum() * 1.1)),
+                Transform::from_xyz(0., AA_FLOOR, 0.),
                 Visibility::Inherited,
                 ChildOf(tub),
             ))

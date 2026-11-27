@@ -68,7 +68,7 @@ impl Hull {
         super::breakwater_outline(self.extension()).map(|(x, z)| (x * factor, z))
     }
 
-    pub const SPLICE_Z: f32 = 4.;
+    pub const SPLICE_Z: f32 = shipvivor_shipyard::HULL_SPLICE;
 
     pub fn extension(self) -> f32 {
         self.stern - Self::CRUISER.stern
@@ -215,7 +215,7 @@ impl Battle {
             raider.knock += hit.kick[1];
             if hit.closing >= BUMP && raider.ram_rest == 0. {
                 raider.ram_rest = RAM_REST;
-                raider.hit_hull(hit.point, hit.damage[1]);
+                raider.hit_hull(hit.point, f32::from(hit.damage[1]));
                 events.damage = events.damage.saturating_add(hit.damage[0]);
                 if hit.damage[0] > 0 {
                     let reach = orders.hull.bow + orders.hull.stern;

@@ -2,6 +2,9 @@
 //! which plays on the audio thread and makes the listener wait for distant sound.
 //! Shells are followed through the air, and the land and ice nearest the ship are
 //! charted so they can echo.
+//! A round striking her is heard as her plating took it: a tap off plate far too thick
+//! for it, a clank off plate that only just held, or a punch through and a burst inside
+//! her as bad as the damage, and a section giving way when one is lost.
 //! A base that has word of the ship, or is being hit, sounds its siren, and a boss
 //! sounds her horn as she puts to sea: the bigger she is, the deeper it is.
 //! The engines are heard as they are: damaged ones stumble and bang, and those knocked
@@ -19,15 +22,15 @@ use bevy::{
     reflect::TypePath,
 };
 use shipvivor_acoustics::{
-    AIRCRAFT, Air, Alert, Ambience, Bank, Cue, Cues, Feed, Haunt, Mixer, Place, Rotor, SAMPLE_RATE,
-    Sound, console,
+    AIRCRAFT, Air, Alert, Ambience, Bank, Cue, Cues, Feed, Harm, Haunt, Hit, Mixer, Place, Rotor,
+    SAMPLE_RATE, Sound, console,
 };
 use shipvivor_compass::direction;
 use shipvivor_encounter::{
     Battery, EffectKind, Hull, ISLAND_RADIUS, Impact, LandmarkKind, YardState,
 };
 use shipvivor_navigation::Helm;
-use shipvivor_shipyard::{Component, State, Task};
+use shipvivor_shipyard::{Component, Loss, State, Struck, Task};
 use std::{sync::Mutex, time::Duration};
 
 /// Height of the listener above the water, on the bridge.
@@ -76,6 +79,8 @@ const LEAP: f32 = 5.;
 const DECK: f32 = 2.2;
 const ABEAM: f32 = 1.6;
 const SENT: f32 = 0.5;
+/// Metres within which the burst a round made on her is the round her plating took.
+const STRUCK_NEAR: f32 = 2.5;
 /// The repair party's work: each tool, how often it is taken up against the others, and
 /// the shortest and longest seconds from taking it up to the next.
 const TOOLS: [(Sound, f32, (f32, f32)); 3] = [
@@ -271,7 +276,7 @@ impl Soundboard {
 #[allow(clippy::too_many_arguments)]
 pub fn report(
     battle: Res<Encounter>,
-    run: Res<Campaign>,
+    mut run: ResMut<Campaign>,
     helm: Res<PlayerHelm>,
     view: Res<ShipView>,
     board: Res<Soundboard>,
@@ -280,6 +285,8 @@ pub fn report(
     alerts: Res<BaseAlerts>,
     mut around: Local<Surroundings>,
 ) {
+    // What each blow into her side did, read from her log as it is heard.
+    let mut struck = run.ship.take_struck();
     // The listener stands on the bridge and faces wherever the sight is turned.
     let ahead = direction(view.bearing);
     board.cues.send(Cue::Ears {
@@ -305,6 +312,8 @@ pub fn report(
     let bridge = Vec3::new(helm.position.x, BRIDGE, helm.position.y);
     let (ordered, voyage) = (helm.ordered_speed(), battle.at_sea());
     if voyage < around.seen {
+        // Blows from a voyage nobody was listening to the end of are not heard now.
+        struck.clear();
         around.order = None;
         around.klaxon = Klaxon::default();
         around.countdown = Countdown::default();
@@ -422,6 +431,23 @@ pub fn report(
         Some(_) => {}
         None => around.mending = voyage + SENT,
     }
+    // Each blow into her is heard where it struck, as her plating took it: a tap or a
+    // clank off plate that turned it, or a punch through plate that did not and a burst
+    // inside her as bad as the damage it did, and worse for what it cost her. A round
+    // is heard so in place of the burst it made on her.
+    let (keel, bow) = (helm.forward(), run.hull_shape().bow);
+    let mut rounds = Vec::new();
+    for (n, blow) in struck.iter().enumerate() {
+        let at = helm.position + keel * (bow - blow.aft) + keel.perp() * blow.abeam;
+        if blow.calibre.is_some() {
+            rounds.push(at);
+        }
+        board.cues.send(Cue::Hit {
+            position: Vec3::new(at.x, DECK, at.y),
+            serial: u64::from(voyage.to_bits()).wrapping_add(n as u64),
+            hit: heard(blow),
+        });
+    }
     for fx in battle.effects().iter().filter(|fx| fx.age == 0.) {
         let sound = match fx.kind {
             EffectKind::Muzzle(Battery::Main) => Sound::MainGun,
@@ -433,6 +459,17 @@ pub fn report(
             EffectKind::Muzzle(Battery::Heavy) => Sound::HeavyGun,
             EffectKind::Splash => Sound::Splash,
             EffectKind::Column => Sound::Column,
+            EffectKind::Felled(_) => Sound::Collapse,
+            // A lighthouse toppling, or a tier of a sea stack shot away.
+            EffectKind::Toppled(_) => Sound::Collapse,
+            EffectKind::FuelBlast { .. } => Sound::Wreck,
+            EffectKind::Burst
+                if rounds
+                    .iter()
+                    .any(|at| at.distance(fx.body.pos) < STRUCK_NEAR) =>
+            {
+                continue;
+            }
             // A ram has no voice of its own yet and borrows the shell burst.
             EffectKind::Burst
             | EffectKind::Crunch
@@ -650,8 +687,13 @@ pub fn report(
         let plane = &battle.spotters()[voice?];
         plane.airborne().then(|| plane.position_3d())
     };
+    // An airfield's aircraft share the harriers' voices, the nearest heard first.
     let mut harriers: Vec<(u64, f32)> = (battle.harriers().iter())
         .map(|p| (p.body.id, p.body.pos.distance_squared(helm.position)))
+        .chain(
+            (battle.warplanes().iter())
+                .map(|p| (p.body.id, p.body.pos.distance_squared(helm.position))),
+        )
         .collect();
     harriers.sort_by(|a, b| a.1.total_cmp(&b.1));
     let harriers: Vec<u64> = harriers
@@ -661,11 +703,12 @@ pub fn report(
         .collect();
     allot(&mut around.harriers, &harriers);
     let harrier = |voice: Option<u64>| {
-        let plane = battle
-            .harriers()
-            .iter()
-            .find(|p| Some(p.body.id) == voice)?;
-        Some(plane.position_3d())
+        let voice = voice?;
+        let harrier = battle.harriers().iter().find(|p| p.body.id == voice);
+        let warplane = || battle.warplanes().iter().find(|p| p.body.id == voice);
+        harrier
+            .map(|p| p.position_3d())
+            .or_else(|| warplane().map(|p| p.position_3d()))
     };
     let positions = (around.spotters.map(spotter).into_iter())
         .chain([attacker.map(|p| p.position_3d())])
@@ -722,6 +765,25 @@ pub fn report(
         (shot.body.id, position)
     });
     *aloft = shells.collect();
+}
+
+/// What a blow into her is heard to have been.
+fn heard(blow: &Struck) -> Hit {
+    let harm = (blow.losses.iter())
+        .map(|loss| match loss {
+            Loss::Knocked(_) => Harm::Knocked,
+            Loss::Wrecked(_) | Loss::Foundered => Harm::Wrecked,
+            Loss::Detonated(_) => Harm::Detonated,
+        })
+        .max()
+        .unwrap_or_default();
+    Hit {
+        calibre: blow.calibre,
+        plate: blow.plate,
+        turned: blow.turned,
+        dealt: blow.dealt,
+        harm,
+    }
 }
 
 /// Sound in the air waits out a pause or a fitting choice with the battle that made it.

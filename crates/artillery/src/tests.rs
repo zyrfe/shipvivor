@@ -1,80 +1,134 @@
 use super::*;
-use ArmorGrade::{Light, Reinforced};
+use ArmorGrade::{Capital, Light, Reinforced};
 use ContactAngle::{Direct, Glancing};
-use Impact::{Bounced, Embedded, PassedThrough, Penetrated};
-use ShellClass::{Breaker, Standard};
+use Impact::{Bounced, Embedded, Overpenetrated, PassedThrough, Penetrated};
+
+fn round(calibre: f32, penetration: f32) -> Round {
+    Round {
+        calibre,
+        penetration,
+    }
+}
 
 #[test]
-fn intact_plate_outcomes_cover_each_shell_grade_and_angle() {
-    for (shell, armor, angle, expected) in [
-        (Standard, Light, Direct, Penetrated),
-        (Breaker, Light, Direct, Penetrated),
-        (Standard, Reinforced, Direct, Embedded),
-        (Breaker, Reinforced, Direct, Penetrated),
-        (Standard, Light, Glancing, Bounced),
-        (Breaker, Light, Glancing, Bounced),
-        (Standard, Reinforced, Glancing, Bounced),
-        (Breaker, Reinforced, Glancing, Bounced),
+fn a_round_opens_plate_no_thicker_than_its_penetration_and_holes_it() {
+    for (penetration, grade, want) in [
+        (4., Light, Penetrated),
+        (4., Reinforced, Embedded),
+        (6., Reinforced, Penetrated),
+        (11., Capital, Embedded),
+        (12., Capital, Penetrated),
     ] {
-        let mut panel = ArmorPanel::new(armor, 3, 2);
-        let contact = [(1, 0), (2, 1)];
+        let mut panel = ArmorPanel::new(grade, 3, 2);
+        let strike = panel.strike(round(4., penetration), Direct, (1, 0), 0.99);
         assert_eq!(
-            panel.resolve_hit(shell, angle, &contact),
-            Ok(expected),
-            "{shell:?} / {armor:?} / {angle:?}"
+            strike.map(|s| s.impact),
+            Ok(want),
+            "{penetration} on {grade:?}"
         );
-        for row in 0..2 {
-            for column in 0..3 {
-                let cell = (column, row);
-                assert_eq!(
-                    panel.is_breached(cell),
-                    expected == Penetrated && contact.contains(&cell)
-                );
-            }
+        assert_eq!(panel.is_breached((1, 0)), want == Penetrated);
+        // Every later round goes in through the hole, however light.
+        if want == Penetrated {
+            let after = panel.strike(round(1., 0.5), Glancing, (1, 0), 0.);
+            assert_eq!(
+                after,
+                Ok(Strike {
+                    impact: PassedThrough,
+                    share: 1.
+                })
+            );
         }
     }
 }
 
 #[test]
-fn follow_up_requires_clearance_for_the_whole_footprint() {
-    let mut panel = ArmorPanel::new(Reinforced, 4, 1);
-    assert_eq!(
-        panel.resolve_hit(Breaker, Direct, &[(0, 0), (1, 0)]),
-        Ok(Penetrated)
+fn plate_that_holds_a_round_still_lets_some_of_it_through_and_wears() {
+    let mut panel = ArmorPanel::new(Capital, 4, 3);
+    // A four-inch round on capital plate does a little, and one that nearly opens it
+    // does much more.
+    let light = panel.strike(round(4., 4.), Direct, (0, 0), 0.).unwrap();
+    let near = ArmorPanel::new(Capital, 4, 3)
+        .strike(round(11., 11.5), Direct, (0, 0), 0.)
+        .unwrap();
+    assert_eq!((light.impact, near.impact), (Embedded, Embedded));
+    let (least, _) = HELD_SHARE;
+    assert!(light.share > least && light.share < 0.2, "{}", light.share);
+    assert!(near.share > 0.5 && near.share < 0.6, "{}", near.share);
+    // The plate there is thinner now, and so is the plate beside it, by half as much.
+    let worn = panel.worn((0, 0));
+    assert!(worn > 0.05 && worn < 0.1, "{worn}");
+    assert!((panel.worn((1, 0)) - 0.5 * worn).abs() < 1e-6);
+    assert!((panel.worn((0, 1)) - 0.5 * worn).abs() < 1e-6);
+    assert_eq!(panel.worn((1, 1)), 0.);
+    // Keep at the same place and the plate gives way. Each round does a little more
+    // than the one before as it thins.
+    let mut shares = vec![light.share];
+    let mut rounds = 1;
+    while !panel.is_breached((0, 0)) {
+        let s = panel.strike(round(4., 4.), Direct, (0, 0), 0.).unwrap();
+        shares.push(s.share);
+        rounds += 1;
+        assert!(rounds < 20, "the plate never gave way");
+    }
+    assert!(
+        rounds > 5,
+        "capital plate fell to {rounds} four-inch rounds"
     );
-    assert_eq!(
-        panel.resolve_hit(Standard, Glancing, &[(1, 0), (0, 0)]),
-        Ok(PassedThrough)
-    );
-
-    let rim = [(1, 0), (2, 0)];
-    assert_eq!(panel.resolve_hit(Standard, Direct, &rim), Ok(Embedded));
-    assert_eq!(panel.resolve_hit(Breaker, Glancing, &rim), Ok(Bounced));
-    assert!(!panel.is_breached((2, 0)));
-    assert!(panel.is_breached((1, 0)));
-    assert_eq!(panel.resolve_hit(Breaker, Direct, &rim), Ok(Penetrated));
-    assert_eq!(
-        panel.resolve_hit(Standard, Direct, &[(2, 0), (1, 0), (0, 0)]),
-        Ok(PassedThrough)
-    );
-    assert!(!panel.is_breached((3, 0)));
+    assert!(shares.windows(2).all(|w| w[1] >= w[0]), "{shares:?}");
+    assert_eq!(*shares.last().unwrap(), 1.);
 }
 
 #[test]
-fn invalid_contact_preserves_existing_breaches_without_opening_new_cells() {
+fn a_shallow_round_skips_off_unless_it_is_wide_enough_to_bite() {
+    let mut panel = ArmorPanel::new(Reinforced, 3, 2);
+    let skip = panel.strike(round(6., 8.), Glancing, (1, 1), 0.).unwrap();
+    assert_eq!(skip.impact, Bounced);
+    assert!((skip.share - RICOCHET_SHARE).abs() < 1e-6);
+    assert!(!panel.is_breached((1, 1)) && panel.worn((1, 1)) > 0.);
+    // A twelve-inch round overmatches six inches of plate and bites at any angle.
+    let bite = panel
+        .strike(round(12., 12.), Glancing, (0, 0), 0.99)
+        .unwrap();
+    assert_eq!(bite.impact, Penetrated);
+    // Every main-battery round overmatches light plate.
+    let light = ArmorPanel::new(Light, 2, 2).strike(round(4., 3.), Glancing, (0, 0), 0.99);
+    assert_eq!(light.map(|s| s.impact), Ok(Penetrated));
+}
+
+#[test]
+fn only_a_round_with_plenty_to_spare_may_go_clean_through() {
+    let through = |penetration, grade, luck| {
+        ArmorPanel::new(grade, 2, 2)
+            .strike(round(12., penetration), Direct, (0, 0), luck)
+            .unwrap()
+    };
+    // Not enough to spare: it bursts behind the plate however lucky.
+    assert_eq!(through(5.9, Light, 0.).impact, Penetrated);
+    assert_eq!(through(20., Capital, 0.).impact, Penetrated);
+    // With plenty, a lucky one goes clean through and does less behind it.
+    let lucky = through(12., Light, 0.);
+    assert_eq!(lucky.impact, Overpenetrated);
+    assert_eq!(lucky.share, OVERPENETRATED_SHARE);
+    assert_eq!(through(12., Light, 0.9).impact, Penetrated);
+    assert!(Overpenetrated.opened());
+    // What is left after going in and out of the plate.
+    let left = round(12., 12.).beyond(Light.inches());
+    assert_eq!(left.penetration, 8.);
+}
+
+#[test]
+fn a_contact_outside_the_panel_leaves_it_untouched() {
     let mut panel = ArmorPanel::new(Light, 3, 2);
     assert_eq!(
-        panel.resolve_hit(Breaker, Direct, &[(2, 1)]),
+        panel
+            .strike(round(4., 4.), Direct, (2, 1), 0.9)
+            .map(|s| s.impact),
         Ok(Penetrated)
-    );
-    assert_eq!(
-        panel.resolve_hit(Breaker, Direct, &[]),
-        Err(ContactError::EmptyFootprint)
     );
     for outside in [(3, 0), (0, 2), (u16::MAX, u16::MAX)] {
         assert_eq!(
-            panel.resolve_hit(Breaker, Direct, &[(2, 1), (1, 1), outside]),
-            Err(ContactError::OutsidePanel(outside))
+            panel.strike(round(4., 4.), Direct, outside, 0.9),
+            Err(OutsidePanel(outside))
         );
         assert!(!panel.is_breached((1, 1)));
         assert!(panel.is_breached((2, 1)));
@@ -82,116 +136,31 @@ fn invalid_contact_preserves_existing_breaches_without_opening_new_cells() {
 }
 
 #[test]
-fn contact_order_and_duplicate_cells_do_not_change_the_breach() {
-    let original = ArmorPanel::new(Light, 3, 2);
-    let mut first = original.clone();
-    let mut second = original.clone();
-    assert_eq!(
-        first.resolve_hit(Standard, Direct, &[(1, 0), (2, 1), (1, 0)]),
-        Ok(Penetrated)
-    );
-    assert_eq!(
-        second.resolve_hit(Standard, Direct, &[(2, 1), (1, 0)]),
-        Ok(Penetrated)
-    );
-    for row in 0..2 {
-        for column in 0..3 {
-            let cell = (column, row);
-            assert_eq!(first.is_breached(cell), second.is_breached(cell));
-            assert!(!original.is_breached(cell));
-        }
-    }
-}
-
-#[test]
-fn heavy_plate_requires_a_matching_grade_and_grazing_still_skips() {
-    use ArmorGrade::Capital;
-    for (round, angle, want) in [
-        (Standard, Direct, Embedded),
-        (Breaker, Direct, Embedded),
-        (ShellClass::Heavy, Direct, Penetrated),
-        (ShellClass::Heavy, Glancing, Bounced),
-    ] {
-        assert_eq!(
-            ArmorPanel::new(Capital, 2, 2).resolve_hit(round, angle, &[(1, 0)]),
-            Ok(want)
-        );
-    }
-}
-
-#[test]
-fn larger_round_must_open_its_own_clearance() {
-    let mut p = ArmorPanel::new(ArmorGrade::Capital, 3, 3);
-    assert_eq!(
-        p.resolve_round(ShellClass::Heavy, Direct, &[(1, 1)], 0),
-        Ok(Penetrated)
-    );
-    assert_eq!(
-        p.resolve_round(Standard, Direct, &[(1, 1)], 2),
-        Ok(Embedded)
-    );
-    assert_eq!(
-        p.resolve_round(Standard, Glancing, &[(1, 1)], 0),
-        Ok(PassedThrough)
-    );
-    assert_eq!(
-        p.resolve_round(ShellClass::Heavy, Direct, &[(1, 1)], 2),
-        Ok(Penetrated)
-    );
-    assert_eq!(
-        p.resolve_round(Standard, Glancing, &[(1, 1)], 1),
-        Ok(PassedThrough)
-    );
-}
-
-#[test]
-fn he_bursts_instead_of_glancing_and_ap_goes_through_light_plate() {
-    use ArmorGrade::Capital;
-    for (ammo, shell, armor, angle, want) in [
-        (Ammo::He, Standard, Light, Glancing, Penetrated),
-        (Ammo::He, Standard, Light, Direct, Penetrated),
-        (Ammo::He, Standard, Reinforced, Glancing, Embedded),
-        (Ammo::He, Standard, Capital, Direct, Embedded),
-        (Ammo::Ap, Breaker, Light, Direct, Impact::Overpenetrated),
-        (Ammo::Ap, Breaker, Light, Glancing, Bounced),
-        (Ammo::Ap, Breaker, Reinforced, Direct, Penetrated),
-        (Ammo::Ap, Breaker, Capital, Direct, Embedded),
-        (Ammo::Ap, ShellClass::Heavy, Capital, Direct, Penetrated),
-    ] {
-        let mut panel = ArmorPanel::new(armor, 3, 2);
-        assert_eq!(
-            panel.resolve_ammo(ammo, shell, angle, &[(1, 0)], 0),
-            Ok(want),
-            "{ammo:?} {shell:?} / {armor:?} / {angle:?}"
-        );
-        assert_eq!(panel.is_breached((1, 0)), want.opened());
-    }
-    assert_eq!(Impact::Penetrated.dealt(5), 5);
-    assert_eq!(Impact::Overpenetrated.dealt(5), 3);
-    assert_eq!(Impact::Embedded.dealt(5), 0);
-}
-
-#[test]
-fn he_stays_light_whatever_the_bore_and_ap_starts_a_grade_heavier() {
-    let he = MainShell {
-        bore: 4,
-        caps: 3,
-        ..MainShell::STOCK
+fn bore_caps_and_velocity_drive_a_round_through_heavier_plate_and_range_costs_it() {
+    let stock = MainShell::STOCK;
+    assert_eq!(stock.penetration(), 4.);
+    let eight = MainShell { bore: 4, ..stock };
+    let capped = MainShell { caps: 2, ..stock };
+    let fast = MainShell {
+        velocity: 3,
+        ..stock
     };
-    assert_eq!(he.penetration(), Standard);
-    let ap = MainShell {
-        ammo: Ammo::Ap,
-        ..MainShell::STOCK
-    };
-    assert_eq!(ap.penetration(), Breaker);
-    assert_eq!(ap.at_contact(1.), Standard);
-    let capped = MainShell { caps: 1, ..ap };
-    assert_eq!(capped.penetration(), ShellClass::Heavy);
-    assert_eq!(capped.at_contact(1.), Breaker);
-    assert_eq!(
-        MainShell { caps: 2, ..ap }.at_contact(1.),
-        ShellClass::Heavy
-    );
+    assert_eq!(eight.penetration(), 8.);
+    assert_eq!(capped.penetration(), 6.);
+    assert!(fast.penetration() > 5. && fast.penetration() < 5.5);
+    // Every round loses some of it as it flies, and a faster round gets there sooner,
+    // so it keeps more at the same distance.
+    assert!(stock.penetration_at(1.) < stock.penetration());
+    let distance = 500.;
+    let at =
+        |shell: MainShell| shell.penetration_at(distance / shell.speed()) / shell.penetration();
+    assert!(at(fast) > at(stock));
+    // Stock rounds open light plate out to their reach, and nothing heavier.
+    let far = stock.round_at(stock.reach() / stock.speed());
+    assert!(far.opens(Light) && !stock.round_at(0.).opens(Reinforced));
+    assert!(eight.round_at(0.5).opens(Reinforced));
+    let eighteen = MainShell { bore: 14, ..stock };
+    assert!(eighteen.round_at(1.).opens(Capital));
 }
 
 #[test]
@@ -202,8 +171,10 @@ fn a_heavier_gunhouse_trains_more_slowly_and_training_gear_wins_it_back() {
         .collect();
     assert!((rates[0] - 1.).abs() < 1e-6, "stock four-inch mount");
     assert!(rates.windows(2).all(|pair| pair[1] < pair[0]));
-    // Four ranks bring a sixteen-inch mount back to the stock pace, and no more ranks fit.
-    assert!((training_rate(16., MOST_TRAINING_GEAR) - 1.).abs() < 1e-6);
+    // Four ranks bring a sixteen-inch mount back to the stock pace, eight take it half
+    // again as fast, and no more ranks fit.
+    assert!((training_rate(16., 4) - 1.).abs() < 1e-6);
+    assert!((training_rate(16., MOST_TRAINING_GEAR) - 1.5).abs() < 1e-6);
     assert_eq!(
         training_rate(8., MOST_TRAINING_GEAR + 3),
         training_rate(8., MOST_TRAINING_GEAR)

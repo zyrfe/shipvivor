@@ -183,7 +183,7 @@ impl Battle {
                 {
                     let at = from.lerp(to, t);
                     if let Some(i) = ship {
-                        self.raiders[i].hit_hull(at, 6);
+                        self.raiders[i].hit_hull(at, 6.);
                         events.hits += 1;
                         Some((t, EffectKind::Burst))
                     } else {

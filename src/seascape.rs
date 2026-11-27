@@ -441,7 +441,11 @@ pub fn light(
     sea: Res<Sea>,
     run: Res<Campaign>,
     mut lit: Local<Option<(Weather, bool)>>,
-    mut sun: Single<(&mut DirectionalLight, &mut Transform, &mut CascadeShadowConfig)>,
+    mut sun: Single<(
+        &mut DirectionalLight,
+        &mut Transform,
+        &mut CascadeShadowConfig,
+    )>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut fog: Single<&mut DistanceFog>,
 ) {

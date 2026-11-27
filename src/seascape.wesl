@@ -229,8 +229,9 @@ fn lace(p: vec2f) -> f32 {
 // An enemy hull's bow wave: white water piled at her stem that peels off each
 // side, hugging her flare, then runs aft as the arms of a widening V. `head` is
 // where she is and the way she points; `hull` her half-beam, her bow, how far
-// aft of the stem the arms reach, and how hard she is steaming.
-fn bow_wave(p: vec2f, head: vec4f, hull: vec4f) -> f32 {
+// aft of the stem the arms reach, and how hard she is steaming. `blur` is
+// metres by which a far pixel's footprint thickens the arms.
+fn bow_wave(p: vec2f, head: vec4f, hull: vec4f, blur: f32) -> f32 {
     let fore = head.zw;
     let offset = p - head.xy;
     let beam = hull.x;
@@ -241,8 +242,9 @@ fn bow_wave(p: vec2f, head: vec4f, hull: vec4f) -> f32 {
     let run = max(aft, 0.);
     // Faster, the arms stand off at nearer the twenty degrees of a full wake.
     let spread = beam * sqrt(min(run / (0.5 * hull.y), 1.)) + run * (0.12 + 0.22 * hull.w);
-    let teeth = (noise(p * 0.9 + fore * waters.weather.z * 0.3) - 0.5) * (0.15 * beam + 0.04 * run);
-    let thick = 0.35 * beam + 0.08 * run + 0.5;
+    let teeth = (noise(p * 0.9 + fore * waters.weather.z * 0.3) - 0.5) * (0.15 * beam + 0.04 * run)
+        * (1. - smoothstep(0.5, 2., blur));
+    let thick = 0.35 * beam + 0.08 * run + 0.5 + blur;
     let arm = 1. - smoothstep(0.3 * thick, thick, abs(side - spread - teeth));
     let lengthwise = smoothstep(-0.6 * beam, 0., aft) * (1. - smoothstep(0.2 * reach, reach, aft));
     return 1.25 * hull.w * arm * lengthwise;
@@ -250,18 +252,22 @@ fn bow_wave(p: vec2f, head: vec4f, hull: vec4f) -> f32 {
 
 // What the enemy hulls leave on the water, wherever they are: the white water
 // along their tracks, the paler lane it leaves smoothed behind it, and their bow waves.
-fn fleet_wakes(p: vec2f) -> vec3f {
+// Far off, a pixel spans metres of water lengthwise and a band a few metres wide
+// would fall between pixels, so every band is thickened by half a footprint.
+fn fleet_wakes(p: vec2f, footprint: f32) -> vec3f {
     var white = 0.;
     var lane = 0.;
     var bows = 0.;
-    let broken = 0.7 + 0.6 * noise(p * 0.35 + vec2f(0.07, -0.05) * waters.weather.z);
+    let blur = 0.5 * footprint;
+    let broken = mix(0.7 + 0.6 * noise(p * 0.35 + vec2f(0.07, -0.05) * waters.weather.z), 1., smoothstep(1., 4., footprint));
     for (var i = 0u; i < waters.wakes.count; i++) {
         let bound = waters.wakes.bounds[i];
         let centre = p - bound.xy;
-        if dot(centre, centre) > bound.z * bound.z { continue; }
+        let reach = bound.z + 1.6 * blur;
+        if dot(centre, centre) > reach * reach { continue; }
         let hull = waters.wakes.hulls[2u * i + 1u];
         if hull.w > 0. {
-            bows = max(bows, bow_wave(p, waters.wakes.hulls[2u * i], hull));
+            bows = max(bows, bow_wave(p, waters.wakes.hulls[2u * i], hull, blur));
         }
         let first = i * TRACK;
         let kept = u32(bound.w);
@@ -271,7 +277,7 @@ fn fleet_wakes(p: vec2f) -> vec3f {
             let along = b.xy - a.xy;
             let t = clamp(dot(p - a.xy, along) / max(dot(along, along), 1e-4), 0., 1.);
             let off = distance(p, a.xy + along * t);
-            let width = mix(a.w, b.w, t);
+            let width = mix(a.w, b.w, t) + blur;
             if off < 1.6 * width {
                 let strength = mix(a.z, b.z, t);
                 white = max(white, strength * broken * (1. - smoothstep(0.45 * width, width, off)));
@@ -294,10 +300,39 @@ fn sunlit(world: vec3f, frag: vec2f) -> f32 {
     return fetch_directional_shadow(0u, vec4f(world, 1.), vec3f(0., 1., 0.), view_z, frag);
 }
 
+// How tall, as a share of the screen's height, the bands are that ripples break a
+// reflection into, and how far up or down the screen they slide it.
+const RIPPLE_BAND: f32 = 0.011;
+const RIPPLE_SLIDE: f32 = 0.012;
+// Ripples too fine to draw at a pixel's range still break up what the water mirrors.
+// This stands in for them at a size the eye can follow: how far the water leans toward
+// or away from the eye, within about one either way, from wave trains near `span`
+// metres long that run off downwind as ripples that long would.
+fn shiver(p: vec2f, span: f32) -> f32 {
+    let wind = normalize(waters.trains[0].xy);
+    let level = log2(max(span, 0.05));
+    let rung = floor(level);
+    let between = level - rung;
+    var lean = 0.;
+    for (var i = -1; i <= 1; i++) {
+        // Each length fades in and out as the range changes, so none of them pops.
+        let share = select(1., select(between, 1. - between, i < 0), i != 0);
+        let k = rung + f32(i);
+        let number = TAU / exp2(k);
+        let rate = round(sqrt(9.81 * number) * RIPPLE_PERIOD / TAU) * TAU / RIPPLE_PERIOD;
+        for (var j = 0; j < 2; j++) {
+            let veer = 1.1 * sin(k * 2.4 + f32(j) * 2.1);
+            let along = vec2f(wind.x * cos(veer) - wind.y * sin(veer), wind.x * sin(veer) + wind.y * cos(veer));
+            lean += share * sin(dot(along, p) * number - rate * waters.weather.w + k * 1.7 + f32(j) * 2.9);
+        }
+    }
+    return 0.4 * lean;
+}
+
 // Steps up a reflected ray, the height it climbs to and how far out it gives up. The
 // steps are closest low down, where hulls meet the water, and far apart up the cliffs.
 const MARCH: i32 = 12;
-const REFINE: i32 = 4;
+const REFINE: i32 = 5;
 const MIRROR_HEIGHT: f32 = 240.;
 const MIRROR_REACH: f32 = 1600.;
 
@@ -316,53 +351,63 @@ fn on_screen(clip: vec4f) -> bool {
     return clip.w > 0. && all(abs(clip.xy) <= vec2f(clip.w));
 }
 // What stands above the water mirrored at a point, from the picture of the solid things
-// drawn so far, and how surely: its colour, then 0 where only sky is mirrored. The ray
-// is marched up off level water, then laid along the wave's own slope for the colour.
-fn mirrored_scene(world: vec3f, d: vec3f, n: vec3f) -> vec4f {
+// drawn so far, and how surely: its colour, then 0 where only sky is mirrored. `toward`
+// is the way the eye looks at the point. `tip` is how far the water there leans toward
+// the eye, as a slope of the line of sight: it mirrors what flat water that much farther
+// down the screen would, unless a shore or a hull hides that water.
+fn mirrored_scene(at: vec3f, toward: vec3f, tip: f32) -> vec4f {
+    var world = at;
+    var d = toward;
+    var start = view.clip_from_world * vec4f(world, 1.);
+    let tipped = normalize(vec3f(d.x, min(d.y - tip, 0.5 * d.y), d.z));
+    let seen = view.world_position + tipped * ((at.y - view.world_position.y) / tipped.y);
+    let slid = view.clip_from_world * vec4f(seen, 1.);
+    if on_screen(slid) && depth_gap(slid) <= 0. {
+        world = seen;
+        d = tipped;
+        start = slid;
+    }
     let rise = -d.y;
     if rise <= 0.002 { return vec4f(0.); }
-    let ray = vec3f(d.x, rise, d.z);
     let reach = min(MIRROR_HEIGHT / rise, MIRROR_REACH);
-    let start = view.clip_from_world * vec4f(world, 1.);
-    let along = view.clip_from_world * vec4f(ray, 0.);
+    let along = view.clip_from_world * vec4f(d.x, rise, d.z, 0.);
     var open = 0.;
-    var struck = -1.;
     for (var i = 1; i <= MARCH; i++) {
         let f = f32(i) / f32(MARCH);
         let t = reach * f * f * f;
         let clip = start + along * t;
         if !on_screen(clip) { break; }
         let gap = depth_gap(clip);
-        if gap > 0. {
-            struck = t;
-            break;
+        // A ray that has gone into something lies behind its face by no more than the step
+        // it took. Farther behind, it has only passed behind something nearer the eye, a
+        // plane or a mast or the ship herself, and carries on to whatever stands beyond.
+        if gap > 0. && gap < 2. + t - open {
+            var clear = open;
+            var struck = t;
+            for (var j = 0; j < REFINE; j++) {
+                let mid = 0.5 * (clear + struck);
+                let behind = depth_gap(start + along * mid);
+                if behind > 0. && behind < 2. + mid - clear { struck = mid; } else { clear = mid; }
+            }
+            let hit = start + along * struck;
+            let behind = depth_gap(hit);
+            if behind > 0. && behind < 1. + 2. * (struck - clear) + 0.01 * hit.w {
+                let ndc = hit.xy / hit.w;
+                let frag = ndc_to_frag_coord(ndc);
+                let size = vec2f(textureDimensions(view_transmission_texture));
+                let color = textureSampleLevel(view_transmission_texture, view_transmission_sampler, frag / size, 0.).rgb;
+                // Fade out toward the sides and top of the screen, where the picture ends, and
+                // toward the end of the ray, so nearer water doesn't stop mirroring along a line.
+                let edge = min(1. - abs(ndc.x), 1. - ndc.y);
+                let spent = 1. - smoothstep(0.55, 1., struck / reach);
+                return vec4f(color, smoothstep(0., 0.08, edge) * spent);
+            }
         }
         // Risen above the eye into open sky, the ray is clear of the skyline below it.
         if gap == SKY_GAP && world.y + rise * t > view.world_position.y { break; }
         open = t;
     }
-    if struck < 0. { return vec4f(0.); }
-    for (var i = 0; i < REFINE; i++) {
-        let mid = 0.5 * (open + struck);
-        if depth_gap(start + along * mid) > 0. { struck = mid; } else { open = mid; }
-    }
-    let hit = start + along * struck;
-    // Passing behind something nearer the eye is no hit.
-    if depth_gap(hit) > 1. + 2. * (struck - open) + 0.01 * hit.w { return vec4f(0.); }
-    // The waves turn the ray aside: look where the true reflection would have gone the
-    // same distance, while that still lands on the thing mirrored.
-    var at = hit;
-    let wobbled = view.clip_from_world * vec4f(world + reflect(d, n) * struck, 1.);
-    if on_screen(wobbled) && abs(depth_gap(wobbled)) < 3. + 0.08 * struck { at = wobbled; }
-    let ndc = at.xy / at.w;
-    let frag = ndc_to_frag_coord(ndc);
-    let size = vec2f(textureDimensions(view_transmission_texture));
-    let color = textureSampleLevel(view_transmission_texture, view_transmission_sampler, frag / size, 0.).rgb;
-    // Fade out toward the sides and top of the screen, where the picture ends, and toward
-    // the end of the ray, so nearer water doesn't stop mirroring along a line.
-    let edge = min(1. - abs(ndc.x), 1. - ndc.y);
-    let spent = 1. - smoothstep(0.55, 1., struck / reach);
-    return vec4f(color, smoothstep(0., 0.08, edge) * spent);
+    return vec4f(0.);
 }
 }
 
@@ -386,7 +431,7 @@ fn fragment(in: SeaVertex) -> @location(0) vec4f {
     let lain = shown(p, waters.focus.w);
     if lain > 0. { left = curved(foam_texture, foam_sampler, foam_uv).rg * lain; }
     // The enemy hulls' own wakes, which the patch reaches only near the ship.
-    let fleet = fleet_wakes(p);
+    let fleet = fleet_wakes(p, footprint);
     let trail = max(left.x * 1.5, fleet.x);
     let slick = max(left.y, fleet.y);
 
@@ -418,7 +463,16 @@ fn fragment(in: SeaVertex) -> @location(0) vec4f {
         // waves are too small to draw.
         let whole = clamp(1. - smoothstep(0.03, 0.3, sqrt(lost)) * 0.75 - 0.3 * state, 0., 1.);
         if fresnel > 0.03 && whole > 0.02 {
-            let scene = mirrored_scene(in.world, d, normalize(mix(vec3f(0., 1., 0.), n, 0.5)));
+            // Water leaning toward the eye mirrors what stands higher, as the water a
+            // little nearer would if it lay flat. So the swell, the ship's wash and the
+            // ripples slide the picture up and down the screen in bands, least in a
+            // hull's slick.
+            let face = -normalize(d.xz);
+            let heave = dot(vec2f(rolling.x - stirred.y, rolling.z - stirred.z), face) / rolling.y;
+            let lean = 3. * heave + shiver(p, footprint * RIPPLE_BAND * view.viewport.w)
+                * ((0.55 + 0.6 * state) * (1. - 0.9 * slick));
+            let tip = RIPPLE_SLIDE * lean / (sqrt(1. + 0.25 * lean * lean) * view.clip_from_view[1][1]);
+            let scene = mirrored_scene(in.world, d, tip);
             mirrored = mix(mirrored, scene.rgb, scene.a * whole);
         }
     }
@@ -485,14 +539,20 @@ fn fragment(in: SeaVertex) -> @location(0) vec4f {
             * (0.42 + 0.74 * smoothstep(0.16, 0.72, pores));
         sea = mix(sea, vec3f(0.11,0.34,0.35) * daylight, 0.43 * bow_white);
     }
+    // Where the white is the enemy hulls' own, rather than the ship's, the shore's or the wind's.
+    let theirs = smoothstep(-0.1, 0.2, max(fleet.x, fleet.z)
+        - max(max(bow_white, left.x * 1.5), max(surf, breaking)));
     sea = mix(sea, vec3f(0.11,0.34,0.35) * daylight, 0.43 * fleet.z);
     bow_white = max(bow_white, fleet.z);
     let amount = max(bow_white, max(surf, max(trail, breaking)));
     let net = lace(p);
     let veins = smoothstep(0., 0.28, amount - net);
     let cover = mix(0.75 * smoothstep(0.15, 1.1, amount), veins, near);
+    // Far off, the water mirrors a sky as bright as foam and a wake would fade into
+    // it, so the enemy hulls' white is lifted as the water turns to a mirror.
     let white = vec3f(0.86,0.90,0.90) * (0.86 + 0.14 * net + 0.12 * bow_bubbles)
-        * (mix(0.52, 0.50, overcast) + 0.46 * max(dot(n, SUN), 0.) * (1. - overcast) * lit);
+        * (mix(0.52, 0.50, overcast) + 0.46 * max(dot(n, SUN), 0.) * (1. - overcast) * lit)
+        * (1. + 0.9 * fresnel * theirs);
     sea = mix(sea, white, cover * 0.94);
 
     let haze = 0.88 * (1. - exp(-pow(dist / 2680., 1.6)));

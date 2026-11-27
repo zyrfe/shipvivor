@@ -64,7 +64,10 @@ fn a_hull_at_speed_trails_fading_widening_white_water_astern() {
     let bound = wakes.bounds[0];
     let inside = |at: Vec2, reach: f32| at.distance(bound.truncate().truncate()) + reach <= bound.z;
     assert!(track.iter().all(|p| inside(p.truncate().truncate(), p.w)));
-    assert!(inside(pos + shipvivor_compass::direction(0.) * CRUISER.bow, hull.z));
+    assert!(inside(
+        pos + shipvivor_compass::direction(0.) * CRUISER.bow,
+        hull.z
+    ));
 }
 
 #[test]
@@ -107,6 +110,8 @@ fn only_the_nearest_hulls_are_drawn() {
     tracks.step(TICK, fleet);
     let wakes = tracks.draw(Vec2::ZERO);
     assert_eq!(wakes.count, WAKES as u32);
-    let farthest = (0..WAKES).map(|slot| wakes.hulls[2 * slot].x).fold(0., f32::max);
+    let farthest = (0..WAKES)
+        .map(|slot| wakes.hulls[2 * slot].x)
+        .fold(0., f32::max);
     assert_eq!(farthest, 100. * (WAKES - 1) as f32);
 }

@@ -419,7 +419,10 @@ impl Chart<'_> {
                 let w = ((r * r - y * y) as f32).sqrt() as i32;
                 self.line(c + IVec2::new(-w, y), c + IVec2::new(w, y), ground);
             }
-            if island.kind == shipvivor_encounter::LandmarkKind::Beacon {
+            // A lighthouse shows its light until it is brought down.
+            if island.kind == shipvivor_encounter::LandmarkKind::Beacon
+                && island.features.iter().all(|tower| tower.standing())
+            {
                 self.dot(c, WHITE);
             }
         }
@@ -526,6 +529,16 @@ impl Chart<'_> {
             self.line(p - wing, tip, ENEMY);
             self.line(tip, p + wing, ENEMY);
             self.line(tip, p - (nose * 2.).round().as_ivec2(), ENEMY);
+        }
+        // An airfield's bombers and torpedo planes are the strafer's mark.
+        for plane in battle.warplanes() {
+            let p = self.project(plane.body.pos);
+            let nose = plane.body.forward();
+            let wing = (nose.perp() * 4.).round().as_ivec2();
+            let tip = p + (nose * 2.).round().as_ivec2();
+            self.line(p - wing, tip, ENEMY);
+            self.line(tip, p + wing, ENEMY);
+            self.line(tip, p - (nose * 3.).round().as_ivec2(), ENEMY);
         }
         // An enemy torpedo is a white head on the red line of its track, so its run
         // across her course can be read off the chart.

@@ -21,11 +21,51 @@ const PATROL_STAFF: (f32, f32) = (5.5, 2.4);
 /// A torpedo boat wears hers on a short staff right aft, over the tube's breech.
 const TORPEDO_BOAT_STAFF: (f32, f32) = (5.1, 1.9);
 
+/// What fire leaves of paint: the colour a wrecked ship's upperworks burn down to.
+const SOOT: Color = Color::srgb(0.085, 0.08, 0.075);
+
+/// `paint` scorched toward soot by `burnt`, from 0 for none to 1 for black.
+fn scorched(paint: Color, burnt: f32) -> Color {
+    let (a, b) = (paint.to_srgba(), SOOT.to_srgba());
+    let k = burnt.clamp(0., 1.);
+    Color::srgb(
+        a.red + (b.red - a.red) * k,
+        a.green + (b.green - a.green) * k,
+        a.blue + (b.blue - a.blue) * k,
+    )
+}
+
+/// A turn of `angle` radians about the line through `pivot` along `axis`.
+fn bent(pivot: Vec3, axis: Vec3, angle: f32) -> bevy::math::Affine3A {
+    bevy::math::Affine3A::from_translation(pivot)
+        * bevy::math::Affine3A::from_axis_angle(axis.normalize(), angle)
+        * bevy::math::Affine3A::from_translation(-pivot)
+}
+
 #[derive(Default)]
 struct Metal(Facets);
 impl Metal {
     /// An eight-sided casting. Sizes are full beam and length.
     fn tier(&mut self, center: Vec3, size: Vec3, taper: f32, wall: Color, roof: Color) {
+        self.tier_bent(
+            center,
+            size,
+            taper,
+            wall,
+            roof,
+            bevy::math::Affine3A::IDENTITY,
+        );
+    }
+    /// As [`Metal::tier`], moved by `bend`: knocked askew by a shell.
+    fn tier_bent(
+        &mut self,
+        center: Vec3,
+        size: Vec3,
+        taper: f32,
+        wall: Color,
+        roof: Color,
+        bend: bevy::math::Affine3A,
+    ) {
         let outline = [
             (-0.35, -0.5),
             (0.35, -0.5),
@@ -38,7 +78,11 @@ impl Metal {
         ];
         let foot = outline.map(|(x, z)| center + Vec3::new(x * size.x, 0., z * size.z));
         let cap = center + Vec3::Y * size.y;
-        let top = foot.map(|p| cap + (p - center) * taper);
+        let top = foot.map(|p| bend.transform_point3(cap + (p - center) * taper));
+        let (foot, cap) = (
+            foot.map(|p| bend.transform_point3(p)),
+            bend.transform_point3(cap),
+        );
         for i in 0..8 {
             let j = (i + 1) % 8;
             self.0.triangle([foot[i], top[j], foot[j]], wall);
@@ -120,42 +164,126 @@ pub fn funnels(class: EnemyClass) -> Vec<(Vec3, f32)> {
     }
 }
 
+/// Everything she carries above her deck in one mesh: her deckwork with her upperworks
+/// standing sound on it. Its top is her masthead.
 pub fn superstructure(class: EnemyClass) -> Mesh {
-    if class == Coaster {
-        return coaster();
+    match class {
+        Coaster => coaster(),
+        TorpedoBoat => torpedo_boat(),
+        _ => {
+            let mut m = Metal::default();
+            deckwork_into(&mut m, class);
+            upperworks_into(&mut m, class, 0);
+            m.0.finish()
+        }
     }
-    if class == TorpedoBoat {
-        return torpedo_boat();
+}
+
+/// What she carries above her deck that shells don't knock about: her funnels, and a
+/// freighter's deck cargo. A coaster's and a torpedo boat's take in their bridges too.
+pub fn deckwork(class: EnemyClass) -> Mesh {
+    match class {
+        Coaster => coaster(),
+        TorpedoBoat => torpedo_boat(),
+        _ => {
+            let mut m = Metal::default();
+            deckwork_into(&mut m, class);
+            m.0.finish()
+        }
+    }
+}
+
+/// Her bridge, its mast and any spotting top or signal gantry over it, at `stage`: 0
+/// sound, 1 battered, scorched, its windows blown in and its mast leaning, and 2
+/// wrecked, shot down to a blackened stump. `None` for a class whose bridge is part
+/// of its deckwork.
+pub fn upperworks(class: EnemyClass, stage: u8) -> Option<Mesh> {
+    if matches!(class, Coaster | TorpedoBoat) {
+        return None;
     }
     let mut m = Metal::default();
+    upperworks_into(&mut m, class, stage);
+    Some(m.0.finish())
+}
+
+/// Whether her colours fly from her upperworks, so they go when those are battered.
+/// A patrol boat wears hers on a staff aft, and a coaster and a torpedo boat theirs
+/// on their deckwork.
+pub fn colours_aloft(class: EnemyClass) -> bool {
+    !matches!(class, Patrol | Coaster | TorpedoBoat)
+}
+
+fn upperworks_into(m: &mut Metal, class: EnemyClass, stage: u8) {
     let p = class.profile();
     let v = Vec3::new;
     let d = p.deck;
     let s = p.gun_scale;
     let bridge = |x, y, z| v(x * s, d + y * s, z * s);
+    // How far fire has blackened her paint, and how far her bridge house is crushed.
+    let burnt = [0., 0.5, 0.85][usize::from(stage.min(2))];
+    let paint = |c: Color| scorched(c, burnt);
+    let crushed = if stage >= 2 { 0.6 } else { 1. };
     // Stacked wings and a continuous dark window strip survive the distant silhouette.
     m.tier(
         bridge(0., 0., 0.),
-        v(2.45, 1.30, 3.1) * s,
+        v(2.45, 1.30 * crushed, 3.1) * s,
         0.87,
-        STEEL,
-        PALE,
+        paint(STEEL),
+        paint(PALE),
     );
-    m.tier(
-        bridge(0., 1.25, -0.2),
-        v(2.1, 0.55, 2.25) * s,
-        1.,
-        GLASS,
-        IRON,
-    );
-    m.tier(
-        bridge(0., 1.8, -0.2),
-        v(2.45, 0.28, 2.55) * s,
-        0.94,
-        RED,
-        PALE,
-    );
-    if class != Patrol {
+    let roof = 1.25 * crushed;
+    match stage {
+        0 => {
+            m.tier(
+                bridge(0., 1.25, -0.2),
+                v(2.1, 0.55, 2.25) * s,
+                1.,
+                GLASS,
+                IRON,
+            );
+            m.tier(
+                bridge(0., 1.8, -0.2),
+                v(2.45, 0.28, 2.55) * s,
+                0.94,
+                RED,
+                PALE,
+            );
+        }
+        1 => {
+            // The glazing blown in, and the roof over it buckled down to one side.
+            m.tier(
+                bridge(0., 1.25, -0.2),
+                v(2.1, 0.55, 2.25) * s,
+                1.,
+                SOOT,
+                IRON,
+            );
+            let buckle = bent(bridge(-1.2, 1.8, 0.), Vec3::Z, 0.2);
+            m.tier_bent(
+                bridge(0., 1.8, -0.2),
+                v(2.45, 0.28, 2.55) * s,
+                0.94,
+                paint(RED),
+                paint(PALE),
+                buckle,
+            );
+        }
+        _ => {
+            // A torn sheet of her roof, tipped up off the stump.
+            let torn = bent(bridge(0.8, roof, 0.), v(0.4, 0., 1.), -0.55);
+            m.tier_bent(
+                bridge(0.3, roof, 0.3),
+                v(1.5, 0.12, 1.6) * s,
+                1.,
+                SOOT,
+                paint(RED),
+                torn,
+            );
+        }
+    }
+    if class == Patrol {
+        // A patrol boat has no mast over her bridge.
+    } else if stage == 0 {
         m.tier(
             bridge(0., 2.07, -0.2),
             v(1.5, 0.52, 1.55) * s,
@@ -177,7 +305,200 @@ pub fn superstructure(class: EnemyClass) -> Mesh {
             PALE,
             PALE,
         );
+    } else if stage == 1 {
+        // The upper tier knocked askew, and the mast leaning over it, its yard with it.
+        let askew = bent(bridge(0.7, 2.07, -0.2), Vec3::Z, -0.22);
+        m.tier_bent(
+            bridge(0., 2.07, -0.2),
+            v(1.5, 0.52, 1.55) * s,
+            0.80,
+            paint(STEEL),
+            paint(PALE),
+            askew,
+        );
+        let lean = bent(bridge(0., 2.58, -0.2), v(1., 0., 0.4), 0.75);
+        m.tier_bent(
+            bridge(0., 2.58, -0.2),
+            v(0.16, 2., 0.17) * s,
+            0.6,
+            IRON,
+            IRON,
+            lean,
+        );
+        m.tier_bent(
+            bridge(0., 3.7, -0.2),
+            v(2.15, 0.12, 0.15) * s,
+            1.,
+            PALE,
+            PALE,
+            lean,
+        );
     } else {
+        // The broken foot of her mast.
+        let snapped = bent(bridge(0., roof, -0.2), Vec3::X, 0.3);
+        m.tier_bent(
+            bridge(0., roof, -0.2),
+            v(0.2, 0.55, 0.2) * s,
+            0.5,
+            SOOT,
+            IRON,
+            snapped,
+        );
+    }
+    if class.is_flagship() {
+        flagship_works(m, class, stage);
+    }
+    if class == Regent {
+        regent_works(m, stage);
+    }
+}
+
+/// The flagship's glazed galleries and high signal gantry, which carries her forked
+/// standard over the three stacks.
+fn flagship_works(m: &mut Metal, class: EnemyClass, stage: u8) {
+    let p = class.profile();
+    let v = Vec3::new;
+    let d = p.deck;
+    let s = p.gun_scale;
+    let bridge = |x, y, z| v(x * s, d + y * s, z * s);
+    let burnt = [0., 0.5, 0.85][usize::from(stage.min(2))];
+    let paint = |c: Color| scorched(c, burnt);
+    // Glazed galleries under the fork give the flagship a bridge visible above its batteries.
+    m.tier(
+        bridge(0., 2.10, 0.),
+        v(2.75, 0.72, 3.) * s,
+        0.89,
+        paint(PALE),
+        IRON,
+    );
+    if stage >= 2 {
+        return;
+    }
+    let glass = if stage == 0 { GLASS } else { SOOT };
+    m.tier(
+        bridge(0., 2.82, 0.),
+        v(2.85, 0.48, 3.05) * s,
+        0.96,
+        glass,
+        IRON,
+    );
+    let sag = if stage == 0 {
+        bevy::math::Affine3A::IDENTITY
+    } else {
+        bent(bridge(1.6, 3.30, 0.), Vec3::Z, 0.18)
+    };
+    m.tier_bent(
+        bridge(0., 3.30, 0.),
+        v(3.15, 0.18, 3.28) * s,
+        0.93,
+        paint(RED),
+        paint(PALE),
+        sag,
+    );
+    for side in [-1., 1.] {
+        for z in [-0.8, 0., 0.8] {
+            m.tier(
+                bridge(side * 1.40, 2.8, z),
+                v(0.12, 0.54, 0.12) * s,
+                1.,
+                PALE,
+                PALE,
+            );
+        }
+    }
+    let h = d + 5.0 * s;
+    // Battered, the port leg of the gantry is shot through and the whole of it leans.
+    let lean = if stage == 0 {
+        bevy::math::Affine3A::IDENTITY
+    } else {
+        bent(v(2.7, d + 3.5 * s, 0.), Vec3::Z, 0.35)
+    };
+    for x in [-2.7, 2.7] {
+        m.tier_bent(
+            v(x, d + 3.5 * s, 0.),
+            v(0.53, h - d - 3.5 * s, 0.68),
+            0.68,
+            IRON,
+            PALE,
+            lean,
+        );
+        m.tier_bent(v(x, h, 0.), v(0.32, 2.5, 0.32), 0.8, PALE, PALE, lean);
+    }
+    m.tier_bent(
+        v(0., h - 1.0, 0.),
+        v(7.2, 0.85, 2.1),
+        1.,
+        paint(RED),
+        IRON,
+        lean,
+    );
+}
+
+/// The Regent's second armoured bridges and her tall twin-legged tower with its gold
+/// crossbar, which mark her out at range.
+fn regent_works(m: &mut Metal, stage: u8) {
+    let d = Regent.profile().deck;
+    let v = Vec3::new;
+    let burnt = [0., 0.5, 0.85][usize::from(stage.min(2))];
+    let paint = |c: Color| scorched(c, burnt);
+    for z in [-40., 43.] {
+        let crushed = if stage >= 2 { 0.55 } else { 1. };
+        m.tier(
+            v(0., d, z),
+            v(12., 5. * crushed, 13.),
+            0.75,
+            paint(STEEL),
+            IRON,
+        );
+        if stage < 2 {
+            let glass = if stage == 0 { GLASS } else { SOOT };
+            m.tier(v(0., d + 5., z), v(9.3, 2., 8.), 0.91, glass, paint(PALE));
+            m.tier(v(0., d + 7., z), v(10., 0.9, 8.8), 0.97, paint(GOLD), PALE);
+        }
+    }
+    // The tower's legs: whole, leaning over with the crossbar on them, or snapped off.
+    let reach = if stage >= 2 { 9. } else { 24. };
+    let lean = if stage == 1 {
+        bent(v(0., d, 0.), Vec3::Z, 0.2)
+    } else {
+        bevy::math::Affine3A::IDENTITY
+    };
+    for x in [-6.2, 6.2] {
+        let (foot, top) = (v(x, d, 0.), v(x * (1. - 0.44 * reach / 24.), d + reach, 0.));
+        m.0.tube(
+            lean.transform_point3(foot),
+            lean.transform_point3(top),
+            1.2,
+            0.55 + 0.65 * (1. - reach / 24.),
+            paint(STEEL),
+        );
+    }
+    if stage < 2 {
+        m.tier_bent(
+            v(0., d + 23., 0.),
+            v(17., 1.7, 3.5),
+            0.93,
+            paint(GOLD),
+            IRON,
+            lean,
+        );
+        m.tier_bent(
+            v(0., d + 24.7, 0.),
+            v(4.6, 2.5, 3.4),
+            0.80,
+            paint(GLASS),
+            PALE,
+            lean,
+        );
+    }
+}
+
+fn deckwork_into(m: &mut Metal, class: EnemyClass) {
+    let p = class.profile();
+    let v = Vec3::new;
+    let d = p.deck;
+    let s = p.gun_scale;
+    if class == Patrol {
         let (aft, height) = PATROL_STAFF;
         m.tier(v(0., d, aft), v(0.13, height, 0.13), 0.7, IRON, PALE);
     }
@@ -216,67 +537,6 @@ pub fn superstructure(class: EnemyClass) -> Mesh {
     }
     // A capital ship's deck-edge armour hangs in strakes of its own (see `strake`),
     // which can be shot off her.
-    if class.is_flagship() {
-        // A high signal gantry carries the forked standard over the three stacks.
-        // Glazed galleries under the fork give the flagship a bridge visible above its batteries.
-        m.tier(
-            bridge(0., 2.10, 0.),
-            v(2.75, 0.72, 3.) * s,
-            0.89,
-            PALE,
-            IRON,
-        );
-        m.tier(
-            bridge(0., 2.82, 0.),
-            v(2.85, 0.48, 3.05) * s,
-            0.96,
-            GLASS,
-            IRON,
-        );
-        m.tier(
-            bridge(0., 3.30, 0.),
-            v(3.15, 0.18, 3.28) * s,
-            0.93,
-            RED,
-            PALE,
-        );
-        for side in [-1., 1.] {
-            for z in [-0.8, 0., 0.8] {
-                m.tier(
-                    bridge(side * 1.40, 2.8, z),
-                    v(0.12, 0.54, 0.12) * s,
-                    1.,
-                    PALE,
-                    PALE,
-                );
-            }
-        }
-        let h = d + 5.0 * s;
-        for x in [-2.7, 2.7] {
-            m.tier(
-                v(x, d + 3.5 * s, 0.),
-                v(0.53, h - d - 3.5 * s, 0.68),
-                0.68,
-                IRON,
-                PALE,
-            );
-            m.tier(v(x, h, 0.), v(0.32, 2.5, 0.32), 0.8, PALE, PALE);
-        }
-        m.tier(v(0., h - 1.0, 0.), v(7.2, 0.85, 2.1), 1., RED, IRON);
-    }
-    if class == Regent {
-        // A second armoured bridge and the high gold crossbar distinguish the Regent at range.
-        for z in [-40., 43.] {
-            m.tier(v(0., d, z), v(12., 5., 13.), 0.75, STEEL, IRON);
-            m.tier(v(0., d + 5., z), v(9.3, 2., 8.), 0.91, GLASS, PALE);
-            m.tier(v(0., d + 7., z), v(10., 0.9, 8.8), 0.97, GOLD, PALE);
-        }
-        for x in [-6.2, 6.2] {
-            m.0.tube(v(x, d, 0.), v(x * 0.56, d + 24., 0.), 1.2, 0.55, STEEL);
-        }
-        m.tier(v(0., d + 23., 0.), v(17., 1.7, 3.5), 0.93, GOLD, IRON);
-        m.tier(v(0., d + 24.7, 0.), v(4.6, 2.5, 3.4), 0.80, GLASS, PALE);
-    }
     if class == Freighter {
         for fore in [4.5, 8.4, -5.5, -9.4] {
             for x in [-1.1, 1.1] {
@@ -284,10 +544,10 @@ pub fn superstructure(class: EnemyClass) -> Mesh {
                 m.tier(v(x, d + 1.7, -fore), v(0.28, 0.10, 3.5), 1., IRON, IRON);
             }
         }
+        // Her derrick, right aft.
         m.tier(v(0., d, 11.8), v(0.35, 6.6, 0.35), 1., GOLD, GOLD);
         m.tier(v(0., d + 6.3, 9.4), v(0.36, 0.32, 5.1), 1., GOLD, GOLD);
     }
-    m.0.finish()
 }
 
 /// One of the strakes of exposed deck-edge armour along a battleship's or a flagship's

@@ -1,5 +1,6 @@
 //! The refits listed in a section's callout: pictogram tiles with a one-word caption,
-//! one row per kind of work. A click picks one out, and a second click orders it.
+//! one row per kind of work. A click orders one at once, booking its price from the
+//! points, and work the yard cannot make or the points cannot cover takes no click.
 use super::*;
 use shipvivor_encounter::TurretLayout;
 
@@ -72,7 +73,7 @@ fn row_of(job: DockJob) -> Row {
         DockJob::Calibre { .. } => Row::Bore,
         DockJob::Barrels { .. } | DockJob::Barbette { .. } => Row::Turret,
         DockJob::Fitting(
-            TripleTurrets | QuadTurrets | ArmorPiercing | Caps | Velocity | Loader | Shells,
+            TripleTurrets | QuadTurrets | Caps | Velocity | Loader | Shells,
         ) => Row::Guns,
         DockJob::Fitting(TrainingGear) => Row::Guns,
         DockJob::Fitting(Turbines | Hardening | Pumps) => Row::Machinery,
@@ -176,12 +177,16 @@ pub(super) fn caption(job: DockJob, run: &Campaign) -> &'static str {
         DockJob::Fitting(card) => match card {
             TripleTurrets => "Triple",
             QuadTurrets => "Quad",
-            ArmorPiercing => "AP",
             Caps => "Caps",
             Velocity => "Velocity",
             Loader | QuickSecondaries => "Reload",
             MoreSecondaries => "More",
-            TwinSecondaries => "Twin",
+            // The mounting the next barrel makes, or the last once every one is fitted.
+            TwinSecondaries => match run.fittings.secondaries().barrels {
+                ..=1 => "Twin",
+                2 => "Triple",
+                _ => "Quad",
+            },
             SecondaryRange => "Range",
             HeavySecondaries => "Heavy",
             Turbines => "Turbines",
@@ -252,7 +257,9 @@ pub(super) fn options(
                 row
             }
         };
+        // Picked out with the arrow keys.
         let selected = run.dock_option == Some(i);
+        let quote = run.quote(job);
         // Cyan is what the ship carries now: the bore mounted, or a fitting at its last rank.
         let tint = if selected {
             brass()
@@ -260,35 +267,33 @@ pub(super) fn options(
             || fully_fitted(job, run)
         {
             cyan()
-        } else if job.fits(run) {
+        } else if quote.is_some() {
             paper()
         } else {
             rule()
         };
-        // A click picks a refit out to show its figures, and a second click orders it.
-        let action = if selected {
-            Action::Order(i)
-        } else {
-            Action::Preview(i)
-        };
+        // A click orders the refit at once. One the yard cannot make takes no click.
+        let action = quote.map(|_| Action::Order(i));
         if let DockJob::Calibre { to: inches, .. } = job {
             let chip = button(
                 cmd,
                 row,
-                Some(action),
+                action,
                 selected,
                 false,
+                // The bore sits low, clear of the price in the top corner.
                 Node {
                     width: px(46),
                     height: px(46),
                     border: UiRect::all(px(1)),
+                    padding: UiRect::bottom(px(6)),
                     justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
+                    align_items: AlignItems::FlexEnd,
                     ..default()
                 },
             );
             text(cmd, chip, format!("{inches}\""), 16., tint);
-            short_price(cmd, chip, run, art, job);
+            price(cmd, chip, run, art, job, quote);
             if beckoned == Some(Need::Job(job)) {
                 cmd.entity(chip).insert(Beckon);
             }
@@ -297,7 +302,7 @@ pub(super) fn options(
         let tile = button(
             cmd,
             row,
-            Some(action),
+            action,
             selected,
             false,
             Node {
@@ -313,7 +318,7 @@ pub(super) fn options(
         );
         icon(cmd, tile, tile_art(job, run, art), tint, 22.);
         text(cmd, tile, caption(job, run), 10., tint);
-        short_price(cmd, tile, run, art, job);
+        price(cmd, tile, run, art, job, quote);
         if beckoned == Some(Need::Job(job)) {
             cmd.entity(tile).insert(Beckon);
         }
@@ -323,31 +328,90 @@ pub(super) fn options(
     }
 }
 
-/// Work the ship could take but the points left cannot cover shows its price in red, as
-/// the hull and stock tiles do.
-fn short_price(cmd: &mut Commands, tile: Entity, run: &Campaign, art: &Insignia, job: DockJob) {
-    if job.fits(run) && run.points_after(job).is_none() {
-        price_tag(cmd, tile, art, job.cost(), cards::Change::Cost.color());
+/// A tile's price, as the hull and stock tiles show theirs: in brass, what a click books
+/// from the points, and in red, work the ship could take but the points left cannot
+/// cover. Work that books nothing, or gives points back, shows none.
+fn price(
+    cmd: &mut Commands,
+    tile: Entity,
+    run: &Campaign,
+    art: &Insignia,
+    job: DockJob,
+    quote: Option<i32>,
+) {
+    match quote {
+        Some(spent) => {
+            if let Ok(spent @ 1..) = u16::try_from(spent) {
+                price_tag(cmd, tile, art, spent, brass());
+            }
+        }
+        None if job.fits(run) && run.points_after(job).is_none() => {
+            price_tag(cmd, tile, art, job.cost(), cards::Change::Cost.color());
+        }
+        None => {}
     }
 }
 
 /// A fitting fitted to its last rank: done, rather than refused.
+/// A deck full of secondaries that a longer hull would make room on is locked, not done.
 pub(super) fn fully_fitted(job: DockJob, run: &Campaign) -> bool {
     match job {
-        DockJob::Fitting(card) => run
-            .fittings
-            .ranks(card)
-            .is_some_and(|(fitted, most)| fitted >= most),
+        DockJob::Fitting(card) => {
+            run.ranks(card).is_some_and(|(fitted, most)| fitted >= most)
+                && run.refusal(job).is_none()
+        }
         _ => false,
     }
 }
 
+/// More ranks than this are shown on a meter, as pips would run into the price.
+const MOST_PIPS: u16 = 6;
+
 /// The ranks of a stacking fitting along the top left of its tile, clear of the price:
-/// cyan for each one fitted, brass for the one being previewed.
+/// cyan for each one fitted, brass for the one being previewed. A fitting with more
+/// ranks than pips fit, such as the secondaries a long hull has room for, shows them
+/// as a segmented meter along the foot of the tile instead.
 fn rank_pips(cmd: &mut Commands, tile: Entity, run: &Campaign, card: Card, previewed: bool) {
-    let Some((fitted, most)) = run.fittings.ranks(card) else {
+    let Some((fitted, most)) = run.ranks(card) else {
         return;
     };
+    let ink = |rank: u16| {
+        if rank < fitted {
+            cyan()
+        } else if previewed && rank == fitted {
+            brass()
+        } else {
+            rule()
+        }
+    };
+    if most > MOST_PIPS {
+        let meter = node(
+            cmd,
+            tile,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(4),
+                right: px(4),
+                bottom: px(2),
+                height: px(2),
+                column_gap: px(1),
+                ..default()
+            },
+            Color::NONE,
+        );
+        for rank in 0..most {
+            node(
+                cmd,
+                meter,
+                Node {
+                    flex_grow: 1.,
+                    ..default()
+                },
+                ink(rank),
+            );
+        }
+        return;
+    }
     let row = node(
         cmd,
         tile,

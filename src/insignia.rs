@@ -5,7 +5,8 @@ use bevy::{
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
-use shipvivor_campaign::Card;
+use shipvivor_campaign::{Card, Fleet};
+use shipvivor_encounter::EnemyClass;
 #[derive(Resource)]
 pub struct Insignia {
     pub chart_paper: Handle<Image>,
@@ -37,6 +38,19 @@ pub struct Insignia {
     pub length: Handle<Image>,
     pub turn: Handle<Image>,
     pub lock: Handle<Image>,
+    /// What holds a passage, on the chart: three small hulls, one of each size, or one
+    /// heavy hull with her turrets, seen from above with the bow up.
+    flotillas: Handle<Image>,
+    mixed_fleet: Handle<Image>,
+    battle_line: Handle<Image>,
+    /// The bosses, over the chart's round numbers: the Commodore's broad pennant, the
+    /// Parliament's crown, and the Regent's crown with its cross.
+    commodore: Handle<Image>,
+    parliament: Handle<Image>,
+    regent: Handle<Image>,
+    /// How hard a passage looks for the ship as she stands, on the chart: one rising bar
+    /// filled for an easy passage, up to all four for a deadly one.
+    gauge: [Handle<Image>; 4],
     /// The yard's stock of whole sections that are not turrets or engines.
     pub floatplane: Handle<Image>,
     pub missile: Handle<Image>,
@@ -49,7 +63,6 @@ pub struct Insignia {
     turbines: Handle<Image>,
     triple: Handle<Image>,
     quad: Handle<Image>,
-    armor_piercing: Handle<Image>,
     wing_mounts: Handle<Image>,
     wing_shells: Handle<Image>,
     wing_loaders: Handle<Image>,
@@ -69,6 +82,29 @@ pub struct Insignia {
     wing_turret: Handle<Image>,
 }
 impl Insignia {
+    /// The stamp for what holds a passage.
+    pub fn fleet(&self, fleet: Fleet) -> Handle<Image> {
+        match fleet {
+            Fleet::Flotillas => &self.flotillas,
+            Fleet::Mixed => &self.mixed_fleet,
+            Fleet::BattleLine => &self.battle_line,
+        }
+        .clone()
+    }
+    /// The gauge with `level` bars of four filled, from one for an easy passage.
+    pub fn gauge(&self, level: usize) -> Handle<Image> {
+        self.gauge[level.clamp(1, 4) - 1].clone()
+    }
+    /// The stamp for a boss, or `None` for a ship that is not one.
+    pub fn boss(&self, class: EnemyClass) -> Option<Handle<Image>> {
+        match class {
+            EnemyClass::Commodore => Some(&self.commodore),
+            EnemyClass::Parliament => Some(&self.parliament),
+            EnemyClass::Regent => Some(&self.regent),
+            _ => None,
+        }
+        .cloned()
+    }
     pub fn fitting(&self, card: Card) -> Handle<Image> {
         match card {
             Card::Loader => &self.loader,
@@ -78,7 +114,6 @@ impl Insignia {
             Card::Turbines => &self.turbines,
             Card::TripleTurrets => &self.triple,
             Card::QuadTurrets => &self.quad,
-            Card::ArmorPiercing => &self.armor_piercing,
             Card::MoreSecondaries => &self.wing_mounts,
             Card::HeavySecondaries => &self.wing_shells,
             Card::QuickSecondaries => &self.wing_loaders,
@@ -116,6 +151,8 @@ pub fn setup(
                 data.extend_from_slice(&match pixel {
                     b'#' => [255, 255, 255, 255],
                     b'+' => [30, 45, 50, 255],
+                    // A faint pixel, for the empty bars of the gauge.
+                    b':' => [255, 255, 255, 64],
                     _ => [0, 0, 0, 0],
                 });
             }
@@ -518,6 +555,111 @@ pub fn setup(
             "............",
             "............",
         ]),
+        flotillas: stamp([
+            "............",
+            ".....#......",
+            "....###.....",
+            "....###.....",
+            ".#..###..#..",
+            "###.###.###.",
+            "###..#..###.",
+            "###.....###.",
+            "###.....###.",
+            ".#.......#..",
+            "............",
+            "............",
+        ]),
+        mixed_fleet: stamp([
+            "....#.......",
+            "...###......",
+            "..#####.....",
+            "..##+##.....",
+            "..#####..#..",
+            "..#####.###.",
+            "..##+##.###.",
+            "..#####.###.",
+            "...###..###.",
+            "....#....#..",
+            "............",
+            "............",
+        ]),
+        battle_line: stamp([
+            ".....##.....",
+            "....####....",
+            "...######...",
+            "...##++##...",
+            "..###++###..",
+            "..########..",
+            "..########..",
+            "..###++###..",
+            "..###++###..",
+            "..########..",
+            "...######...",
+            "....####....",
+        ]),
+        // A swallow-tailed broad pennant on its staff.
+        commodore: stamp([
+            "#...........",
+            "##########..",
+            "#########...",
+            "#######.....",
+            "#########...",
+            "##########..",
+            "#...........",
+            "#...........",
+            "#...........",
+            "#...........",
+            "#...........",
+            "###.........",
+        ]),
+        parliament: stamp([
+            "............",
+            "............",
+            "#....##....#",
+            "##..####..##",
+            "###.####.###",
+            "############",
+            "############",
+            "##.##..##.##",
+            "############",
+            "............",
+            "############",
+            "............",
+        ]),
+        regent: stamp([
+            ".....##.....",
+            "....####....",
+            ".....##.....",
+            "#....##....#",
+            "##..####..##",
+            "###.####.###",
+            "############",
+            "##.##..##.##",
+            "############",
+            "............",
+            "############",
+            "............",
+        ]),
+        gauge: [1, 2, 3, 4].map(|level| {
+            // Four bars rising to the right, the first `level` of them filled.
+            let heights = [4, 6, 9, 12];
+            let rows: [String; 12] = std::array::from_fn(|row| {
+                (0..12)
+                    .map(|x| {
+                        let bar = x / 3;
+                        let height = heights[bar];
+                        if x % 3 == 2 || row < 12 - height {
+                            '.'
+                        } else if bar < level {
+                            '#'
+                        } else {
+                            ':'
+                        }
+                    })
+                    .collect()
+            });
+            stamp(std::array::from_fn(|row| rows[row].as_str()))
+        }),
         // Seen from above, nose up, with its two floats under the wing.
         floatplane: stamp([
             ".....##.....",
@@ -658,20 +800,6 @@ pub fn setup(
             ".##########.",
             "..########..",
             "............",
-        ]),
-        armor_piercing: stamp([
-            ".....#......",
-            "....###.....",
-            "....###.....",
-            "...#####....",
-            "###.###.####",
-            "###.###.####",
-            "...#####....",
-            "...#####....",
-            "...#####....",
-            "...#####....",
-            "............",
-            "...#####....",
         ]),
         wing_mounts: stamp([
             ".###........",

@@ -1,9 +1,36 @@
 //! Requisition and fitting rules at the between-leg yard.
-use super::{CALIBRES, Card, DockModule, Fittings, Phase, Run, ShipBeam, battery::cradle};
+use super::{CALIBRES, Card, DockModule, Fittings, Phase, Run, ShipBeam, battery::cradle, limits};
 use shipvivor_artillery::TurretLayout;
-use shipvivor_shipyard::{Component, Design, Frame, Gunhouse, MOST_TIER, Module, Sheet};
+use shipvivor_shipyard::{
+    Component, Design, Frame, Gunhouse, MOST_TIER, Module, Sheet, StrikeCraft,
+};
 
 pub const MAX_SECTIONS_PER_KIND: usize = 2;
+
+/// Floatplanes the plane sections of `design` have catapults for.
+pub fn plane_room(design: &Design) -> usize {
+    design.count(Component::Catapult) * usize::from(limits::PLANES_A_SECTION)
+}
+
+/// The most ranks of `card` a ship built to `design` has room for, for a card that
+/// wants room: secondaries and AA by her deck, which a longer hull adds to, and planes
+/// by her plane sections. `None` for every other card.
+pub fn deck_ranks(card: Card, design: &Design) -> Option<u16> {
+    let room = match card {
+        Card::MoreSecondaries => design
+            .wing_room()
+            .saturating_sub(shipvivor_artillery::Secondaries::STOCK.per_side),
+        Card::MoreAntiAir => {
+            design
+                .aa_room()
+                .saturating_sub(shipvivor_artillery::AntiAir::STOCK.mounts)
+                / 2
+        }
+        Card::MorePlanes => plane_room(design).saturating_sub(StrikeCraft::STOCK.planes),
+        _ => return None,
+    };
+    Some(room as u16)
+}
 /// The most main turrets a hull of her stock or a cruiser's beam carries. A capital
 /// beam carries more: see [`ShipBeam::most_turrets`].
 pub const MAX_GUN_STATIONS: usize = 4;
@@ -91,8 +118,9 @@ impl DockModule {
     /// the beam's [`ShipBeam::most_turrets`] instead, wing and double turrets included.
     pub fn most(self) -> usize {
         match self {
-            Self::Reserve | Self::EngineRoom | Self::Missiles => MAX_SECTIONS_PER_KIND,
-            Self::Floatplane => 1,
+            Self::Reserve | Self::EngineRoom | Self::Missiles | Self::Floatplane => {
+                MAX_SECTIONS_PER_KIND
+            }
             Self::Turret => MAX_GUN_STATIONS,
         }
     }
@@ -114,6 +142,8 @@ pub enum Refusal {
     Beam(ShipBeam),
     /// The hull must first be lengthened to this many metres.
     Length(u16),
+    /// The ship must first carry another section of this kind.
+    Section(DockModule),
 
     /// The basin takes no longer hull.
     Longest,
@@ -234,9 +264,7 @@ impl Run {
                     to: tier - 1,
                 });
             }
-            jobs.push(DockJob::Fitting(if !self.fittings.armor_piercing() {
-                ArmorPiercing
-            } else if self.fittings.can_fit(Caps) {
+            jobs.push(DockJob::Fitting(if self.fittings.can_fit(Caps) {
                 Caps
             } else {
                 Velocity
@@ -338,6 +366,77 @@ impl Run {
         (self.fittings.armor >= self.beam_class().most_armor()).then_some(Refusal::Beam(next))
     }
 
+    /// Secondaries a side her deck has room for: two on each open section, so a
+    /// longer hull carries more.
+    pub fn wing_room(&self) -> usize {
+        self.ship.design().wing_room()
+    }
+
+    /// AA mounts her deck has room for: the three pairs she was built with and a pair on
+    /// each open section, so a longer hull carries more.
+    pub fn aa_room(&self) -> usize {
+        self.ship.design().aa_room()
+    }
+
+    /// Floatplanes her plane sections have catapults for.
+    pub fn plane_room(&self) -> usize {
+        plane_room(self.ship.design())
+    }
+
+    /// Her deck has room for another rank of `card`. Only more guns or planes want room:
+    /// secondaries and AA a longer hull makes, and planes another plane section.
+    pub fn has_room(&self, card: Card) -> bool {
+        match card {
+            Card::MoreSecondaries => self.fittings.secondaries().per_side < self.wing_room(),
+            Card::MoreAntiAir => self.fittings.anti_air().mounts + 2 <= self.aa_room(),
+            Card::MorePlanes => self.fittings.strike_craft().planes < self.plane_room(),
+            _ => true,
+        }
+    }
+
+    /// Ranks of `card` fitted, out of the most she can take, as [`Fittings::ranks`]
+    /// counts them, but out of the most her deck has room for where that is fewer.
+    pub fn ranks(&self, card: Card) -> Option<(u16, u16)> {
+        let (fitted, most) = self.fittings.ranks(card)?;
+        let most = deck_ranks(card, self.ship.design()).map_or(most, |room| most.min(room));
+        Some((fitted.min(most), most))
+    }
+
+    /// Why she has no room for another rank of `card`, while the yard could still make
+    /// some: another plane section for a plane, or a longer hull for guns. `None` once
+    /// nothing she could be given would make room.
+    fn room_refusal(&self, card: Card) -> Option<Refusal> {
+        if card == Card::MorePlanes {
+            return match self.stock_refusal(DockModule::Floatplane) {
+                None => Some(Refusal::Section(DockModule::Floatplane)),
+                Some(Refusal::Beam(beam)) => Some(Refusal::Beam(beam)),
+                Some(_) => None,
+            };
+        }
+        self.wing_refusal()
+    }
+
+    /// Why her deck has no room for more guns, while a section that gives her some could
+    /// still be spliced in, or could on a broader beam. `None` once she is as long as the
+    /// basin takes her.
+    fn wing_refusal(&self) -> Option<Refusal> {
+        let roomy = [
+            DockModule::Reserve,
+            DockModule::EngineRoom,
+            DockModule::Turret,
+        ];
+        let refusals = roomy.map(|module| self.stock_refusal(module));
+        if refusals.iter().any(Option::is_none) {
+            let design = self.ship.design();
+            let longer = design.length() + Frame::Straight.spec().length * design.scale;
+            return Some(Refusal::Length(longer.round() as u16));
+        }
+        refusals
+            .into_iter()
+            .flatten()
+            .find(|why| matches!(why, Refusal::Beam(_)))
+    }
+
     /// Why the yard turns this job down, whatever points are left. `None` for jobs
     /// that are simply not legal in this place.
     pub fn refusal(&self, job: DockJob) -> Option<Refusal> {
@@ -346,6 +445,7 @@ impl Run {
             DockJob::WidenBeam if self.beam_class().next().is_none() => Some(Refusal::Widest),
             DockJob::WidenBeam => self.widen_refusal(),
             DockJob::Fitting(Card::Armor) => self.armor_refusal(),
+            DockJob::Fitting(card) if !self.has_room(card) => self.room_refusal(card),
             DockJob::Fitting(Card::SecondaryTurrets) | DockJob::Replace { .. }
                 if self.beam_class() < self.beam_wanted(job) =>
             {
@@ -365,23 +465,26 @@ impl Run {
         }
     }
 
-    /// The centreline turret on module `at` has a centreline turret beside it standing
-    /// as high as itself, so a step of barbette would let it fire over that one.
-    /// Double turrets stand across the centreline, so a centreline turret beside them is
-    /// overlooked too, but they are never raised themselves.
+    /// The centreline turret on module `at` is masked ahead or astern by a turret
+    /// standing as high as itself, so a step of barbette would let it fire over that one.
+    /// The turret need not be beside it: a wing gallery between them leaves the
+    /// centreline clear, so a turret beyond it masks just the same. A bridge or funnel
+    /// masks it at any height. Double turrets stand across the centreline, so a
+    /// centreline turret beside them is overlooked too, but they are never raised
+    /// themselves.
     pub fn overlooked(&self, at: usize) -> bool {
-        let modules = self.ship.design().modules();
+        let design = self.ship.design();
+        let modules = design.modules();
         let main = |m: &Module| m.fit.contains(&Component::MainGun);
-        let centreline = |m: &Module| !m.frame.abreast() && main(m);
-        let across = |m: &Module| m.frame != Frame::BatteryGallery && main(m);
-        let Some(own) = modules.get(at).filter(|m| centreline(m)) else {
+        let Some(own) = modules.get(at).filter(|m| !m.frame.abreast() && main(m)) else {
             return false;
         };
         own.gunhouse.tier < MOST_TIER
-            && [at.wrapping_sub(1), at + 1]
+            && design
+                .masking(at, own.gunhouse.tier)
                 .into_iter()
-                .filter_map(|i| modules.get(i))
-                .any(|m| across(m) && m.gunhouse.tier >= own.gunhouse.tier)
+                .flatten()
+                .any(|i| main(&modules[i]))
     }
 
     /// The biggest bore the turrets on module `at` could carry with these barrels, on
@@ -613,7 +716,7 @@ impl Run {
                 design.rearm(at, Gunhouse { tier: to, ..house }).ok()?;
             }
             DockJob::Fitting(card) => {
-                if !self.fittings.can_fit(card) {
+                if !self.fittings.can_fit(card) || !self.has_room(card) {
                     return None;
                 }
             }
@@ -955,7 +1058,7 @@ mod tests {
 
     #[test]
     fn thicker_armor_waits_for_a_broader_beam_which_waits_for_a_longer_hull() {
-        // At her built length and beam she carries two ranks of armor and no more.
+        // At her built length and beam she carries four ranks of armor and no more.
         let mut run = docked(20);
         run.fittings.armor = ShipBeam::Escort.most_armor();
         let armor = DockJob::Fitting(Card::Armor);
@@ -968,7 +1071,7 @@ mod tests {
         assert!(run.refit_in_dock(DockJob::WidenBeam));
         assert_eq!(run.refusal(armor), None);
         assert!(run.refit_in_dock(armor));
-        assert_eq!(run.ship.design().protection().thickness, 10.);
+        assert_eq!(run.ship.design().protection().thickness, 8.5);
     }
 
     #[test]
@@ -1165,6 +1268,57 @@ mod tests {
         let left = run.points();
         assert!(run.refit_in_dock(DockJob::Barbette { at, from: 1, to: 0 }));
         assert_eq!(run.points(), left);
+    }
+
+    #[test]
+    fn a_turret_is_raised_over_the_turret_beyond_a_wing_gallery() {
+        let mut run = docked(80);
+        // Forward turret, wing gallery, centre turret, bridge: nothing beside the centre
+        // turret stands on the centreline, but the forward turret masks it all the same.
+        for _ in 0..2 {
+            assert!(run.refit_in_dock(DockJob::Insert {
+                at: 2,
+                module: DockModule::Reserve,
+            }));
+        }
+        assert!(run.refit_in_dock(DockJob::WidenBeam));
+        assert!(run.refit_in_dock(DockJob::Replace {
+            at: 2,
+            with: DeckModule::WingBattery,
+        }));
+        // A fifth turret wants a capital beam.
+        assert!(run.refit_in_dock(DockJob::WidenBeam));
+        assert!(run.refit_in_dock(DockJob::Replace {
+            at: 3,
+            with: DeckModule::CentreBattery,
+        }));
+        let modules = run.ship.design().modules();
+        assert!(modules[1].fit.contains(&Component::MainGun));
+        assert_eq!(modules[2].frame, Frame::BatteryGallery);
+        assert!(modules[4].fit.contains(&Component::Director));
+        let station = |run: &Run| {
+            run.ship
+                .design()
+                .gun_stations()
+                .into_iter()
+                .find(|g| g.berth.module == 3)
+                .unwrap()
+        };
+        let ahead = |g: &shipvivor_shipyard::GunStation| g.bears(0.);
+        assert!(
+            !ahead(&station(&run)),
+            "the forward turret masks dead ahead"
+        );
+        let raise = DockJob::Barbette {
+            at: 3,
+            from: 0,
+            to: 1,
+        };
+        assert!(run.overlooked(3) && run.section_jobs(3).contains(&raise));
+        assert!(run.refit_in_dock(raise));
+        assert!(ahead(&station(&run)), "it fires over the forward turret");
+        // Only the bridge masks it now, and no barbette clears a bridge.
+        assert!(!run.overlooked(3));
     }
 
     #[test]
@@ -1461,20 +1615,32 @@ mod tests {
         assert!(cards.iter().all(|card| card.rarity().is_none()));
         assert_eq!(run.fittings.strike_craft(), StrikeCraft::STOCK);
         for card in cards {
-            assert!(run.refit_in_dock(DockJob::Fitting(card)));
-            assert!(run.refit_in_dock(DockJob::Fitting(card)));
-            // Two ranks are the most of each.
-            assert!(!DockJob::Fitting(card).fits(&run));
+            let (_, most) = run.ranks(card).unwrap();
+            for _ in 0..most {
+                assert!(run.refit_in_dock(DockJob::Fitting(card)), "{card:?}");
+            }
+            assert!(!DockJob::Fitting(card).fits(&run), "{card:?}");
         }
+        // One plane section launches three planes. More want a second section.
+        let planes = DockJob::Fitting(MorePlanes);
+        assert_eq!(
+            run.refusal(planes),
+            Some(Refusal::Section(DockModule::Floatplane))
+        );
         assert_eq!(
             run.fittings.strike_craft(),
             StrikeCraft {
-                launchers: 3,
-                salvo: 4,
+                launchers: 4,
+                salvo: StrikeCraft::STOCK.salvo + 4,
                 planes: 3,
-                bombs: 3,
+                bombs: 5,
             }
         );
+        let at = run.default_gap();
+        let module = DockModule::Floatplane;
+        assert!(run.refit_in_dock(DockJob::Insert { at, module }));
+        assert_eq!(run.refusal(planes), None);
+        assert_eq!(run.ranks(MorePlanes), Some((2, 5)));
     }
 
     #[test]
@@ -1501,5 +1667,58 @@ mod tests {
         assert!(after.reload > before.reload);
         assert_eq!(after.per_side, before.per_side);
         assert!(!turrets.fits(&run));
+    }
+
+    #[test]
+    fn a_longer_hull_makes_room_for_more_aa_tubs() {
+        let mut run = docked(40);
+        let more = DockJob::Fitting(Card::MoreAntiAir);
+        // Her stock hull has room for four pairs, two more than she is built with.
+        assert_eq!(run.aa_room(), 8);
+        assert_eq!(run.ranks(Card::MoreAntiAir), Some((0, 3)));
+        for _ in 0..3 {
+            assert!(run.refit_in_dock(more));
+        }
+        assert_eq!(run.fittings.anti_air().mounts, 8);
+        assert_eq!(run.refusal(more), Some(Refusal::Length(35)));
+        for hand in 0..200 {
+            run.hands = hand;
+            assert!(!run.offers().contains(&Card::MoreAntiAir));
+        }
+        lengthen(&mut run);
+        lengthen(&mut run);
+        // The first bay gives its place to the after funnel's pair. The second has one,
+        // and moves the after turret's clear of it.
+        assert_eq!(run.aa_room(), 12);
+        assert!(run.refit_in_dock(more) && run.refit_in_dock(more));
+        assert_eq!(run.fittings.anti_air().mounts, 12);
+    }
+
+    #[test]
+    fn a_full_deck_waits_for_a_longer_hull_before_mounting_more_secondaries() {
+        let mut run = docked(40);
+        let more = DockJob::Fitting(Card::MoreSecondaries);
+        // Her stock hull has room for six a side, four more than she is built with.
+        assert_eq!(run.wing_room(), 6);
+        assert_eq!(run.ranks(Card::MoreSecondaries), Some((0, 4)));
+        for _ in 0..4 {
+            assert!(run.refit_in_dock(more));
+        }
+        assert_eq!(run.fittings.secondaries().per_side, 6);
+        assert_eq!(run.ranks(Card::MoreSecondaries), Some((4, 4)));
+        // Her deck is full: what she wants is a longer hull, and no hand deals the card.
+        assert!(!more.fits(&run));
+        assert_eq!(run.refusal(more), Some(Refusal::Length(35)));
+        for hand in 0..200 {
+            run.hands = hand;
+            assert!(!run.offers().contains(&Card::MoreSecondaries));
+        }
+        // An empty bay has room for two more a side.
+        lengthen(&mut run);
+        assert_eq!(run.wing_room(), 8);
+        assert_eq!(run.ranks(Card::MoreSecondaries), Some((4, 6)));
+        assert_eq!(run.refusal(more), None);
+        assert!(run.refit_in_dock(more) && run.refit_in_dock(more));
+        assert_eq!(run.fittings.secondaries().per_side, 8);
     }
 }

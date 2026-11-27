@@ -102,6 +102,10 @@ pub enum Defect {
     LastBaseShort {
         metres: f32,
     },
+    /// An airfield base with no room for its airfield beside its cove.
+    AirfieldUnsited {
+        base: usize,
+    },
     /// A passage runs this far from a base at its nearest.
     BaseOffCourse {
         base: usize,
@@ -224,6 +228,9 @@ impl fmt::Display for Defect {
             ),
             Self::LastBaseShort { metres } => {
                 write!(f, "the heavy yard stands {metres:.0} m short of the end")
+            }
+            Self::AirfieldUnsited { base: i } => {
+                write!(f, "base {} has no airfield beside it", base(i))
             }
             Self::BaseOffCourse { base: i, metres } => {
                 write!(f, "the passage keeps {metres:.0} m from base {}", base(i))
@@ -483,6 +490,15 @@ impl Survey {
                 defects.push(Defect::LastBaseShort {
                     metres: end - along[last].0,
                 });
+            }
+            // An airfield base keeps its airfield on the shore beside its cove.
+            for (i, site) in chart.harbours.iter().enumerate() {
+                let sited = chart.coast.iter().chain(&chart.islets).any(|land| {
+                    land.kind == crate::LandmarkKind::Airfield && land.pos.distance(site.pos) < 320.
+                });
+                if site.works == crate::AIRFIELD_WORKS && !sited {
+                    defects.push(Defect::AirfieldUnsited { base: i });
+                }
             }
             for (base, &(_, metres)) in along.iter().enumerate() {
                 if metres > MAX_BASE_TO_COURSE {
@@ -783,9 +799,11 @@ fn course_run(legs: &[(Vec2, Vec2)], p: Vec2) -> (f32, f32) {
 /// A flat shot from `from` to `to` that clears every island and every other harbour.
 /// The target's own island is under the shell's fall, so it does not count.
 fn clear_shot(from: Vec2, to: Vec2, own: usize, battle: &Battle) -> bool {
+    // An airfield's island is level and low: the shot passes over it to what stands there.
     battle
         .landmarks()
         .iter()
+        .filter(|i| i.kind != crate::LandmarkKind::Airfield)
         .all(|i| entry(from, to, i.body.pos, i.radius).is_none())
         && battle
             .ports()

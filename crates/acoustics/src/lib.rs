@@ -130,9 +130,26 @@ pub enum Sound {
     /// One beat of the bridge clock, counting out the leg's last minute. Even takes are
     /// the tick and odd ones the tock. It is the game speaking, as the upgrade is.
     Tick,
+    /// A light round glancing off plate far thicker than it needs: a sharp tick, a high
+    /// ring that is gone at once, and the round whirring away as it tumbles.
+    Tap,
+    /// A round her plate turns: the plate rings in its low modes under a solid blow.
+    Clank,
+    /// A round punching through plate too thin to stop it: a crack, the torn edges
+    /// crackling, and a dull thump from a plate that has no ring left in it.
+    Pierce,
+    /// A round bursting inside her a beat after it went in, smothered by the steel
+    /// round it: a low boom, the box drumming, frames crunching and splinters rattling.
+    Blast,
+    /// A section of her giving way: frames folding in a long groan, gear crashing down
+    /// inside, and the sea roaring in.
+    Gutted,
+    /// Her frames taking a heavy blow, carried to the bridge by the ship: a deep thud,
+    /// the hull flexing, loose gear rattling and a groan as she settles.
+    Shudder,
 }
 impl Sound {
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 46] = [
         Self::MainGun,
         Self::SecondaryGun,
         Self::RaiderGun,
@@ -173,6 +190,12 @@ impl Sound {
         Self::Torch,
         Self::Ratchet,
         Self::Tick,
+        Self::Tap,
+        Self::Clank,
+        Self::Pierce,
+        Self::Blast,
+        Self::Gutted,
+        Self::Shudder,
     ];
 
     /// Level of the detail, body and rumble layers at close range.
@@ -220,6 +243,14 @@ impl Sound {
             Self::Ratchet => [0.5, 0.28, 0.],
             // At full strength, which the clock reaches only in its last seconds.
             Self::Tick => [0.3, 0.4, 0.],
+            // A clank at full strength is the burst every hit on her made before plate
+            // and calibre were heard. A hit plays each at its own strength: see [`Hit`].
+            Self::Tap => [1.3, 0.3, 0.05],
+            Self::Clank => [0.5, 0.8, 0.4],
+            Self::Pierce => [0.62, 0.7, 0.42],
+            Self::Blast => [0.22, 1., 1.1],
+            Self::Gutted => [0.2, 0.75, 0.9],
+            Self::Shudder => [0.14, 0.4, 0.34],
         }
     }
 
@@ -243,6 +274,7 @@ impl Sound {
                 | Self::Detent
                 | Self::EngineHurt
                 | Self::EngineStall
+                | Self::Shudder
         )
     }
 
@@ -436,4 +468,113 @@ pub enum Cue {
         level: f32,
         serial: u64,
     },
+    /// A blow on the listener's own ship, at the point on her it landed, heard as her
+    /// plating took it: see [`Hit`]. The serial picks its takes.
+    Hit {
+        position: Vec3,
+        serial: u64,
+        hit: Hit,
+    },
+}
+
+/// A blow on the listener's own ship, as her plating took it. What it sounds like is
+/// what tells those aboard how bad it was, without a look at the plating.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hit {
+    /// Inches across the round, or `None` for a blow no plate can turn: a ram, a bomb,
+    /// ice or a torpedo, each of which makes a sound of its own. Such a blow is heard
+    /// here only for what it did inside her.
+    pub calibre: Option<f32>,
+    /// Inches of plate it met.
+    pub plate: f32,
+    /// The plate turned it aside.
+    pub turned: bool,
+    /// Hull points of damage that got through.
+    pub dealt: f32,
+    /// The worst it cost her.
+    pub harm: Harm,
+}
+
+/// The worst a blow cost her, from nothing to a magazine going up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Harm {
+    #[default]
+    None,
+    /// Something fitted in her was knocked out.
+    Knocked,
+    /// A section of her was wrecked.
+    Wrecked,
+    /// A magazine went up, and the section with it.
+    Detonated,
+}
+
+/// Inches across the round every hit sound is cast for.
+const ROUND: f32 = 6.;
+/// Hull points of damage at which a round bursting inside her is as loud as its cast.
+const BLAST_DEALT: f32 = 8.;
+/// Hull points of damage at which her frames shake as hard as their cast, and the
+/// fewest that shake them at all.
+const SHAKE: (f32, f32) = (12., 5.);
+
+impl Hit {
+    /// The sounds the blow makes, each with its strength and the pace it is played at.
+    ///
+    /// A heavier round is played slower, so deeper and longer: the time a round takes
+    /// to strike steel and the push of its burst both grow with its size. Its strength
+    /// grows with its weight, but far less than the hundredfold between the energy of a
+    /// two-inch round and a fifteen-inch one.
+    ///
+    /// A round the plate turns clanks as hard as it came near to getting through and as
+    /// it is heavy, and taps for the rest: a light round on heavy plate barely ticks.
+    /// One that gets through tears the plate as much as it outmatched it, so a heavy
+    /// round through thin plate is nearly all tear, and then it bursts inside her as
+    /// loud as the damage it did. Heavy damage shakes her frames, and a section lost
+    /// gives way with a roar.
+    pub fn voices(self) -> impl Iterator<Item = (Sound, f32, f32)> {
+        let mut struck = [0.; 4];
+        let mut pace = 1.;
+        if let Some(calibre) = self.calibre {
+            let heft = calibre.max(0.5) / ROUND;
+            let loud = heft.powf(0.8).clamp(0.3, 2.2);
+            pace = heft.powf(-0.5).clamp(0.55, 1.6);
+            if self.turned {
+                let give = (calibre / self.plate.max(0.1)).min(1.);
+                let ring = (give.powf(1.5) * heft.sqrt()).min(1.);
+                struck[0] = loud * (1. - ring) * (0.7 + 0.3 * give);
+                struck[1] = loud * ring;
+            } else {
+                // What the plate had against it, from nothing to nearly enough.
+                let held = (self.plate / calibre).clamp(0., 1.);
+                struck[1] = loud * held.max(0.3);
+                struck[2] = loud * (1. - 0.5 * held);
+                if self.dealt > 0. {
+                    struck[3] = (self.dealt / BLAST_DEALT).powf(0.6).min(2.);
+                }
+            }
+        }
+        let mut shake = if self.dealt >= SHAKE.1 || self.harm > Harm::None {
+            (self.dealt / SHAKE.0).powf(0.7).clamp(0.4, 1.6)
+        } else {
+            0.
+        };
+        let (gutted, magazine) = match self.harm {
+            Harm::None | Harm::Knocked => (0., 0.),
+            Harm::Wrecked => (1., 0.),
+            Harm::Detonated => {
+                shake = 1.6;
+                (1.5, 2.)
+            }
+        };
+        [
+            (Sound::Tap, struck[0], pace),
+            (Sound::Clank, struck[1], pace),
+            (Sound::Pierce, struck[2], pace),
+            (Sound::Blast, struck[3], pace),
+            (Sound::Shudder, shake, pace.max(0.8)),
+            (Sound::Gutted, gutted, 1.),
+            (Sound::Blast, magazine, 0.6),
+        ]
+        .into_iter()
+        .filter(|&(_, level, _)| level > 0.)
+    }
 }

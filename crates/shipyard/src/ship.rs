@@ -31,6 +31,9 @@ const SCUFF: f32 = 0.25;
 /// less battered leaks by the cube of the share of its structure lost, so a sound one
 /// stays dry and a stock crew's pumps hold one down to about a third of its structure.
 pub const INFLOW: f32 = 0.15;
+/// Rounds into her side kept in her log until it is read. Nothing older matters to
+/// anyone listening, and a log nobody reads stays this short.
+pub(crate) const STRUCK_KEPT: usize = 16;
 /// The bays stand this far inside their module's bulkheads, fore and aft, in metres.
 const BAY_INSET: f32 = 0.6;
 /// Share of their module's beam the bays fill, about the centreline. The rest is
@@ -91,6 +94,24 @@ pub enum Loss {
     Wrecked(usize),
     Detonated(usize),
     Foundered,
+}
+
+/// What one blow into her side did, as her plating took it: what is heard aboard
+/// when she is hit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Struck {
+    /// Where it landed: metres aft of the bow tip, and to starboard (negative to port).
+    pub aft: f32,
+    pub abeam: f32,
+    /// Inches across the round, or `None` for a blow no plate can turn.
+    pub calibre: Option<f32>,
+    /// Inches of plate it met: the design's thickness, less the share worn away there.
+    pub plate: f32,
+    /// The plate turned it aside, and it did no harm behind.
+    pub turned: bool,
+    /// Damage that got through to the module behind, and what that cost her.
+    pub dealt: f32,
+    pub losses: Vec<Loss>,
 }
 
 /// How far into her a blow got, which decides whether it reaches the engines and
@@ -275,6 +296,8 @@ pub struct Ship {
     pub(crate) foundered: bool,
     /// Seconds of reserve power left.
     charge: f32,
+    /// Blows into her side not yet read from her log, the latest last.
+    struck: Vec<Struck>,
 }
 
 impl Ship {
@@ -294,7 +317,14 @@ impl Ship {
             holds,
             party: None,
             foundered: false,
+            struck: Vec::new(),
         }
+    }
+
+    /// The blows into her side since this was last asked, the earliest first: no more
+    /// than the last [`STRUCK_KEPT`] of them.
+    pub fn take_struck(&mut self) -> Vec<Struck> {
+        std::mem::take(&mut self.struck)
     }
 
     /// Splice in a sound compartment, preserving damage, equipment and repair assignments.
@@ -618,6 +648,9 @@ impl Ship {
     /// As [`Ship::strike_side`], for a blow that got only as far into her as `reach`.
     /// The module takes what gets through the plating, but the engines and magazines
     /// in its bays are harmed only when the blow reaches them.
+    ///
+    /// Each blow is written in her log for [`Ship::take_struck`], even one that does
+    /// no damage: it was still a round striking her.
     pub fn strike_into(
         &mut self,
         aft: f32,
@@ -626,7 +659,7 @@ impl Ship {
         calibre: Option<f32>,
         reach: Reach,
     ) -> Vec<Loss> {
-        if self.foundered || damage <= 0. {
+        if self.foundered {
             return Vec::new();
         }
         let (module, panel) = self.panel_at(aft, abeam);
@@ -634,12 +667,29 @@ impl Ship {
         let hold = &mut self.holds[module];
         let left = hold.plating(panel);
         let plate = &mut hold.plates[panel.index()];
-        if calibre.is_some_and(|calibre| calibre <= thickness * left) {
+        let turned = calibre.is_some_and(|calibre| calibre <= thickness * left);
+        let mut struck = Struck {
+            aft,
+            abeam,
+            calibre,
+            plate: thickness * left,
+            turned,
+            dealt: 0.,
+            losses: Vec::new(),
+        };
+        if damage > 0. && turned {
             *plate = (*plate - SCUFF * damage).max(0.);
-            return Vec::new();
+        } else if damage > 0. {
+            *plate = (*plate - damage).max(0.);
+            struck.dealt = damage * (1. + (BARE - 1.) * (1. - left));
+            struck.losses = self.strike_reaching(aft, struck.dealt, reach);
         }
-        *plate = (*plate - damage).max(0.);
-        self.strike_reaching(aft, damage * (1. + (BARE - 1.) * (1. - left)), reach)
+        let losses = struck.losses.clone();
+        if self.struck.len() >= STRUCK_KEPT {
+            self.struck.remove(0);
+        }
+        self.struck.push(struck);
+        losses
     }
 
     /// A penetrating hit on the module `aft` metres behind the bow tip, for just the

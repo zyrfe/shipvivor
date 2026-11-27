@@ -60,6 +60,8 @@ pub struct Logbook {
     /// When the game was launched. Runs with the same launch were one sitting.
     launch: String,
     run: Option<RunLog>,
+    /// Dev captures taken in the run under way, with the round each was taken in.
+    captures: Vec<(usize, String)>,
     /// Messages for the screen, shown by the next fixed step.
     toasts: Vec<String>,
 }
@@ -82,6 +84,7 @@ impl Logbook {
             folder,
             launch: timestamp(SystemTime::now()).1,
             run: None,
+            captures: Vec::new(),
             toasts: Vec::new(),
         }
     }
@@ -89,11 +92,24 @@ impl Logbook {
     pub fn code(&self) -> Option<&str> {
         self.run.as_ref().map(|r| r.code.as_str())
     }
+    /// The folder the logs are written to, or `None` when they are kept in memory.
+    pub fn folder(&self) -> Option<&std::path::Path> {
+        self.folder.as_deref()
+    }
     /// Note a dev capture in the log of the run under way.
     pub fn note_capture(&mut self, png: &str) {
         if let Some(run) = self.run.as_mut().filter(|r| !r.over) {
             run.write("capture", png);
+            self.captures.push((run.stage.round(), png.to_owned()));
         }
+    }
+    /// The dev captures taken in one round of the run under way, or the last to end.
+    pub fn captures_in(&self, round: usize) -> Vec<String> {
+        self.captures
+            .iter()
+            .filter(|(r, _)| *r == round)
+            .map(|(_, png)| png.clone())
+            .collect()
     }
 
     /// Compare the game with the last look and write down what changed.
@@ -124,6 +140,7 @@ impl Logbook {
     }
 
     fn open(&mut self, run: &Campaign, battle: &Encounter) {
+        self.captures.clear();
         let (code, out) = match &self.folder {
             None => (fresh_code(), Out::Memory(Vec::new())),
             Some(folder) => create_log(folder),
@@ -171,7 +188,7 @@ impl Logbook {
     }
 
     #[cfg(test)]
-    fn in_memory() -> Self {
+    pub(crate) fn in_memory() -> Self {
         Self::writing_to(None)
     }
     #[cfg(test)]
@@ -478,6 +495,11 @@ struct Waters {
     /// Ships with their bridge shot away and nobody yet at the helm.
     helmless: HashSet<u64>,
     harriers: HashSet<u64>,
+    /// Airfield aircraft in the air.
+    warplanes: HashSet<u64>,
+    /// Each base's airfield, if it is one: hangars standing, tower standing, depot
+    /// standing and trucks left.
+    fields: Vec<Option<(usize, bool, bool, usize)>>,
     /// Ships of the squadrons in line of battle.
     lines: HashSet<u64>,
 }
@@ -507,6 +529,14 @@ impl Waters {
                 .collect(),
             spotted: battle.spotters().iter().map(|s| s.reporting).collect(),
             harriers: battle.harriers().iter().map(|p| p.body.id).collect(),
+            warplanes: battle.warplanes().iter().map(|p| p.body.id).collect(),
+            fields: (battle.ports().iter())
+                .map(|p| {
+                    let field = p.airfield()?;
+                    let trucks = field.trucks().len();
+                    Some((field.live_hangars(), field.tower_live(), field.depot_live(), trucks))
+                })
+                .collect(),
             flagship: battle.flagship(),
             steam: battle.raising_steam(),
             helmless: battle
@@ -625,7 +655,12 @@ impl RunLog {
             "sink the Regent".to_string()
         } else {
             let boss = battle.boss().map_or(String::new(), |class| {
-                format!(", then the {}", crate::mission_hud::ship_class(class))
+                let escort = crate::ui::escorted(battle.escort())
+                    .map_or(String::new(), |ships| format!(" with {ships}"));
+                format!(
+                    ", then the {}{escort}",
+                    crate::mission_hud::ship_class(class)
+                )
             });
             format!(
                 "goals {} sunk, {} stores, a drydock{boss}; {} points a star and as many for beating the clock, which gains {:.0} s a base",
@@ -638,7 +673,7 @@ impl RunLog {
         self.write(
             "leg",
             format!(
-                "{} {}{}: {} min to beat, {goals}; hull {}%, level {}",
+                "{} {}{}: {} min to beat, {goals}; held by {}; hull {}%, level {}",
                 self.leg,
                 mission.name,
                 if run.stage.is_opening() || run.stage == Stage::CrownDeep {
@@ -647,6 +682,7 @@ impl RunLog {
                     format!(" ({})", run.grade.name().to_lowercase())
                 },
                 mission.minutes,
+                run.stage.fleet().name().to_lowercase(),
                 run.hull_percent(),
                 run.level
             ),
@@ -789,6 +825,63 @@ impl RunLog {
         }
     }
 
+    /// Wings taking off from an airfield, and its tower, hangars, depot and trucks as
+    /// they fall and rise again.
+    fn airfields(&mut self, battle: &Encounter, helm: &PlayerHelm) {
+        use shipvivor_encounter::PlaneKind;
+        let mut wings: Vec<usize> = (battle.warplanes().iter())
+            .filter(|plane| !self.waters.warplanes.contains(&plane.body.id))
+            .map(|plane| plane.base)
+            .collect();
+        wings.dedup();
+        for base in wings {
+            let fresh = |kind: PlaneKind| {
+                (battle.warplanes().iter())
+                    .filter(|p| p.base == base && p.kind == kind)
+                    .filter(|p| !self.waters.warplanes.contains(&p.body.id))
+                    .count()
+            };
+            let (bombers, torpedo) = (fresh(PlaneKind::Bomber), fresh(PlaneKind::Torpedo));
+            let place = whereabouts(helm, battle.ports()[base].body.pos);
+            self.write(
+                "airfield",
+                format!(
+                    "took off from base {}: {bombers} light bomber(s), {torpedo} torpedo plane(s) {place}",
+                    base + 1
+                ),
+            );
+        }
+        for (base, port) in battle.ports().iter().enumerate() {
+            let Some(field) = port.airfield() else {
+                continue;
+            };
+            let Some(Some((hangars, tower, depot, trucks))) = self.waters.fields.get(base).copied()
+            else {
+                continue;
+            };
+            let at = format!("at base {}", base + 1);
+            if field.live_hangars() < hangars {
+                let left = field.live_hangars();
+                self.write("airfield", format!("hangar down {at}, {left} left"));
+            }
+            if tower != field.tower_live() {
+                let text = if tower {
+                    "control tower down: wings go up slowly"
+                } else {
+                    "control tower raised again"
+                };
+                self.write("airfield", format!("{text} {at}"));
+            }
+            if depot && !field.depot_live() {
+                self.write("airfield", format!("fuel depot blown up {at}"));
+            }
+            let lost = trucks.saturating_sub(field.trucks().len());
+            if lost > 0 {
+                self.write("airfield", format!("{lost} fuel truck(s) blown up {at}"));
+            }
+        }
+    }
+
     fn sightings(&mut self, battle: &Encounter, helm: &PlayerHelm) {
         for r in battle.raiders() {
             if self.waters.raiders.contains(&r.body.id) {
@@ -825,6 +918,7 @@ impl RunLog {
                 format!("{flight} took off from base {} {place}", base + 1),
             );
         }
+        self.airfields(battle, helm);
         let boss = battle
             .boss()
             .map_or("flagship", crate::mission_hud::ship_class);
@@ -1007,12 +1101,21 @@ impl RunLog {
     fn bases(&mut self, battle: &Encounter, helm: &PlayerHelm) {
         // A stage further up the channel stirs: its bases put their steel to work and
         // their floatplanes up, and the chart shows them.
-        let stirring: Vec<&str> = (battle.ports().iter().enumerate())
+        let woken: Vec<usize> = (battle.ports().iter().enumerate())
             .filter(|(i, port)| {
                 port.roused() && self.waters.ports.get(*i).is_some_and(|was| !was.3)
             })
-            .map(|(i, _)| crate::mission_hud::letter(i))
+            .map(|(i, _)| i)
             .collect();
+        let stirring: Vec<&str> = (woken.iter())
+            .map(|&i| crate::mission_hud::letter(i))
+            .collect();
+        // The fleet the scouts missed shows itself when its stage stirs.
+        let missed = (battle.surprise())
+            .filter(|_| woken.iter().any(|&i| battle.surprised(i)))
+            .map_or(String::new(), |surprise| {
+                format!(", the scouts missed {:?} there", surprise.doctrine)
+            });
         if !stirring.is_empty() {
             let stages = battle.ports().iter().map(|p| p.stage()).max().unwrap_or(0) + 1;
             let deepest = (battle.ports().iter())
@@ -1024,7 +1127,7 @@ impl RunLog {
             self.write(
                 "base",
                 format!(
-                    "base {} stirring (stage {deepest} of {stages})",
+                    "base {} stirring (stage {deepest} of {stages}){missed}",
                     stirring.join(" + ")
                 ),
             );
@@ -1420,10 +1523,9 @@ fn describe_ship(run: &Campaign) -> String {
 fn describe_fittings(run: &Campaign) -> String {
     let f = &run.fittings;
     let mut parts = vec![format!(
-        "{} in main guns, {:?} turrets{}",
+        "{} in main guns, {:?} turrets",
         f.calibre(),
         f.turrets,
-        if f.armor_piercing() { ", AP" } else { "" }
     )];
     for (rank, name) in [
         (f.loader, "loader"),
@@ -1597,9 +1699,23 @@ mod tests {
         w.resource_mut::<ButtonInput<KeyCode>>().reset_all();
         sail(w, 1.);
         assert!(w.resource::<Logbook>().code().is_none());
-        w.resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::Digit2);
+        // The Iron Narrows, whose waters this knows, though the test seed's first chart
+        // doesn't offer them: a pin for them is clicked as the chart would for a seed
+        // that did.
+        let pin = w
+            .spawn((
+                crate::ui::Action::Depart(Stage::IronNarrows),
+                bevy::ui::RelativeCursorPosition {
+                    cursor_over: true,
+                    ..default()
+                },
+            ))
+            .id();
+        w.resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
         w.run_schedule(PreUpdate);
-        w.resource_mut::<ButtonInput<KeyCode>>().reset_all();
+        w.resource_mut::<ButtonInput<MouseButton>>().reset_all();
+        w.despawn(pin);
         // Well clear of the pickets, so the only damage is what the test does.
         w.resource_mut::<PlayerHelm>().position = Vec2::splat(2000.);
         sail(w, 1.);

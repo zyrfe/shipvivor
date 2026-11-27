@@ -10,7 +10,7 @@ use glam::{Vec2, Vec3, Vec3Swizzles};
 use shipvivor_campaign::{Card, Run};
 use shipvivor_compass::{direction, heading};
 use shipvivor_encounter::{
-    Aim, Ammo, Battle, EnemyClass, RACK_HALF_ARC, Raider, TORPEDO_RANGE, TORPEDO_SPEED,
+    Aim, Battle, EnemyClass, RACK_HALF_ARC, Raider, TORPEDO_RANGE, TORPEDO_SPEED,
 };
 use shipvivor_navigation::Helm;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
@@ -36,14 +36,58 @@ impl Temperament {
     }
 }
 
+/// How well she plays, from 0, a novice, to 1, the bot at her best: every gun laid on
+/// the fire-control ghost, a fresh decision every half second, and every torpedo combed
+/// as the alarm rings. Below it her laying wanders off the mark, more the farther out it
+/// is and more along the line of fire than across it, and she resettles it only every
+/// [`AIM_SETTLE`] seconds. She makes up her mind more slowly and turns for a torpedo
+/// later.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct Skill(pub f32);
+impl Skill {
+    pub const SHARP: Self = Self(1.);
+    /// Metres her laying is off, one standard deviation along the line of fire, for
+    /// each 100 metres of range.
+    fn aim_error(self) -> f32 {
+        AIM_ERROR * (1. - self.0.clamp(0., 1.))
+    }
+    fn think(self) -> f32 {
+        THINK + SLOW_THINK * (1. - self.0.clamp(0., 1.))
+    }
+    fn dodge_warning(self) -> f32 {
+        DODGE_WARNING * (LATE_DODGE + (1. - LATE_DODGE) * self.0.clamp(0., 1.))
+    }
+}
+/// A novice's laying error: metres, one standard deviation along the line of fire, per
+/// 100 metres of range. Across the line it is [`AIM_ACROSS`] of that.
+const AIM_ERROR: f32 = 14.;
+const AIM_ACROSS: f32 = 0.35;
+/// Seconds she holds her laying before she corrects it, as a player settles the sight.
+pub const AIM_SETTLE: f32 = 1.6;
+/// Seconds more a novice takes over each decision about where to go.
+const SLOW_THINK: f32 = 1.5;
+/// The share of the torpedo warning a novice has left when she turns.
+const LATE_DODGE: f32 = 0.35;
+
 /// Ships within this range count as close threats.
 pub const THREAT_RANGE: f32 = 800.;
 /// Range she prefers to fight at, broadside on.
 const FIGHTING_RANGE: f32 = 360.;
-/// A warship this close is fought before anything else.
-const PRESSING: f32 = 400.;
-/// She stands this far off a yard while she shells it.
-const BOMBARD_RANGE: f32 = 420.;
+/// A warship this close is fought before anything else. Farther off, a yard in reach
+/// comes first: it is the leg's work, and its slips keep sending more ships. A squadron's
+/// line lies at about four fifths of its guns' range, outside this, so she shells the
+/// yard through it, as a player does, and turns on what closes her.
+const PRESSING: f32 = 260.;
+/// She runs in this close to a yard to wreck it, as a player does: near enough that her
+/// guns drop on its works at once and its gantries soon come down.
+const BOMBARD_RANGE: f32 = 210.;
+/// Metres further off she stands from a yard each time the shore catches her near it, and
+/// the farthest she backs off to. At the head of a channel the water runs out round the
+/// heavy yard, and a captain who keeps putting her bow on the rocks stands off instead.
+const STAND_OFF_STEP: f32 = 70.;
+const STAND_OFF_MOST: f32 = 460.;
+/// Metres up a shore gun's turret stands, where she lays on it.
+const SHORE_GUN_TOP: f32 = 11.4;
 /// How far ahead she looks for land before committing to a heading.
 const LOOKOUT: f32 = 110.;
 /// Seconds between her decisions about where to go. The sight and rudder act every step.
@@ -68,7 +112,6 @@ pub struct Command {
     /// The engine order she wants rung: 4 is full ahead, -3 full astern.
     pub notch: i8,
     pub aim: Aim,
-    pub ammo: Ammo,
     /// A bearing for a torpedo spread.
     pub torpedo: Option<f32>,
     pub intent: Intent,
@@ -76,6 +119,19 @@ pub struct Command {
 
 pub struct Bot {
     pub temperament: Temperament,
+    pub skill: Skill,
+    /// Her own dice, so a seed always plays the same.
+    dice: u64,
+    /// Her laying error now, along the line of fire and across it, in standard
+    /// deviations, the ship it was settled on, and seconds until she settles it again.
+    laying: Vec2,
+    laid_on: Option<u64>,
+    settle: f32,
+    /// How far off she stands from the yard she is wrecking, and which yard it is.
+    stand_off: f32,
+    standing_off: Option<Vec2>,
+    /// Where she was at her last check of her progress, and seconds since it.
+    progress: (Vec2, f32),
     think: f32,
     torpedo_clock: f32,
     goal: Option<Vec2>,
@@ -99,8 +155,19 @@ pub struct Bot {
 
 /// Seconds pressed against the land before she backs off it.
 const AGROUND: f32 = 1.5;
+/// Metres a second below which, with way rung on, she is held fast by something.
+const STALLED: f32 = 1.;
 /// Seconds she backs off for.
-const BACK_OFF: f32 = 4.;
+const BACK_OFF: f32 = 7.;
+/// Seconds she then steams straight out from the shore that held her, before she takes
+/// up her course again, so she has the way on to turn and does not drive back onto it.
+const STAND_OUT: f32 = 5.;
+/// Seconds between her checks that she is getting somewhere, and the metres she must
+/// have made good since the last. Short of it she is hemmed in a pocket of the shore, and
+/// stands out along the most open water she can see before trying her course again.
+const PROGRESS_CHECK: f32 = 20.;
+const PROGRESS: f32 = 30.;
+const WORK_CLEAR: f32 = 10.;
 /// A torpedo track passing this close to her is one to comb.
 const DODGE_REACH: f32 = 20.;
 /// She turns for a torpedo this many seconds before it would reach her, about when
@@ -115,8 +182,21 @@ const SEA_ROOM: f32 = 250.;
 
 impl Bot {
     pub fn new(temperament: Temperament) -> Self {
+        Self::skilled(temperament, Skill::SHARP, 0)
+    }
+
+    /// A captain of `skill`, whose laying errors are drawn from `seed`.
+    pub fn skilled(temperament: Temperament, skill: Skill, seed: u64) -> Self {
         Self {
             temperament,
+            skill,
+            dice: seed ^ 0x5A1D_0B07,
+            laying: Vec2::ZERO,
+            laid_on: None,
+            settle: 0.,
+            stand_off: BOMBARD_RANGE,
+            standing_off: None,
+            progress: (Vec2::ZERO, 0.),
             think: 0.,
             torpedo_clock: 0.,
             goal: None,
@@ -140,17 +220,23 @@ impl Bot {
     }
 
     /// The card she takes from a hand: the first of her favourites on offer, else the
-    /// first dealt.
+    /// first dealt. Her favourites are a player's, in the order the run logs show them
+    /// taken: loaders well ahead of all else, then plate, then the secondaries that
+    /// clear the small craft round her, and velocity.
     pub fn choose(offers: &[Card]) -> Option<Card> {
-        const FAVOURITES: [Card; 8] = [
+        const FAVOURITES: [Card; 12] = [
             Card::Loader,
             Card::Armor,
-            Card::Hardening,
-            Card::Turbines,
-            Card::TrainingGear,
+            Card::SecondaryRange,
+            Card::HeavySecondaries,
+            Card::TwinSecondaries,
             Card::Velocity,
-            Card::QuickSecondaries,
             Card::MoreSecondaries,
+            Card::QuickSecondaries,
+            Card::Caps,
+            Card::Hardening,
+            Card::TrainingGear,
+            Card::Turbines,
         ];
         FAVOURITES
             .iter()
@@ -193,6 +279,13 @@ impl Bot {
             .filter(|r| battle.open_water(at, r.body.pos))
             .min_by(|a, b| threat_rank(a, at).total_cmp(&threat_rank(b, at)));
         self.target = quarry.map(|r| r.body.id);
+        // She settles her laying afresh now and then, and on each new mark.
+        self.settle -= dt;
+        if self.settle <= 0. || self.laid_on != self.target {
+            self.settle = AIM_SETTLE;
+            self.laid_on = self.target;
+            self.laying = Vec2::new(self.normal(), self.normal());
+        }
         // The nearest of the works still standing: a drydock, or a factory that could
         // raise one again. Its port, where it stands, and its height.
         let yard = battle
@@ -205,19 +298,39 @@ impl Bot {
                 let factories = (0..p.factories().len())
                     .filter(|&i| p.factories()[i].live())
                     .map(move |i| (p, p.factory_position(i), p.factory_top(i)));
-                docks.chain(factories)
+                // An airfield stands until its hangars are down as well.
+                let hangars = (p.airfield().into_iter()).flat_map(move |field| {
+                    (0..shipvivor_encounter::HANGARS.len())
+                        .filter(|&i| field.hangar_live(i))
+                        .map(move |i| (p, field.hangar_position(i), field.hangar_top(i)))
+                });
+                docks.chain(factories).chain(hangars)
             })
             .min_by(|a, b| {
                 a.1.distance_squared(at)
                     .total_cmp(&b.1.distance_squared(at))
             });
+        // A light shore gun of that yard's base, still firing, comes down first: it is
+        // quick to silence and keeps hitting her while she works on the yard.
+        let gun = yard.and_then(|(p, _, _)| {
+            (p.turrets().iter())
+                .filter(|g| g.live() && !g.heavy_battery())
+                .map(|g| (p, g.position(&p.body), SHORE_GUN_TOP))
+                .min_by(|a, b| {
+                    a.1.distance_squared(at)
+                        .total_cmp(&b.1.distance_squared(at))
+                })
+        });
+        let yard_target = gun
+            .filter(|(_, spot, _)| spot.distance(at) <= reach)
+            .or(yard);
         // A warship close aboard comes first. Otherwise a yard in range is worth more
         // than the light craft and freighters round it.
         let pressing =
             quarry.filter(|r| !r.class.is_merchant() && r.body.pos.distance(at) <= PRESSING);
         // The yard stands on its island, so the line of fire is judged to its slip,
         // which opens onto the water.
-        let yard_in_reach = yard.filter(|(p, works, _)| {
+        let yard_in_reach = yard_target.filter(|(p, works, _)| {
             works.distance(at) <= reach && battle.open_water(at, p.berth())
         });
         let gun_target = match (pressing, yard_in_reach) {
@@ -225,30 +338,13 @@ impl Bot {
             (None, Some(_)) => None,
             (None, None) => quarry,
         };
-        let (aim, ammo) = match (gun_target, yard_in_reach) {
-            (Some(r), _) => {
-                let lead = lead(r, at, shell.speed());
-                let heavy = matches!(
-                    r.class,
-                    EnemyClass::Cruiser
-                        | EnemyClass::Battleship
-                        | EnemyClass::Parliament
-                        | EnemyClass::Regent
-                );
-                (
-                    Aim::Sight(lead),
-                    if heavy && run.fittings.armor_piercing() {
-                        Ammo::Ap
-                    } else {
-                        Ammo::He
-                    },
-                )
-            }
+        let aim = match (gun_target, yard_in_reach) {
+            (Some(r), _) => Aim::Sight(self.lay(lead(r, at, shell.speed()), at, 1.)),
             (None, Some((_, works, top))) => {
-                let mark = works.extend(top * 0.5).xzy();
-                (Aim::Sight(mark), Ammo::He)
+                // A yard stands still, so she lays on it closer.
+                Aim::Sight(self.lay(works.extend(top * 0.5).xzy(), at, 0.5))
             }
-            _ => (Aim::Hold, Ammo::He),
+            _ => Aim::Hold,
         };
         // Torpedoes go at a ship lying within either rack's arc and inside their run.
         self.torpedo_clock -= dt;
@@ -265,11 +361,13 @@ impl Bot {
         }
         self.think -= dt;
         if self.think <= 0. {
-            self.think = THINK;
+            self.think = self.skill.think();
+            // While a yard stands she steers for it, and fights what closes her on the
+            // way with her guns alone. A captain who chases every boat never gets there.
             self.plan(
                 battle,
                 helm,
-                pressing,
+                pressing.filter(|_| yard.is_none()),
                 yard.map(|(p, works, _)| (works, p.berth())),
             );
         }
@@ -283,13 +381,19 @@ impl Bot {
         };
         // Held against the land she has no way on and cannot turn, so she backs off it as
         // a captain would, with the rudder reversed to swing her bow towards her heading.
-        self.aground = if held.is_some() && helm.speed.abs() < 4. {
+        // Anything else that holds her with full ahead rung, a quay or a hull at anchor,
+        // she treats the same way.
+        let stalled = self.backing <= 0. && helm.speed.abs() < STALLED;
+        self.aground = if (held.is_some() && helm.speed.abs() < 4.) || stalled {
             self.aground + dt
         } else {
             (self.aground - dt).max(0.)
         };
         if self.backing > 0. {
             self.backing -= dt;
+            if self.backing <= 0. && self.shore != Vec2::ZERO {
+                self.escape = STAND_OUT;
+            }
             // Her stern has found the land too: steam out ahead instead.
             if held.is_some() && helm.speed < 0. {
                 self.backing = 0.;
@@ -297,9 +401,26 @@ impl Bot {
             }
         } else if self.aground > AGROUND {
             self.backing = BACK_OFF;
+            // Caught by the shore near the yard she is working on: stand further off it.
+            if self
+                .goal
+                .is_some_and(|g| g.distance(at) < self.stand_off + 120.)
+                && self.standing_off.is_some()
+            {
+                self.stand_off = (self.stand_off + STAND_OFF_STEP).min(STAND_OFF_MOST);
+            }
             self.aground = 0.;
         }
         self.escape = (self.escape - dt).max(0.);
+        self.progress.1 += dt;
+        if self.progress.1 >= PROGRESS_CHECK {
+            if at.distance(self.progress.0) < PROGRESS && !self.fleeing {
+                self.shore = direction(open_heading(battle, at, self.desired));
+                self.backing = 0.;
+                self.escape = WORK_CLEAR;
+            }
+            self.progress = (at, 0.);
+        }
         // A torpedo whose track will pass close is combed: she turns end-on to it, the
         // nearer way round, as a captain on the bridge would at the alarm.
         let way = helm.forward() * helm.speed;
@@ -308,7 +429,7 @@ impl Bot {
             .iter()
             .filter(|t| t.hostile())
             .filter_map(|t| t.closing(at, way, DODGE_REACH).map(|s| (s, t)))
-            .filter(|(seconds, _)| *seconds < DODGE_WARNING)
+            .filter(|(seconds, _)| *seconds < self.skill.dodge_warning())
             .min_by(|a, b| a.0.total_cmp(&b.0));
         if let Some((_, torpedo)) = incoming {
             let along = heading(torpedo.body.forward());
@@ -337,10 +458,32 @@ impl Bot {
             rudder: if astern { -rudder } else { rudder },
             notch: if astern { -3 } else { 4 },
             aim,
-            ammo,
             torpedo,
             intent,
         }
+    }
+
+    /// `mark` as she lays on it from `at`: off by her laying error, `share` of it.
+    fn lay(&self, mark: Vec3, at: Vec2, share: f32) -> Vec3 {
+        let off = mark.xz() - at;
+        let along = off.normalize_or_zero();
+        let error = self.skill.aim_error() * share * off.length() / 100.;
+        let wander =
+            along * self.laying.x * error + along.perp() * self.laying.y * error * AIM_ACROSS;
+        mark + wander.extend(0.).xzy()
+    }
+
+    /// A draw from the standard normal distribution, off her own dice.
+    fn normal(&mut self) -> f32 {
+        let mut uniform = || {
+            self.dice = self.dice.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.dice;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            ((z ^ (z >> 31)) >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let (u, v) = (uniform().max(1e-7), uniform());
+        (-2. * u.ln()).sqrt() * (TAU * v).cos()
     }
 
     /// Where she is bound and the heading that takes her there clear of the land.
@@ -376,13 +519,19 @@ impl Bot {
             )
         } else if let Some((yard, slip)) = yard {
             // She shells it from off its slip, where the water runs out to the fairway.
-            let station = yard + (slip - yard).normalize_or(at - yard) * BOMBARD_RANGE;
+            // A new yard: she runs in close again.
+            if self.standing_off.is_none_or(|w| w.distance(yard) > 1.) {
+                self.standing_off = Some(yard);
+                self.stand_off = BOMBARD_RANGE;
+            }
+            let range = self.stand_off;
+            let station = yard + (slip - yard).normalize_or(at - yard) * range;
             self.goal = Some(station);
-            if station.distance(at) > 120. && yard.distance(at) > BOMBARD_RANGE + 60. {
+            if station.distance(at) > 120. && yard.distance(at) > range + 60. {
                 (heading(battle.pilot(at, station) - at), Intent::Closing)
             } else {
                 (
-                    broadside(battle, helm.heading, at, yard, BOMBARD_RANGE),
+                    broadside(battle, helm.heading, at, yard, range),
                     Intent::Closing,
                 )
             }
@@ -466,6 +615,22 @@ fn clear_heading(battle: &Battle, at: Vec2, wanted: f32) -> f32 {
         }
     }
     wanted
+}
+
+/// The heading with the most open water ahead of her, out to a few hundred metres, and
+/// of those the nearest `wanted`.
+fn open_heading(battle: &Battle, at: Vec2, wanted: f32) -> f32 {
+    (0..24)
+        .map(|i| i as f32 * TAU / 24.)
+        .map(|h| {
+            let run = [240., 160., 80., 40.]
+                .into_iter()
+                .find(|&reach| battle.open_water(at, at + direction(h) * reach))
+                .unwrap_or(0.);
+            (run - 20. * turn(wanted, h).abs(), h)
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map_or(wanted, |(_, h)| h)
 }
 
 /// Signed turn from `from` to `to`, the short way round, in radians.

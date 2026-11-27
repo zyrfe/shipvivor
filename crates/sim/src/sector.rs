@@ -3,8 +3,8 @@
 //! plain geometry and timing, so this is the one place that ties a stage to both. The
 //! game and the simulator both sail these sectors.
 use glam::{Mat2, Vec2};
-use shipvivor_campaign::{Grade, MAX_STARS, PATROLS, POOLS, Stage, YARD_POINTS};
-use shipvivor_encounter::{Battle, Chart, EnemyClass, Waters, leg_seed};
+use shipvivor_campaign::{Fleet, Grade, MAX_STARS, PATROLS, POOLS, ROUNDS, Stage, YARD_POINTS};
+use shipvivor_encounter::{Battle, Chart, Doctrine, EnemyClass, Surprise, Waters, leg_seed};
 
 /// The weather of a stage as plain numbers. The game turns them into its seascape.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -134,6 +134,25 @@ pub const TOUGH_HEAD_START: f32 = 45.;
 /// The share of a sea's time between raider launches left on a tough passage, so its
 /// raiders come out quicker than they do when the same waters are charted moderate.
 pub const TOUGH_RAID_PACE: f32 = 0.85;
+/// How hard the enemy's blows land in each round, as a share of their weight: the dial
+/// that turns a round harder or easier without changing what she meets in it (see
+/// `Battle::with_pressure`). `cargo run --release -p shipvivor-sim --example runs`
+/// shows what a setting does to the chance of a field of players getting through.
+pub const PRESSURE: [f32; ROUNDS] = [1.; ROUNDS];
+
+/// One passage in this many, past the anchorages, hides a fleet the scouts missed.
+pub const SURPRISE_ODDS: u64 = 3;
+/// Keeps the surprises' draw apart from anything else drawn from a leg's seed.
+const SURPRISE_STREAM: u64 = 0x7375_7270_7269_7365;
+
+/// The encounter's doctrine for what holds a sea.
+pub fn doctrine(fleet: Fleet) -> Doctrine {
+    match fleet {
+        Fleet::Flotillas => Doctrine::Flotillas,
+        Fleet::Mixed => Doctrine::Mixed,
+        Fleet::BattleLine => Doctrine::BattleLine,
+    }
+}
 
 /// The most barrels a shore gun mounts in a stage's waters: one in the first round, two
 /// in the second, three in the third and the full four from the fourth on.
@@ -148,7 +167,9 @@ type Plan = &'static [&'static [u8]];
 /// Sea state, wave heading in degrees, cloud cover and seconds between raider launches.
 type Climate = (f32, f32, f32, f32);
 
-/// Each sea's channel, the bases staged up it, and its weather. A stage of two leaves
+/// Each sea's channel, the bases staged up it, and its weather. A `4` is an airfield
+/// base: two seas of each pool from the third round on keep one up the channel, short of
+/// the heavy yard. A stage of two leaves
 /// the order to the captain, and the next stage stirs once both are down.
 fn sea(stage: Stage) -> (Kind, Plan, Climate) {
     use Kind::*;
@@ -180,11 +201,11 @@ fn sea(stage: Stage) -> (Kind, Plan, Climate) {
         KittiwakeSound => (Sound, &[&[1], &[1, 2], &[3]], (0.2, 150., 0.6, 5.6)),
         RimeGate => (Narrows, &[&[1], &[2], &[2, 3]], (0.7, 60., 0.5, 5.2)),
         SkuaNarrows => (Narrows, &[&[1], &[1, 2], &[3]], (0.45, 35., 0.75, 5.)),
-        FloeRoad => (Open, &[&[1], &[2], &[2, 3]], (0.35, 95., 0.15, 5.4)),
+        FloeRoad => (Open, &[&[1], &[4], &[2, 3]], (0.35, 95., 0.15, 5.4)),
         BearclawCut => (Cut, &[&[1], &[1, 2], &[3]], (0.65, 155., 0.8, 5.)),
         IvorySound => (Sound, &[&[1, 1], &[2], &[3]], (0.15, 70., 0.3, 5.6)),
         HoarfrostBay => (Sound, &[&[1], &[2], &[2, 3]], (0.28, 185., 0.95, 5.3)),
-        LodestoneReach => (Open, &[&[1, 1], &[2], &[3]], (0.6, 125., 0.5, 5.1)),
+        LodestoneReach => (Open, &[&[1, 1], &[4], &[3]], (0.6, 125., 0.5, 5.1)),
         // The fourth round: four bases.
         WhalebackReach => (Open, &[&[1], &[2], &[2, 3]], (0.66, 95., 0.4, 5.)),
         // Still water lost in a fog bank.
@@ -192,41 +213,41 @@ fn sea(stage: Stage) -> (Kind, Plan, Climate) {
         TheGullet => (Cut, &[&[1], &[1, 2], &[3]], (0.78, 130., 0.65, 4.9)),
         PetrelSound => (Sound, &[&[1], &[1, 2], &[3]], (0.25, 105., 0.4, 5.2)),
         IcefallCut => (Cut, &[&[1], &[2], &[2, 3]], (0.5, 165., 0.6, 5.)),
-        BeaconRoad => (Open, &[&[1], &[1, 2], &[3]], (0.72, 45., 0.85, 4.9)),
+        BeaconRoad => (Open, &[&[1], &[1, 4], &[3]], (0.72, 45., 0.85, 4.9)),
         CormorantReach => (Open, &[&[1, 1], &[2], &[3]], (0.58, 80., 0.3, 5.1)),
         ShiverNarrows => (Narrows, &[&[1], &[2], &[2, 3]], (0.85, 25., 0.9, 4.8)),
-        WreckersBay => (Sound, &[&[1], &[2], &[2, 3]], (0.4, 200., 0.7, 5.2)),
+        WreckersBay => (Sound, &[&[1], &[4], &[2, 3]], (0.4, 200., 0.7, 5.2)),
         // The fifth round: five bases, with a pair to choose between on the way up.
         LongnightRoad => (Open, &[&[1], &[1, 2], &[2, 3]], (0.6, 20., 0.8, 4.8)),
         HollowSound => (Sound, &[&[1], &[2], &[1, 2], &[3]], (0.24, 200., 0.45, 5.2)),
         SplinterCut => (Cut, &[&[1], &[1, 2], &[2], &[3]], (0.85, 145., 0.75, 4.7)),
-        PolarRoad => (Open, &[&[1], &[2], &[1, 2], &[3]], (0.5, 65., 0.1, 5.)),
+        PolarRoad => (Open, &[&[1], &[2], &[1, 4], &[3]], (0.5, 65., 0.1, 5.)),
         SleetSound => (Sound, &[&[1, 1], &[2], &[2, 3]], (0.35, 135., 0.9, 5.)),
         AnvilCut => (Cut, &[&[1], &[2], &[2], &[2, 3]], (0.6, 175., 0.55, 4.8)),
         BlackwaterNarrows => (Narrows, &[&[1], &[1, 2], &[2], &[3]], (0.7, 110., 1., 4.7)),
         RavensReach => (Open, &[&[1], &[1, 2], &[2], &[3]], (0.8, 40., 0.6, 4.7)),
-        HarrowBay => (Sound, &[&[1], &[1, 2], &[2], &[3]], (0.2, 90., 0.35, 5.2)),
+        HarrowBay => (Sound, &[&[1], &[1, 2], &[4], &[3]], (0.2, 90., 0.35, 5.2)),
         // The sixth round: five bases.
         FrostlineReach => (Open, &[&[1], &[1, 2], &[2], &[3]], (0.7, 70., 0.2, 4.6)),
         // A clear, calm haven, and the yards there work fast.
         TernHaven => (Sound, &[&[1, 1], &[2], &[2, 3]], (0.12, 120., 0.1, 5.)),
         DevilsThroat => (Narrows, &[&[1], &[1, 2], &[2], &[3]], (0.9, 30., 0.9, 4.5)),
-        TempestRoad => (Open, &[&[1], &[1, 2], &[2, 3]], (0.95, 115., 0.95, 4.6)),
+        TempestRoad => (Open, &[&[1], &[1, 4], &[2, 3]], (0.95, 115., 0.95, 4.6)),
         HailstoneSound => (Sound, &[&[1], &[2], &[1, 2], &[3]], (0.45, 160., 0.8, 4.8)),
         WolfpackNarrows => (Narrows, &[&[1], &[2], &[1, 2], &[3]], (0.6, 50., 0.65, 4.4)),
         CoffinCut => (Cut, &[&[1], &[1, 2], &[2], &[3]], (0.75, 185., 0.85, 4.5)),
         NorthlightReach => (Open, &[&[1], &[2], &[1, 2], &[3]], (0.3, 10., 0.05, 4.9)),
-        ShroudBay => (Sound, &[&[1], &[1, 2], &[2], &[3]], (0.18, 140., 1., 4.8)),
+        ShroudBay => (Sound, &[&[1], &[1, 2], &[4], &[3]], (0.18, 140., 1., 4.8)),
         // The last patrol: five bases.
         BorealRoad => (Open, &[&[1], &[2], &[1, 2], &[3]], (0.75, 85., 0.55, 4.4)),
         CalvingSound => (Sound, &[&[1], &[1, 2], &[2], &[3]], (0.3, 165., 0.7, 4.8)),
         // The last way through to the Regent lies through the worst of the weather.
         RegentsGate => (Cut, &[&[1], &[2], &[2], &[2, 3]], (0.95, 135., 1., 4.2)),
         MidwinterRoad => (Open, &[&[1], &[1, 2], &[2, 3]], (0.65, 30., 0.9, 4.4)),
-        AdmiraltySound => (Sound, &[&[1, 1], &[2], &[2, 3]], (0.4, 95., 0.5, 4.6)),
+        AdmiraltySound => (Sound, &[&[1, 1], &[4], &[2, 3]], (0.4, 95., 0.5, 4.6)),
         BastionCut => (Cut, &[&[1], &[1, 2], &[2], &[3]], (0.7, 150., 0.7, 4.3)),
         GauntletNarrows => (Narrows, &[&[1], &[1, 2], &[2], &[3]], (0.85, 60., 0.8, 4.2)),
-        CitadelBay => (Sound, &[&[1], &[2], &[1, 2], &[3]], (0.22, 190., 0.4, 4.7)),
+        CitadelBay => (Sound, &[&[1], &[2], &[1, 4], &[3]], (0.22, 190., 0.4, 4.7)),
         WhiteoutReach => (Open, &[&[1], &[1, 2], &[2], &[3]], (0.9, 120., 1., 4.3)),
         // A broad deep for the Regent, under a long swell and a clearing sky: A; B and
         // C together. Its breadth is set apart in `Sector::of`.
@@ -252,7 +273,7 @@ impl Sector {
         let tough = stage.enters_air_cover(grade);
         let head_start = (HEAD_START_PER_ROUND * (stage.round() - 1) as f32).min(MOST_HEAD_START)
             + if tough { TOUGH_HEAD_START } else { 0. };
-        let pace = if tough { TOUGH_RAID_PACE } else { 1. };
+        let pace = if tough { TOUGH_RAID_PACE } else { 1. } * doctrine(stage.fleet()).raid_pace();
         Self {
             stage,
             grade,
@@ -285,13 +306,24 @@ impl Sector {
             s if s < 0.8 => "heavy swell",
             _ => "rough seas",
         };
-        format!("{}, {sea}", self.kind.name())
+        // An airfield up the channel is the first thing a captain wants to know.
+        let channel = if self.airfield() {
+            "Airfield"
+        } else {
+            self.kind.name()
+        };
+        format!("{channel}, {sea}")
+    }
+
+    /// An airfield base stands somewhere up the channel.
+    pub fn airfield(&self) -> bool {
+        (self.waters.stages.iter()).any(|stage| stage.contains(&shipvivor_encounter::AIRFIELD_WORKS))
     }
 
     /// How often raiders put out here beside the other seas of the round's pool, whatever
     /// the grade.
     pub fn patrols(&self) -> &'static str {
-        let launches = |stage| sea(stage).2.3;
+        let launches = |stage: Stage| sea(stage).2.3 * doctrine(stage.fleet()).raid_pace();
         let Some(pool) = POOLS.get(self.stage.round() - 1) else {
             return "The Regent's screen";
         };
@@ -318,6 +350,16 @@ impl Sector {
         self.waters.bases()
     }
 
+    /// The bases staged up the channel, as factory counts by stage: see `sea`.
+    pub fn plan(&self) -> &'static [&'static [u8]] {
+        self.waters.stages
+    }
+
+    /// Seconds between the raiders' launches here.
+    pub fn raid_interval(&self) -> f32 {
+        self.raid_interval
+    }
+
     /// The boss these waters build up to: none in an anchorage, the Commodore's
     /// battleship in the second and third rounds, the Brass Parliament from the fourth,
     /// and the Iron Regent at Crown Deep.
@@ -328,6 +370,35 @@ impl Sector {
             round if round <= PATROLS => Some(EnemyClass::Parliament),
             _ => Some(EnemyClass::Regent),
         }
+    }
+
+    /// What holds these waters, as the scouts report it.
+    pub fn fleet(&self) -> Fleet {
+        self.stage.fleet()
+    }
+
+    /// The ships that put to sea with the boss here, in the order they sail.
+    pub fn escort(&self) -> &'static [EnemyClass] {
+        match (self.stage, self.boss()) {
+            (Stage::CrownDeep, _) | (_, None) => &[],
+            _ => doctrine(self.fleet()).escort(self.stage.round()),
+        }
+    }
+
+    /// The fleet the scouts missed in these waters as charted, if one lies here: one
+    /// passage in [`SURPRISE_ODDS`] past the anchorages, drawn from the chart's own seed
+    /// so a run always meets the same. Never in a hand-set chart or at Crown Deep.
+    pub fn surprise(&self, chart: &Chart) -> Option<Surprise> {
+        let seed = chart.seed?;
+        if !(2..=PATROLS).contains(&self.stage.round()) {
+            return None;
+        }
+        let mut z = (seed ^ SURPRISE_STREAM).wrapping_add(0x9e37_79b9_7f4a_7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^= z >> 31;
+        (z.is_multiple_of(SURPRISE_ODDS))
+            .then(|| Surprise::against(doctrine(self.fleet()), z >> 32))
     }
 
     /// The most yard points a leg here can pay, short of cargo: every star at its
@@ -369,8 +440,15 @@ impl Sector {
 
     /// The ports, islands and patrols of a chart.
     pub fn battle(&self, chart: &Chart) -> Battle {
-        let patrol =
-            || Battle::for_chart(self.raid_interval, chart).with_squadrons(self.stage.round());
+        let patrol = || {
+            let held = (Battle::for_chart(self.raid_interval, chart))
+                .with_doctrine(doctrine(self.fleet()));
+            match self.surprise(chart) {
+                Some(surprise) => held.with_surprise(surprise),
+                None => held,
+            }
+            .with_squadrons(self.stage.round())
+        };
         match (self.stage, self.boss()) {
             (Stage::CrownDeep, _) => Battle::regent_encounter(self.raid_interval, chart),
             (_, Some(boss)) => patrol().with_boss(boss),
@@ -379,6 +457,7 @@ impl Sector {
         .escalated(self.head_start)
         .turrets_capped(most_barrels(self.stage))
         .ships_of_round(self.stage.round())
+        .with_pressure(PRESSURE[self.stage.round().clamp(1, ROUNDS) - 1])
     }
 }
 

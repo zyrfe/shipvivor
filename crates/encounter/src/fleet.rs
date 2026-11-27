@@ -17,7 +17,14 @@ const REGENT_WARNING: f32 = 3.2;
 /// Damage the Parliament's bridge, the tower amidships, stands before it is smashed:
 /// three stock rounds, or two heavier ones. It can be hit while her turrets protect
 /// the hull.
-const BRIDGE_STRENGTH: u16 = 5;
+const BRIDGE_STRENGTH: f32 = 5.;
+/// How much slower her guns load with her upperworks wrecked, as a share of their
+/// stock reload. Battered halfway, they lose half of it.
+pub const WRECKED_RELOAD: f32 = 0.6;
+/// How far her salvos are laid off with her upperworks wrecked, as a share of
+/// [`LONG_LAY`]: her rangefinders and spotting top go with them. Battered halfway, she
+/// lays off by half of it, at any range.
+pub const WRECKED_LAY: f32 = 0.6;
 /// Seconds she holds her course at reduced way once her bridge is smashed, until she
 /// is conned from aft.
 pub const CONN_LOST: f32 = 40.;
@@ -68,8 +75,9 @@ pub enum EnemyClass {
     Parliament,
     Regent,
     /// The boss of the second and third rounds: a battleship with a fourth turret and
-    /// gold bands on her turrets, about a fifth more gunfire than a battleship and a
-    /// third more hull. She has no turret screen and sinks as any battleship does.
+    /// gold bands on her turrets, about a fifth more gunfire than a battleship, the same
+    /// capital plate and twice the hull. She has no turret screen and sinks as any
+    /// battleship does.
     Commodore,
 }
 use EnemyClass::*;
@@ -104,6 +112,14 @@ impl Profile {
     /// Metres off the ship at which she circles her on her own.
     pub fn stand_off(&self) -> f32 {
         self.stand_off
+    }
+    /// Damage each round from her main guns does.
+    pub fn damage(&self) -> u16 {
+        self.damage
+    }
+    /// Seconds each of her main guns takes to reload.
+    pub fn reload(&self) -> f32 {
+        self.reload
     }
 }
 
@@ -160,6 +176,22 @@ impl EnemyClass {
     }
     fn cargo_grains(self) -> u32 {
         (self.cargo() * CARGO_GRAIN).round() as u32
+    }
+
+    /// Damage her upperworks stand before they are wrecked: the bridge, its mast and
+    /// her spotting top. A coaster's and a torpedo boat's are part of their deckwork,
+    /// and they have none to lose.
+    pub fn works_strength(self) -> f32 {
+        match self {
+            Coaster | TorpedoBoat => 0.,
+            Patrol => 4.,
+            Freighter | Destroyer => 8.,
+            Cruiser => 14.,
+            Battleship => 24.,
+            Commodore => 28.,
+            Parliament => 36.,
+            Regent => 60.,
+        }
     }
 
     /// The farthest her main guns fire, laid off more the farther past her true range.
@@ -501,6 +533,15 @@ impl EnemyGun {
     pub fn riser(&self) -> f32 {
         self.offset.2
     }
+    /// Where the gun stands on her: metres to starboard, metres forward of amidships,
+    /// and the height of its raised base above the deck.
+    pub fn offset(&self) -> (f32, f32, f32) {
+        self.offset
+    }
+    /// Its bearing off her bow, in radians.
+    pub fn train(&self) -> f32 {
+        self.train
+    }
 }
 
 pub struct SecondaryMount {
@@ -524,6 +565,25 @@ impl SecondaryMount {
     pub fn bearing(&self, body: &Body) -> f32 {
         body.heading + self.train
     }
+    /// Where the gun stands on her deck: metres to starboard, and forward of amidships.
+    pub fn offset(&self) -> Vec2 {
+        self.offset
+    }
+    /// Its bearing off her bow, in radians.
+    pub fn train(&self) -> f32 {
+        self.train
+    }
+}
+
+/// The stage her upperworks are at, mangled by `mangled`: see [`Raider::works_stage`].
+fn works_stage(mangled: f32) -> u8 {
+    if mangled >= 1. {
+        2
+    } else if mangled >= 0.5 {
+        1
+    } else {
+        0
+    }
 }
 
 pub struct Raider {
@@ -545,7 +605,9 @@ pub struct Raider {
     pub(super) plate: super::plating::Plating,
     pub director_lost: bool,
     /// What the Parliament's bridge has left. Other classes have none to hit.
-    bridge: u16,
+    bridge: f32,
+    /// What her upperworks have left to stand: see [`EnemyClass::works_strength`].
+    works: f32,
     /// Seconds left before she is under command again after losing her bridge.
     conn_lost: f32,
     helm: Helm,
@@ -628,8 +690,9 @@ impl Raider {
             bridge: if class == Parliament {
                 BRIDGE_STRENGTH
             } else {
-                0
+                0.
             },
+            works: class.works_strength(),
             conn_lost: 0.,
             // She is already under way when she comes into the sector or off the slip.
             helm: Helm::under_way(p.speed),
@@ -769,15 +832,17 @@ impl Raider {
     pub fn screened(&self) -> bool {
         self.class.is_flagship() && self.live_guns() * 5 >= self.guns.len() * 4
     }
-    /// A penetrating hit at a point on the hull. It lands on the plating there and
-    /// the module behind it, cut to [`SCREENED`] while her turrets screen her.
-    pub(super) fn hit_hull(&mut self, at: Vec2, damage: u16) {
+    /// What reached her hull at a point on it, through her plate or past it. It lands
+    /// on the plating there and the module behind it, cut to [`SCREENED`] while her
+    /// turrets screen her.
+    pub(super) fn hit_hull(&mut self, at: Vec2, damage: f32) {
         let share = if self.screened() { SCREENED } else { 1. };
-        self.strike_hull_at(at, f32::from(damage) * share);
+        self.strike_hull_at(at, damage * share);
     }
-    /// A penetrating hit where a strake has been shot off her side: no turret screens it.
-    pub(super) fn hit_bare_hull(&mut self, at: Vec2, damage: u16) {
-        self.strike_hull_at(at, f32::from(damage));
+    /// What reached her hull where a strake has been shot off her side: no turret
+    /// screens it.
+    pub(super) fn hit_bare_hull(&mut self, at: Vec2, damage: f32) {
+        self.strike_hull_at(at, damage);
     }
     fn strike_hull_at(&mut self, at: Vec2, damage: f32) {
         let offset = at - self.body.pos;
@@ -788,27 +853,26 @@ impl Raider {
             .strike_side(aft, offset.dot(forward.perp()), damage, None);
         self.sync();
     }
-    /// A penetrating hit on one gun. True if it knocked the gun out.
-    pub(super) fn hit_gun(&mut self, index: usize, damage: u16) -> bool {
+    /// What reached one gun through its plate. True if it knocked the gun out.
+    pub(super) fn hit_gun(&mut self, index: usize, damage: f32) -> bool {
         let was_live = self.guns[index].live();
-        self.ship
-            .strike_fitting(self.guns[index].berth, f32::from(damage));
+        self.ship.strike_fitting(self.guns[index].berth, damage);
         self.sync();
         was_live && !self.guns[index].live()
     }
     /// Whether she has a bridge still standing to be shot away.
     pub fn bridge_standing(&self) -> bool {
-        self.bridge > 0
+        self.bridge > 0.
     }
     /// Seconds left before she is under command again, or zero when she is.
     pub fn helm_lost(&self) -> f32 {
         self.conn_lost
     }
-    /// A penetrating hit on her bridge. True if it smashed it: she holds her course at
-    /// a fraction of her speed for [`CONN_LOST`] seconds. A bridge is smashed only once.
-    pub(super) fn hit_bridge(&mut self, damage: u16) -> bool {
+    /// What reached her bridge. True if it smashed it: she holds her course at a
+    /// fraction of her speed for [`CONN_LOST`] seconds. A bridge is smashed only once.
+    pub(super) fn hit_bridge(&mut self, damage: f32) -> bool {
         let standing = self.bridge_standing();
-        self.bridge = self.bridge.saturating_sub(damage);
+        self.bridge = (self.bridge - damage).max(0.);
         let smashed = standing && !self.bridge_standing();
         if smashed {
             self.conn_lost = CONN_LOST;
@@ -816,6 +880,28 @@ impl Raider {
             self.helm.rudder = 0.;
         }
         smashed
+    }
+    /// How badly her upperworks are mangled: 0 while they stand sound, 1 once they are
+    /// wrecked. Her guns load slower and lay wider the worse they are: see
+    /// [`WRECKED_RELOAD`] and [`WRECKED_LAY`].
+    pub fn mangled(&self) -> f32 {
+        let full = self.class.works_strength();
+        if full > 0. {
+            1. - self.works / full
+        } else {
+            0.
+        }
+    }
+    /// How her upperworks look: 0 sound, 1 battered, with the mast down and the bridge
+    /// scorched, and 2 wrecked, shot down to a burning stump.
+    pub fn works_stage(&self) -> u8 {
+        works_stage(self.mangled())
+    }
+    /// What reached her upperworks. True if it battered or wrecked them a stage further.
+    pub(super) fn hit_works(&mut self, damage: f32) -> bool {
+        let before = self.works_stage();
+        self.works = (self.works - damage).max(0.);
+        self.works_stage() > before
     }
     /// Adrift: no engine is turning. The stripped flagship counts as well.
     pub fn is_disabled(&self) -> bool {
@@ -1062,6 +1148,9 @@ impl Raider {
         } else {
             p.range * 0.80
         };
+        // With her upperworks shot about, her guns load slower and lay wider.
+        let mangled = self.mangled();
+        let slowed = 1. + WRECKED_RELOAD * mangled;
         // Each gun on the side she lies on follows her from the moment her lookouts have
         // her, and opens fire once she comes within its range. Each is worked by its own
         // crew, so it fights on whatever becomes of the turrets beside it.
@@ -1093,8 +1182,9 @@ impl Raider {
                     Battery::EnemySecondary,
                     1,
                 );
-                gun.reload =
-                    if self.class == Regent { 5.4 } else { 2.8 } + (index % 3) as f32 * 0.3;
+                gun.reload = (if self.class == Regent { 5.4 } else { 2.8 }
+                    + (index % 3) as f32 * 0.3)
+                    * slowed;
             }
         }
         let reach = self.class.reach();
@@ -1159,12 +1249,15 @@ impl Raider {
                 let long = ((*serial * 7) % 9) as f32 - 4.;
                 let across = ((*serial * 3) % 5) as f32 - 2.;
                 ahead + direction * long * HARRYING_SCATTER.0 + side * across * HARRYING_SCATTER.1
-            } else if past > 0. && gun.committed.is_none() {
+            } else if (past > 0. || mangled > 0.) && gun.committed.is_none() {
+                // Shot-up upperworks lay her off at any range, on top of the error of
+                // long fire, as far as both together come to.
+                let off = (past + WRECKED_LAY * mangled).min(1.);
                 let seed = self.body.id.wrapping_mul(31).wrapping_add(number as u64);
                 let spread = |draw| super::ranging::spread(seed, *serial as u32, draw);
                 ahead
-                    + direction * LONG_LAY.0 * past * spread(0)
-                    + side * LONG_LAY.1 * past * spread(1)
+                    + direction * LONG_LAY.0 * off * spread(0)
+                    + side * LONG_LAY.1 * off * spread(1)
             } else {
                 ahead
             };
@@ -1184,7 +1277,7 @@ impl Raider {
                     path.launch(shots, effects, serial, Battery::Raider, p.damage);
                 }
             }
-            gun.reload = p.reload * if self.director_lost { 1.65 } else { 1. };
+            gun.reload = p.reload * if self.director_lost { 1.65 } else { 1. } * slowed;
             gun.charging = false;
             gun.committed = None;
         }

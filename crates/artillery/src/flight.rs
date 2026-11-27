@@ -23,6 +23,16 @@ impl ShellArc {
         }
     }
 
+    /// An arc from `height` that starts out climbing at `rise` metres a second, under
+    /// the usual pull: a round skipping off plate.
+    pub fn thrown(height: f32, rise: f32) -> Self {
+        Self {
+            height,
+            rise,
+            drop: DROP,
+        }
+    }
+
     pub fn height(self, t: f32) -> f32 {
         self.height + t * (self.rise - 0.5 * self.drop * t)
     }

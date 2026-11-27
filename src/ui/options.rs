@@ -1,6 +1,7 @@
-//! The options screen, opened from the title over the same cruise. For now it holds one
-//! choice: whether experience comes straight from what the ship sinks and wrecks, or from
-//! the packages the wrecks leave to tow in.
+//! The options screen, opened from the title over the same cruise. It holds whether
+//! experience comes straight from what the ship sinks and wrecks, or from the packages the
+//! wrecks leave to tow in, and, where the dev tools log runs, whether rounds and runs end
+//! by asking for playtest feedback.
 use super::*;
 use crate::options::GameOptions;
 use shipvivor_encounter::Rewards;
@@ -18,6 +19,34 @@ pub(super) const REWARDS: [(Rewards, &str, &str); 2] = [
         "Wrecks leave packages to tow in for XP and repairs",
     ),
 ];
+
+/// Whether to ask for playtest feedback, as the options screen offers it. Only where the
+/// dev tools keep run logs, which the scores are saved beside.
+const FEEDBACK: [(bool, &str, &str); 2] = [
+    (
+        true,
+        "Ask",
+        "Four quick scores in the yard after each round and at the end of a run",
+    ),
+    (false, "Off", "Rounds and runs end without asking"),
+];
+
+/// Every choice on the screen in the order its number keys run, from 1.
+fn every_choice() -> impl Iterator<Item = (Action, &'static str, &'static str)> {
+    let rewards = REWARDS
+        .into_iter()
+        .map(|(rewards, label, detail)| (Action::Rewards(rewards), label, detail));
+    let feedback = FEEDBACK
+        .into_iter()
+        .filter(|_| cfg!(feature = "dev-tools"))
+        .map(|(on, label, detail)| (Action::Feedback(on), label, detail));
+    rewards.chain(feedback)
+}
+
+/// The choice a number key makes, counted from 0 for the 1 key.
+pub(super) fn keyed(index: usize) -> Option<Action> {
+    every_choice().nth(index).map(|(action, ..)| action)
+}
 
 /// A choice on the options screen. It lights its border when it is the one made.
 #[derive(Component)]
@@ -37,6 +66,12 @@ pub fn choose(
         (Screen::Options, Action::Rewards(rewards)) => {
             if options.rewards != rewards {
                 options.rewards = rewards;
+                crate::options::keep(&options);
+            }
+        }
+        (Screen::Options, Action::Feedback(on)) => {
+            if options.feedback != on {
+                options.feedback = on;
                 crate::options::keep(&options);
             }
         }
@@ -68,10 +103,18 @@ pub(super) fn show(cmd: &mut Commands, root: Entity, face: &Handle<Font>) {
         ChildOf(panel),
     ));
 
-    text(cmd, panel, "REWARDS", 12., pale());
-    let choices = cmd.spawn((column(6.), ChildOf(panel))).id();
-    for (i, (rewards, label, detail)) in REWARDS.into_iter().enumerate() {
-        let action = Action::Rewards(rewards);
+    let (mut choices, mut kind) = (panel, None);
+    for (i, (action, label, detail)) in every_choice().enumerate() {
+        // Each kind of choice under its own heading.
+        if kind != Some(std::mem::discriminant(&action)) {
+            kind = Some(std::mem::discriminant(&action));
+            let heading = match action {
+                Action::Feedback(_) => "PLAYTEST FEEDBACK",
+                _ => "REWARDS",
+            };
+            text(cmd, panel, heading, 12., pale());
+            choices = cmd.spawn((column(6.), ChildOf(panel))).id();
+        }
         let row = cmd
             .spawn((
                 Node {
@@ -130,6 +173,7 @@ pub fn refresh(
     for (&action, cursor, mut border) in &mut choices {
         let colour = match action {
             Action::Rewards(rewards) if rewards == options.rewards => brass(),
+            Action::Feedback(on) if on == options.feedback => brass(),
             _ if cursor.cursor_over() => ink().with_alpha(0.8),
             _ => Color::srgba_u8(192, 213, 202, 38),
         };

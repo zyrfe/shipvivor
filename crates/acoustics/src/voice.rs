@@ -1,5 +1,9 @@
 //! One sound on its way to the listener, and the ears that hear it.
-use crate::{Air, NEAR, RATE, filter::pole, foundry::Cast};
+use crate::{
+    Air, NEAR, RATE,
+    filter::pole,
+    foundry::{Cast, STRETCH},
+};
 use glam::{Vec3, Vec3Swizzles};
 use std::f32::consts::FRAC_PI_4;
 
@@ -245,6 +249,19 @@ impl Voice {
     /// Samples since the front reached the listener. Negative while it is on its way.
     pub fn spent(&self, air: &Air) -> f64 {
         self.age - f64::from(air.delay(self.heard.distance))
+    }
+
+    /// How loud the voice is at the listener now, near enough: each layer at its level
+    /// and the air's gain, through the cast's envelope where the sound has got to. One
+    /// still on its way counts as loud as it will be when it arrives.
+    pub fn loudness(&self, cast: &Cast, air: &Air) -> f32 {
+        let at = (self.spent(air) * self.speed).max(0.) as usize / STRETCH;
+        (0..3)
+            .map(|layer| {
+                let envelope = cast.envelope[layer].get(at).copied().unwrap_or(0.);
+                self.levels[layer] * self.heard.gains[layer] * envelope
+            })
+            .sum()
     }
 
     pub fn hearing(&self, ears: &Ears, air: &Air) -> Heard {

@@ -187,6 +187,7 @@ fn tile(chart: &Chart, survey: &Survey, battle: &Battle, ox: f32, oy: f32) -> St
             LandmarkKind::Pines => "#4f7a4a",
             LandmarkKind::Glacier => "#e4eef3",
             LandmarkKind::Mainland => "#a3aaa2",
+            LandmarkKind::Airfield => "#cdc8b4",
         };
         let _ = write!(
             s,

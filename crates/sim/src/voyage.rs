@@ -8,7 +8,7 @@
 use crate::sector::Sector;
 use shipvivor_campaign::{LegEnd, Objectives, Run, Stage};
 use shipvivor_encounter::{
-    Aim, AirRaid, Ammo, Battle, Chart, EnemyClass, Events, Hull, MainShell, Orders, Rewards, Volley,
+    Aim, AirRaid, Battle, Chart, EnemyClass, Events, Hull, Orders, Rewards, Volley,
 };
 use shipvivor_navigation::Helm;
 
@@ -110,7 +110,6 @@ pub fn engage(
     dt: f32,
     aim: Aim,
     volley: Option<Volley>,
-    ammo: Ammo,
 ) -> Events {
     if let Some(volley) = volley {
         battle.order_volley(volley);
@@ -124,14 +123,7 @@ pub fn engage(
             speed: helm.speed,
             hull: hull_shape(run),
             aim,
-            shell: MainShell {
-                ammo: if run.fittings.armor_piercing() {
-                    ammo
-                } else {
-                    Ammo::He
-                },
-                ..run.fittings.round()
-            },
+            shell: run.fittings.round(),
             reload: run.fittings.reload(),
         },
     );
@@ -179,6 +171,7 @@ pub fn settle(
             cargo: ev.cargo,
             planes: ev.planes_downed,
             guns: ev.guns_silenced,
+            vehicles: ev.vehicles,
         },
         0,
         if ev.regent_sunk {

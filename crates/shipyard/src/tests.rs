@@ -126,7 +126,7 @@ fn stock_designs_come_out_at_the_figures_the_game_already_uses() {
     for (design, length, structure) in [
         (Design::freighter(), 30.1, 100. * 4. / 18.),
         (Design::cruiser(), 30.1, 100. * 5. / 18.),
-        (Design::flagship(), 81., 43.),
+        (Design::flagship(), 81., 172.),
     ] {
         assert!(near(design.length(), length) && near(design.structure(), structure));
     }
@@ -161,7 +161,7 @@ fn each_enemy_gun_finds_a_berth_on_the_module_under_its_deck_station() {
     assert_eq!((turrets[0], turrets[5]), (berth(1, 0), berth(7, 0)));
 
     // The flagship's turrets take 7 points each whatever her hull is worth: four
-    // stock rounds, and three of the heavier ones.
+    // stock rounds' worth once they are through the plate, and three of the heavier ones.
     let mut flagship = Ship::new(Design::flagship());
     for _ in 0..3 {
         assert_eq!(flagship.strike_fitting(turrets[3], 2.), []);
@@ -842,6 +842,33 @@ fn thick_plate_turns_aside_light_rounds_until_heavy_ones_wear_it_thin() {
     // Stock plate turns nothing that is fired at her.
     let mut stock = Ship::new(Design::breakwater());
     assert!(near(lost(&mut stock, 2., Some(2.8)), 4.));
+}
+
+#[test]
+fn her_log_says_what_each_round_met_and_what_got_through_until_it_is_read() {
+    let mut ship = Ship::new(Design::breakwater().protected(Protection {
+        thickness: 7.,
+        ..Protection::BREAKWATER
+    }));
+    ship.strike_side(7.5, 2., 4., Some(5.9));
+    ship.strike_side(7.5, 2., 4., Some(12.));
+    // A round the pressure dial took all the damage from still struck her.
+    ship.strike_side(7.5, -2., 0., Some(12.));
+    let log = ship.take_struck();
+    assert_eq!(log.len(), 3);
+    let (turned, through, spent) = (&log[0], &log[1], &log[2]);
+    assert!(turned.turned && turned.dealt == 0. && turned.losses.is_empty());
+    assert!(near(turned.plate, 7.) && turned.calibre == Some(5.9));
+    // The first round scuffed the plate, so the second met a little less of it.
+    assert!(!through.turned && through.plate < 7. && through.dealt > 4.);
+    assert!(near(through.aft, 7.5) && near(through.abeam, 2.));
+    assert!(!spent.turned && spent.dealt == 0. && near(spent.plate, 7.));
+    assert!(ship.take_struck().is_empty(), "read once");
+    // Nobody reading it keeps it from growing without end.
+    for _ in 0..100 {
+        ship.strike_side(1., 1., 0., Some(3.));
+    }
+    assert_eq!(ship.take_struck().len(), ship::STRUCK_KEPT);
 }
 
 #[test]

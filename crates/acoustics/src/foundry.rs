@@ -17,6 +17,29 @@ pub(crate) const VARIATIONS: usize = 5;
 pub(crate) struct Cast {
     pub layers: [Vec<f32>; 3],
     pub longest: usize,
+    /// How loud each layer is, or is about to be, through each [`STRETCH`] of it.
+    pub envelope: [Vec<f32>; 3],
+}
+
+/// Samples in each stretch of a cast's envelope, and the stretches after each that it
+/// looks ahead to. A sound that starts a beat late, or swells, is as loud as it will
+/// shortly be.
+pub(crate) const STRETCH: usize = 512;
+const LOOK: usize = 8;
+
+/// The envelope of a layer: in each stretch, the most power in it or in the few after
+/// it, as a root mean square.
+fn envelope(layer: &[f32]) -> Vec<f32> {
+    let power: Vec<f32> = (layer.chunks(STRETCH))
+        .map(|stretch| (stretch.iter().map(|x| x * x).sum::<f32>() / stretch.len() as f32).sqrt())
+        .collect();
+    (0..power.len())
+        .map(|n| {
+            power[n..(n + LOOK).min(power.len())]
+                .iter()
+                .fold(0_f32, |most, &x| most.max(x))
+        })
+        .collect()
 }
 
 pub struct Bank {
@@ -93,10 +116,23 @@ impl Cast {
             Sound::Torch => torch(rng),
             Sound::Ratchet => ratchet(rng),
             Sound::Tick => tick(rng, take % 2 == 1),
+            Sound::Tap => tap(rng),
+            // A clank is the burst every hit on her made before plate and calibre were
+            // heard. It was liked, so it is kept as it was.
+            Sound::Clank => burst(rng),
+            Sound::Pierce => pierce(rng),
+            Sound::Blast => inner_blast(rng),
+            Sound::Gutted => gutted(rng),
+            Sound::Shudder => shudder(rng),
         }
         .map(finish);
         let longest = layers.iter().map(Vec::len).max().unwrap_or(0);
-        Self { layers, longest }
+        let envelope = layers.each_ref().map(|layer| envelope(layer));
+        Self {
+            layers,
+            longest,
+            envelope,
+        }
     }
 }
 
@@ -1853,5 +1889,289 @@ fn ratchet(rng: &mut Rng) -> [Vec<f32>; 3] {
         let pitch = pitch * rng.within(0.9, 1.1);
         strike(&mut layers[1], at - 0.05, &CLANK, (1.4, pitch, 0.5), rng);
     }
+    layers
+}
+
+/// Add `part` into `layer` from its start, scaled so that its own peak is `weight`.
+fn blend(layer: &mut [f32], part: &[f32], weight: f32) {
+    let peak = part.iter().fold(1e-9_f32, |peak, x| peak.max(x.abs()));
+    for (x, y) in layer.iter_mut().zip(part) {
+        *x += weight * y / peak;
+    }
+}
+
+/// Steel straining or folding. It sticks and slips `jerks` times a second, faster while
+/// the strain is greatest, and each slip sets her frames ringing low. The strain comes
+/// on at once and eases over `secs`.
+fn groan(secs: f32, pitch: f32, jerks: f32, rng: &mut Rng) -> Vec<f32> {
+    /// What rings, how loud and how sharply.
+    const FRAMES: [(f32, f32, f32); 3] = [(96., 1., 10.), (151., 0.8, 12.), (247., 0.5, 14.)];
+    let mut ring = FRAMES.map(|(hz, _, sharp)| Biquad::band_pass(pitch * hz, sharp));
+    let (mut turn, mut slip, mut rate) = (0_f32, 0_f32, jerks);
+    render(secs, |t| {
+        let strain = (t / 0.12).min(1.) * (-t * 3. / secs).exp();
+        turn += rate / RATE;
+        if turn >= 1. {
+            turn -= 1.;
+            slip = rng.within(0.4, 1.);
+            rate = jerks * rng.within(0.75, 1.25) * (0.5 + 0.5 * strain);
+        }
+        let jerk = slip * strain * (-turn * 10.).exp();
+        (ring.iter_mut().zip(FRAMES))
+            .map(|(ring, (_, loud, _))| loud * ring.run(jerk))
+            .sum()
+    })
+}
+
+/// A light round glancing off plate far thicker than it needs. The round is on the
+/// plate for a fraction of a millisecond, which reaches only its high modes, and plate
+/// that thick and that well backed damps them within a few hundredths of a second. The
+/// round goes on tumbling, and whirrs as it turns over and falls away.
+fn tap(rng: &mut Rng) -> [Vec<f32>; 3] {
+    const SECS: f32 = 0.5;
+    /// The plate's high modes: hertz, level and the seconds each rings.
+    const RING: [(f32, f32, f32); 5] = [
+        (1870., 0.6, 0.03),
+        (2640., 1., 0.024),
+        (3710., 0.7, 0.018),
+        (5230., 0.45, 0.012),
+        (7100., 0.3, 0.008),
+    ];
+    /// What answers in the frame behind the plate.
+    const KNOCK: [(f32, f32, f32); 2] = [(640., 1., 0.014), (1010., 0.5, 0.01)];
+    let mut layers = [(); 3].map(|_| vec![0.; (SECS * RATE) as usize]);
+    let pitch = rng.within(0.93, 1.07);
+    strike(&mut layers[0], 0., &RING, (1., pitch, 0.6), rng);
+    strike(&mut layers[1], 0., &KNOCK, (1., pitch, 0.7), rng);
+    let mut click = [Biquad::high_pass(3500., 0.7)];
+    breath(&mut layers[0], 0., 0.01, &mut click, rng, |t| {
+        1.4 * (-t / 0.0012).exp()
+    });
+    // It turns over a few dozen times a second, and its whirr falls as it goes.
+    let (spin, off) = (rng.within(26., 38.), rng.within(0.015, 0.03));
+    let mut whirr = Biquad::band_pass(1500. * pitch, 2.5);
+    for (n, x) in layers[0].iter_mut().enumerate().skip((off * RATE) as usize) {
+        let t = n as f32 / RATE - off;
+        whirr.retune(Biquad::band_pass(1500. * pitch / (1. + 1.5 * t), 2.5));
+        let turning = 0.35 + 0.65 * (TAU * spin * t).sin().powi(2);
+        *x += 2.2 * whirr.run(rng.noise()) * turning * (t / 0.02).min(1.) * (-t / 0.11).exp();
+    }
+    let mut dull = Biquad::low_pass(240., 0.7);
+    for (n, x) in layers[2].iter_mut().enumerate().take((0.2 * RATE) as usize) {
+        let t = n as f32 / RATE;
+        *x = 0.4 * blast(t, 0.0015)
+            + 3. * dull.run(rng.noise()) * (t / 0.001).min(1.) * (-t / 0.018).exp();
+    }
+    layers
+}
+
+/// A round punching through plate too thin to stop it. Steel that fractures gives way
+/// at once, in a crack sharper than any blow that only bends it, and the torn edges
+/// part in a crackle of small breaks for a few hundredths of a second while the body of
+/// the round scrapes through. A holed plate hardly rings, and the steel shoved in
+/// behind it thumps low.
+fn pierce(rng: &mut Rng) -> [Vec<f32>; 3] {
+    const SECS: f32 = 0.6;
+    /// The torn edges' brief ring, and the holed plate's dull one: hertz, level and
+    /// the seconds each rings.
+    const EDGES: [(f32, f32, f32); 3] =
+        [(2280., 1., 0.012), (3150., 0.8, 0.009), (4400., 0.5, 0.006)];
+    const HOLED: [(f32, f32, f32); 4] = [
+        (330., 1., 0.035),
+        (520., 0.8, 0.028),
+        (845., 0.6, 0.02),
+        (1290., 0.4, 0.014),
+    ];
+    let count = (SECS * RATE) as usize;
+    let mut layers = [(); 3].map(|_| vec![0.; count]);
+    let pitch = rng.within(0.92, 1.08);
+    let mut hiss = Biquad::high_pass(2500., 0.7);
+    let crack = render(0.03, |t| {
+        blast(t, 0.0003) + 0.8 * hiss.run(rng.noise()) * (-t / 0.0025).exp()
+    });
+    let mut edges = vec![0.; count];
+    strike(&mut edges, 0.001, &EDGES, (1., pitch, 0.5), rng);
+    // Many small breaks, thick at first and thinning out.
+    let tear = rng.within(0.035, 0.06);
+    let mut torn = vec![0.; count];
+    scatter(
+        &mut torn,
+        140,
+        (0.001, 2.5 * tear),
+        (0.0003, 0.0012),
+        rng,
+        |at| (-at / tear).exp(),
+        |rng, _, _| rng.noise(),
+    );
+    blend(&mut layers[0], &crack, 1.);
+    blend(&mut layers[0], &edges, 0.35);
+    blend(&mut layers[0], &torn, 0.7);
+    let mut holed = vec![0.; count];
+    strike(&mut holed, 0., &HOLED, (1., pitch, 0.5), rng);
+    let mut scrape = vec![0.; count];
+    let mut band = [Biquad::band_pass(1300. * pitch, 0.9)];
+    breath(&mut scrape, 0.002, 0.25, &mut band, rng, |t| {
+        (t / 0.004).min(1.) * (-t / 0.045).exp()
+    });
+    blend(&mut layers[1], &holed, 1.);
+    blend(&mut layers[1], &scrape, 0.6);
+    let mut shove = Biquad::low_pass(190., 0.7);
+    for (n, x) in layers[2].iter_mut().enumerate() {
+        let t = n as f32 / RATE;
+        *x = 0.8 * blast(t, 0.005)
+            + 4. * shove.run(rng.noise()) * (t / 0.002).min(1.) * (-t / 0.035).exp();
+    }
+    layers
+}
+
+/// A round bursting inside her a beat after it went in. Heard from outside the
+/// compartment, the steel round it keeps the highs in, so the burst is a boom with
+/// little above a few hundred hertz and the box itself drumming under it. What gets out
+/// is what the burst does: frames buckling in a crunch for a third of a second,
+/// splinters rattling off the bulkheads, and a puff of flame and smoke out of the hole
+/// the round made.
+fn inner_blast(rng: &mut Rng) -> [Vec<f32>; 3] {
+    const SECS: f32 = 2.;
+    /// Seconds from the round going in to its burst.
+    const FUZE: f32 = 0.025;
+    /// The compartment's lowest modes: hertz, level and the seconds each drums.
+    const BOX: [(f32, f32, f32); 3] = [(37., 1., 0.22), (58., 0.75, 0.17), (86., 0.5, 0.12)];
+    let fuze = FUZE * rng.within(0.8, 1.3);
+    let count = (SECS * RATE) as usize;
+    let at = (fuze * RATE) as usize;
+    let mut layers = [(); 3].map(|_| vec![0.; count]);
+    let mut smother = [Biquad::low_pass(560., 0.7), Biquad::low_pass(560., 0.7)];
+    let smothered: Vec<f32> = (boom(0.009, 0.3, rng).into_iter())
+        .map(|x| smother.iter_mut().fold(x, |x, pass| pass.run(x)))
+        .collect();
+    let crunch = rng.within(0.25, 0.4);
+    let mut buckling = vec![0.; count];
+    scatter(
+        &mut buckling,
+        40,
+        (fuze + 0.01, fuze + crunch),
+        (0.004, 0.015),
+        rng,
+        |at| (-(at - fuze) / (0.5 * crunch)).exp(),
+        |rng, colour, t| (TAU * (160. + 1100. * colour) * t).sin() * (0.6 + 0.4 * rng.noise()),
+    );
+    blend(&mut layers[1][at..], &smothered, 1.);
+    blend(&mut layers[1], &buckling, 0.55);
+    let mut splinters = vec![0.; count];
+    scatter(
+        &mut splinters,
+        45,
+        (fuze + 0.004, fuze + 0.3),
+        (0.002, 0.007),
+        rng,
+        |at| (-(at - fuze) / 0.1).exp(),
+        |_, colour, t| (TAU * (1100. + 1800. * colour) * t).sin(),
+    );
+    // What comes out of the hole is not smothered.
+    let mut puff = vec![0.; count];
+    let mut vent = [Biquad::high_pass(900., 0.7), Biquad::low_pass(5000., 0.7)];
+    breath(&mut puff, fuze, 0.2, &mut vent, rng, |t| {
+        (t / 0.002).min(1.) * (-t / 0.03).exp()
+    });
+    blend(&mut layers[0], &splinters, 0.6);
+    blend(&mut layers[0], &puff, 1.);
+    let mut drum = vec![0.; count];
+    strike(&mut drum, fuze, &BOX, (1., rng.within(0.9, 1.1), 0.9), rng);
+    let mut deep = Biquad::low_pass(95., 0.7);
+    let mut shove = vec![0.; count];
+    for (n, x) in shove.iter_mut().enumerate().skip(at) {
+        let t = n as f32 / RATE - fuze;
+        *x = 0.8 * blast(t, 0.03)
+            + 6. * deep.run(rng.noise()) * (t / 0.004).min(1.) * (-t / 0.2).exp();
+    }
+    blend(&mut layers[2], &shove, 1.);
+    blend(&mut layers[2], &drum, 0.6);
+    layers
+}
+
+/// A section of her giving way. Its frames fold in a long groan, steel sticking and
+/// slipping as it does in a seaway but lower, harder and all at once. Gear inside breaks
+/// loose and crashes down, the heaviest not always first, and the sea roars in through
+/// the holes and swells as it fills her.
+fn gutted(rng: &mut Rng) -> [Vec<f32>; 3] {
+    const SECS: f32 = 3.4;
+    /// Heavy gear striking the deck: hertz, level and the seconds each rings.
+    const CRASH: [(f32, f32, f32); 5] = [
+        (88., 1., 0.3),
+        (142., 0.8, 0.22),
+        (233., 0.6, 0.15),
+        (390., 0.45, 0.1),
+        (655., 0.3, 0.06),
+    ];
+    let count = (SECS * RATE) as usize;
+    let mut layers = [(); 3].map(|_| vec![0.; count]);
+    let pitch = rng.within(0.88, 1.12);
+    let start = (rng.within(0.08, 0.15) * RATE) as usize;
+    let folding = groan(rng.within(1.6, 2.2), pitch, rng.within(18., 30.), rng);
+    blend(&mut layers[1][start..], &folding, 0.8);
+    let (mut fallen, mut thuds) = (vec![0.; count], vec![0.; count]);
+    let mut high = vec![0.; count];
+    let mut dull = [Biquad::low_pass(200., 0.7)];
+    for _ in 0..3 + (rng.unit() * 3.) as usize {
+        let at = rng.within(0.15, 1.6);
+        let weight = rng.within(0.5, 1.);
+        let tune = pitch * rng.within(0.85, 1.15);
+        let [bright, low] = parted(&CRASH, tune, 300.);
+        strike(&mut fallen, at, &low, (weight, tune, 0.6), rng);
+        strike(&mut high, at, &bright, (weight, tune, 0.5), rng);
+        breath(&mut thuds, at, 0.3, &mut dull, rng, |t| {
+            weight * (t / 0.003).min(1.) * (-t / 0.05).exp()
+        });
+    }
+    blend(&mut layers[1], &fallen, 1.);
+    blend(&mut layers[0], &high, 0.6);
+    // The sea pours in, swelling over half a second and surging as it fills her.
+    let pour = rng.within(0.2, 0.35);
+    let flow = |t: f32| ((t - pour) / 0.6).clamp(0., 1.) * (-(t - pour - 0.6).max(0.) / 1.4).exp();
+    let mut sea = [Biquad::high_pass(220., 0.7), Biquad::low_pass(1300., 0.6)];
+    let mut hiss = Biquad::high_pass(2500., 0.7);
+    let (mut swirl, sway) = (0_f32, pole(3.));
+    let (mut rush, mut spray) = (vec![0.; count], vec![0.; count]);
+    for n in 0..count {
+        let t = n as f32 / RATE;
+        swirl += sway * (rng.noise() - swirl);
+        let surge = (1. + 25. * swirl).clamp(0.4, 1.6);
+        let water = sea.iter_mut().fold(rng.noise(), |x, pass| pass.run(x));
+        rush[n] = water * flow(t) * surge;
+        spray[n] = hiss.run(rng.noise()) * flow(t);
+    }
+    blend(&mut layers[1], &rush, 0.45);
+    blend(&mut layers[0], &spray, 0.25);
+    let mut deep = Biquad::low_pass(75., 0.7);
+    let mut weight = vec![0.; count];
+    for (n, x) in weight.iter_mut().enumerate() {
+        let t = n as f32 / RATE;
+        let heave = 0.8 * (t / 0.01).min(1.) * (-t / 0.6).exp() + 0.3 * flow(t);
+        *x = 0.6 * blast(t, 0.04) + 5. * deep.run(rng.noise()) * heave;
+    }
+    blend(&mut layers[2], &weight, 1.);
+    blend(&mut layers[2], &thuds, 0.7);
+    layers
+}
+
+/// Her frames taking a heavy blow, carried to the bridge by the ship. It has the shape
+/// of her own main battery's recoil, one blow and the hull flexing under it, but it is
+/// heavier, the loose gear about the bridge rattles for longer, and her frames groan as
+/// she settles. It comes a moment after the round went in, when it burst.
+fn shudder(rng: &mut Rng) -> [Vec<f32>; 3] {
+    const LEAD: f32 = 0.03;
+    let count = (1.6 * RATE) as usize;
+    let at = (LEAD * RATE) as usize;
+    let mut layers = [(); 3].map(|_| vec![0.; count]);
+    let [rattle, thud, roll] = recoil(rng, 1.5);
+    blend(&mut layers[0][at..], &rattle, 1.);
+    blend(&mut layers[1][at..], &thud, 1.);
+    blend(&mut layers[2][at..], &roll, 1.);
+    let settling = groan(0.9, rng.within(0.85, 1.05), rng.within(24., 34.), rng);
+    blend(
+        &mut layers[1][at + (0.12 * RATE) as usize..],
+        &settling,
+        0.45,
+    );
     layers
 }

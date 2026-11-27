@@ -10,6 +10,7 @@ mod damage_fx;
 mod dockyard;
 mod ensign;
 mod eyepiece;
+mod feedback;
 mod fire_control;
 mod flagship_hud;
 mod flares;
@@ -45,7 +46,7 @@ use camera::ShipView;
 use passage::Passage;
 #[cfg(test)]
 use shipvivor_campaign::Objectives;
-use shipvivor_encounter::{Aim, Ammo, Volley};
+use shipvivor_encounter::{Aim, Volley};
 #[cfg(test)]
 use shipvivor_encounter::{Hull, MainShell, Orders};
 use state::{
@@ -86,6 +87,7 @@ impl Plugin for GamePlugin {
             .init_resource::<ensign::Colours>()
             .init_resource::<ui::customise::Locker>()
             .init_resource::<options::GameOptions>()
+            .init_resource::<feedback::Feedback>()
             .init_resource::<dockyard::Pointer>()
             .init_resource::<Guns>()
             .init_resource::<ShipView>()
@@ -153,6 +155,7 @@ impl Plugin for GamePlugin {
                     ui::intent
                         .pipe(ui::customise::choose)
                         .pipe(ui::options::choose)
+                        .pipe(ui::feedback::rate)
                         .pipe(apply_action),
                     engine_orders,
                     camera::mouse_look,
@@ -232,6 +235,7 @@ impl Plugin for GamePlugin {
                         ui::rebuild_screen,
                         ui::customise::refresh,
                         ui::options::refresh,
+                        ui::feedback::light,
                         dockyard::dimension,
                         dockyard::place,
                         ui::instruments,
@@ -320,10 +324,6 @@ impl Voyage<'_, '_> {
         self.guns.torpedo_mode = false;
         self.guns.launch_pending = false;
         self.guns.volley = None;
-        // A new run starts without AP. A fitted ship keeps her selection between legs.
-        if !run.fittings.armor_piercing() {
-            self.guns.ammo = Ammo::He;
-        }
         let flagship = self
             .encounter
             .raiders()
@@ -363,6 +363,9 @@ fn apply_action(In(action): In<Option<ui::Action>>, mut run: ResMut<Campaign>, m
             run.stage = stage;
             run.origin = stage;
             run.seed = voyage.seeds.draw();
+            if let Some(veteran) = dev_start(run.seed) {
+                *run = Campaign::with_run(Mode::Patrol, veteran);
+            }
             voyage.outfit(&mut run);
         }
         (Screen::Title, Action::Trial) => {
@@ -400,10 +403,13 @@ fn apply_action(In(action): In<Option<ui::Action>>, mut run: ResMut<Campaign>, m
         }
         (Screen::Drydock(_), Action::Module(index)) => run.select_section(index),
         (Screen::Drydock(_), Action::Preview(index)) => run.focus_option(index),
-        (Screen::Drydock(_), Action::Pick(job)) => run.pick_hull(job),
+        // A number key on work the yard cannot make picks it out, so its figures say why.
+        // A tile it cannot make takes no click.
         (Screen::Drydock(_), Action::Order(index)) => {
             if run.order_option(index) {
                 voyage.encounter.fit_player(&run);
+            } else {
+                run.focus_option(index);
             }
         }
         (Screen::Drydock(_), Action::Draft(job)) => {
@@ -435,6 +441,37 @@ fn apply_action(In(action): In<Option<ui::Action>>, mut run: ResMut<Campaign>, m
     }
 }
 /// Build the yard's orders: the blueprints are revealed as the ship herself.
+/// With the dev tools, `SHIPVIVOR_START=<round>` opens a new run at that round, for
+/// trying the later rounds by hand: the simulator's captain sails every round before it
+/// for real, takes her cards, spends her yard points and picks her passages, so the ship
+/// is one a good player would bring. `SHIPVIVOR_START_SKILL` sets that captain's skill,
+/// from 0 to 1 (1 by default). Rounds 2 to 8; anything else starts as usual. Sailing the
+/// rounds before takes a few seconds a round in a release build, and a captain lost on the
+/// way is sailed again from the next seed.
+fn dev_start(seed: u64) -> Option<shipvivor_campaign::Run> {
+    if !cfg!(feature = "dev-tools") {
+        return None;
+    }
+    let round: usize = std::env::var("SHIPVIVOR_START").ok()?.trim().parse().ok()?;
+    if !(2..=shipvivor_campaign::ROUNDS).contains(&round) {
+        return None;
+    }
+    let skill = std::env::var("SHIPVIVOR_START_SKILL")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(1.);
+    let started = std::time::Instant::now();
+    let found = shipvivor_sim::run::veteran(seed, round, shipvivor_sim::bot::Skill(skill), 24);
+    match &found {
+        Some((_, seed)) => eprintln!(
+            "SHIPVIVOR_START: round {round} reached from seed {seed} in {:.0} s",
+            started.elapsed().as_secs_f32()
+        ),
+        None => eprintln!("SHIPVIVOR_START: no captain reached round {round}; starting as usual"),
+    }
+    found.map(|(run, _)| run)
+}
+
 fn finalize_refit(run: &mut Campaign, voyage: &mut Voyage) {
     let Some(plan) = run.finalize() else { return };
     if plan.cost() > 0 {
@@ -486,13 +523,6 @@ fn aim_guns(
     if live && keys.just_pressed(KeyCode::KeyT) {
         guns.torpedo_mode = !guns.torpedo_mode;
         guns.launch_pending = false;
-    }
-    // Q changes what the crew loads next. Rounds already in the barrels stay.
-    if live && keys.just_pressed(KeyCode::KeyQ) && run.fittings.armor_piercing() {
-        guns.ammo = match guns.ammo {
-            Ammo::He => Ammo::Ap,
-            Ammo::Ap => Ammo::He,
-        };
     }
     // A digit picks out the turret with that number from the bow, and again lets it go.
     // Z steps the picked turret, or with none picked out every turret, through manual,
@@ -592,7 +622,7 @@ fn advance_ship(
         });
         let marked = marked.map(|r| r.body.id);
         encounter.mark(marked);
-        let ev = shipvivor_sim::engage(&run, &mut encounter, &mut helm, dt, aim, volley, guns.ammo);
+        let ev = shipvivor_sim::engage(&run, &mut encounter, &mut helm, dt, aim, volley);
         // The scoped sight rides with her contact through the tick.
         view.ride_zero(helm.position, &encounter);
         view.update_contact(helm.position, &encounter);

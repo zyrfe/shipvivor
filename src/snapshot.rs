@@ -294,7 +294,7 @@ fn describe(
     let weapon = if guns.torpedo_mode {
         "torpedoes".to_string()
     } else {
-        format!("guns, loading {:?}", guns.ammo)
+        "guns".to_string()
     };
     let _ = writeln!(
         s,

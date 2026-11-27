@@ -526,21 +526,21 @@ mod tests {
         }
         assert!(plan.order(&mut run, DockJob::WidenBeam, None));
         let armor = DockJob::Fitting(Card::Armor);
-        for _ in 0..3 {
+        for _ in 0..5 {
             assert!(plan.order(&mut run, armor, None));
         }
-        assert_eq!(run.fittings.armor, 3);
+        assert_eq!(run.fittings.armor, 5);
         assert_eq!(plan.place(&plan.orders()[2]), None, "hull work");
         // One bay is length enough for a cruiser's beam.
         plan.undo(&mut run, 1);
         assert_eq!(run.beam_class(), ShipBeam::Cruiser);
-        // Without either she is too short to widen, so the beam goes, and the third rank
+        // Without either she is too short to widen, so the beam goes, and the fifth rank
         // of armor that waited on it.
         plan.undo(&mut run, 0);
         assert_eq!(run.beam_class(), ShipBeam::Escort);
-        assert_eq!(run.fittings.armor, 2);
-        assert_eq!(plan.orders().len(), 2);
-        assert_eq!(run.points(), 40 - 4);
+        assert_eq!(run.fittings.armor, 4);
+        assert_eq!(plan.orders().len(), 4);
+        assert_eq!(run.points(), 40 - 8);
         plan.clear(&mut run);
         assert_eq!(run.points(), 40);
         assert_eq!(run.ship.design().modules().len(), 6);

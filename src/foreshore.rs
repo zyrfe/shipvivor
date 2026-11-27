@@ -8,7 +8,7 @@ use bevy::{
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
-use shipvivor_encounter::{ISLAND_RADIUS, LandmarkKind};
+use shipvivor_encounter::{ISLAND_RADIUS, LandmarkKind, Site};
 use std::f32::consts::TAU;
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq)]
@@ -32,6 +32,7 @@ impl Coast {
             Self::Landmark(LandmarkKind::Stacks) => 107,
             Self::Landmark(LandmarkKind::Glacier) => 139,
             Self::Landmark(LandmarkKind::Mainland) => 151,
+            Self::Landmark(LandmarkKind::Airfield) => 163,
         }
     }
 
@@ -67,7 +68,12 @@ impl Coast {
     fn height(self, p: Vec2) -> f32 {
         let a = p.y.atan2(p.x);
         let r = p.length() / self.radius(a);
-        let ledge = (0.80 + 0.052 * (4. * a + 0.9).sin()) - 0.16 * a.cos().max(0.).powi(6);
+        // An airfield's island is levelled nearly to its edge for the field.
+        let ledge = if self == Self::Landmark(LandmarkKind::Airfield) {
+            0.94
+        } else {
+            (0.80 + 0.052 * (4. * a + 0.9).sin()) - 0.16 * a.cos().max(0.).powi(6)
+        };
         let slope = ((r - ledge) / (1. - ledge)).max(0.);
         3.13 + self.crest(p) - 3.42 * slope.powf(0.79)
     }
@@ -432,44 +438,51 @@ pub(super) fn mesh(coast: Coast) -> Mesh {
                 out.pine(p.extend(coast.height(p) - 0.18).xzy(), h, seed + i as u32);
             }
         }
-        Coast::Landmark(LandmarkKind::Pines) => {
-            for i in 0..19 {
-                let p =
-                    Vec2::from_angle(sample(i, 0, seed) * TAU) * (11. * sample(i, 1, seed).sqrt());
-                out.pine(
-                    p.extend(3.1).xzy(),
-                    4.3 + 4.65 * sample(i, 2, seed),
-                    seed + i,
-                );
-            }
-        }
-        Coast::Landmark(LandmarkKind::Stacks) => {
-            for (i, (x, z, h, w)) in [
-                (0., 0., 19.6, 4.9),
-                (-6.3, 1.7, 11.8, 3.3),
-                (5., -4.8, 6.8, 3.3),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                for layer in 0..4 {
-                    let u = layer as f32 / 4.;
-                    let foot = Vec3::new(x + 0.38 * u, 2.2 + u * h, z - 0.8 * u);
-                    out.slab(
-                        foot,
-                        Vec3::new(
-                            w * (1. - 0.56 * u),
-                            h * (0.37 - 0.10 * u),
-                            w * (0.87 - 0.50 * u),
-                        ),
-                        0.37,
-                        seed + i as u32,
-                    );
-                }
-            }
-        }
-        Coast::Landmark(LandmarkKind::Beacon | LandmarkKind::Glacier | LandmarkKind::Mainland) => {}
+        // A small island's pines, stacks and lighthouse stand apart from its ground, so
+        // that each can be brought down: see `pine` and `stack_tier`.
+        Coast::Landmark(
+            LandmarkKind::Pines
+            | LandmarkKind::Stacks
+            | LandmarkKind::Beacon
+            | LandmarkKind::Glacier
+            | LandmarkKind::Mainland
+            | LandmarkKind::Airfield,
+        ) => {}
     }
+    surfaces::weathered_mesh(out.facets, 5.6)
+}
+
+fn features() -> Outcrop {
+    Outcrop {
+        facets: Facets::default(),
+        slots: Vec::new(),
+    }
+}
+
+/// Pine `index` of a pine islet's plan, standing with its roots at the origin.
+pub(super) fn pine(site: &Site, index: usize) -> Mesh {
+    let mut out = features();
+    let seed = Coast::Landmark(LandmarkKind::Pines).seed() + index as u32;
+    out.pine(Vec3::ZERO, site.height, seed);
+    surfaces::weathered_mesh(out.facets, 5.6)
+}
+
+/// Tier `tier` of sea stack `index` of a stack islet's plan, counted from zero at its
+/// foot. It is drawn about the stack's place, at its height above the sea.
+pub(super) fn stack_tier(site: &Site, index: usize, tier: u8) -> Mesh {
+    let mut out = features();
+    let (h, w) = (site.height, site.width);
+    let u = f32::from(tier) / 4.;
+    out.slab(
+        Vec3::new(0.38 * u, 2.2 + u * h, -0.8 * u),
+        Vec3::new(
+            w * (1. - 0.56 * u),
+            h * (0.37 - 0.10 * u),
+            w * (0.87 - 0.50 * u),
+        ),
+        0.37,
+        Coast::Landmark(LandmarkKind::Stacks).seed() + index as u32,
+    );
     surfaces::weathered_mesh(out.facets, 5.6)
 }
 

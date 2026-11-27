@@ -455,7 +455,7 @@ impl Battle {
                 berg.way += hit.kick[1];
                 if hit.closing >= ram::BUMP && raider.ram_rest == 0. {
                     raider.ram_rest = ram::RAM_REST;
-                    raider.hit_hull(hit.point, hit.damage[0]);
+                    raider.hit_hull(hit.point, f32::from(hit.damage[0]));
                     berg.strike(CRUSHING * hit.closing, hit.normal);
                     self.effects.push(Effect {
                         body: body(&mut self.serial, hit.point, bearing(hit.normal)),

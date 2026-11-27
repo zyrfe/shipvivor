@@ -2,7 +2,10 @@
 mod chart;
 pub use chart::{Chart, Course, HarbourSite, Ice, Islet, STRAIT, Waters, leg_seed};
 mod coast;
-pub use coast::{Landmark, LandmarkKind, MAINLAND_CLIFF, MAINLAND_CREST, mainland_top};
+pub use coast::{
+    FOOTING, Feature, FeatureKind, Landmark, LandmarkKind, MAINLAND_CLIFF, MAINLAND_CREST, Site,
+    mainland_top,
+};
 mod current;
 pub use current::{Currents, Gyre, MAX_CURRENT, Set};
 mod iceberg;
@@ -18,6 +21,8 @@ mod fleet;
 pub use fleet::{COASTER_CARGO, EnemyClass, EnemyGun, FREIGHTER_CARGO, Profile, Raider};
 mod weight;
 pub use weight::Weight;
+mod doctrine;
+pub use doctrine::{Doctrine, Surprise};
 mod formation;
 pub use formation::{DEPLOY, LINE_RANGE, SQUADRON_PACE, close_order, line_range};
 mod flak;
@@ -29,6 +34,14 @@ mod port;
 pub use mounts::{Control, DeckOffsets, MainMount, MountStatus, Station, WingGun};
 pub use plating::{HULL_OUTLINE, STRAKE_RISE, STRAKES_A_SIDE, Scar, Strake, breakwater_outline};
 mod air_station;
+mod airfield;
+pub use airfield::{
+    AIRFIELD_RADIUS, AIRFIELD_WORKS, Airfield, AirfieldPart, DEPOT, DEPOT_SIZE, FACTORIES,
+    FIELD_LEVEL, Field, FieldWork, HANGAR_SIZE, HANGARS, HEAVY_GUNS, LIGHT_GUNS, PLANE_HEIGHT,
+    PLANE_REACH, Parked, PlaneKind, RUNWAY, RUNWAY_HALF_WIDTH, RUNWAY_LINE, Roll, SHELTER_LINE,
+    SHELTER_SIZE, SHELTERS, Shelter, TAXIWAY_END, TAXIWAY_LINE, TOWER, TOWER_SIZE, TRUCK_HEIGHT,
+    TRUCK_REACH, Taxi, Truck, Warplane,
+};
 mod projectile;
 mod ram;
 mod ranging;
@@ -45,6 +58,7 @@ mod torpedo;
 mod torpedo_boat;
 pub use aviation::{
     Bomb, CATAPULT_DECK, Flight, Floatplane, Launcher, Missile, catapult_layout, launcher_layout,
+    plane_index, planes_on,
 };
 use glam::{Vec2, Vec3, Vec3Swizzles};
 pub use port::{
@@ -55,7 +69,9 @@ pub use projectile::{SIGHT_LIMIT, Shot, Sighting, Trajectory};
 pub use ranging::{HEAVY_CALIBRE, HEAVY_DAMAGE, HEAVY_RANGE, HEAVY_RELOAD, Ranging};
 use projectile::{fire, footprint};
 pub use ram::Hull;
-pub use shipvivor_artillery::{AntiAir, Ammo, Impact, MainShell, Secondaries, TurretLayout};
+pub use shipvivor_artillery::{
+    AntiAir, ArmorGrade, Impact, MainShell, Round, Secondaries, TurretLayout,
+};
 use shipvivor_compass::heading as bearing;
 pub use torpedo::{
     RACK_HALF_ARC, Rack, SPREAD_HALF_ARC, TORPEDO_RANGE, TORPEDO_SPEED, Torpedo, intercept,
@@ -124,6 +140,15 @@ pub enum EffectKind {
     /// One of a capital ship's side strakes shot loose and thrown clear of her: her
     /// class, and the strake's index among hers.
     StrakeLost(EnemyClass, u8),
+    /// An airfield's hangar or control tower coming down.
+    Felled(FieldWork),
+    /// Fuel going up on an airfield: a truck or an aircraft on the ground, or the whole
+    /// depot, in a ball of fire that rolls up into a cloud of smoke.
+    FuelBlast {
+        depot: bool,
+    },
+    /// A sea stack's tier shot away, or a lighthouse toppling, where it came down.
+    Toppled(FeatureKind),
 }
 impl EffectKind {
     /// Seconds before the effect is removed.
@@ -153,6 +178,11 @@ impl EffectKind {
             Self::Torpedoed => 2.4,
             Self::Shatter(_) => 1.4,
             Self::StrakeLost(..) => 1.6,
+            Self::Felled(_) => 3.,
+            Self::FuelBlast { depot: false } => 6.,
+            Self::FuelBlast { depot: true } => 9.,
+            Self::Toppled(FeatureKind::Lighthouse) => 3.,
+            Self::Toppled(_) => 2.2,
         }
     }
 }
@@ -212,6 +242,8 @@ pub struct Events {
     pub shove: Vec2,
     /// Change in the player's signed speed from ramming or being rammed.
     pub jolt: f32,
+    /// Fuel trucks blown up on an airfield this tick.
+    pub vehicles: u16,
 }
 /// Range ahead and offset to starboard of the patrol screen when a classic sector opens.
 /// The destroyers lie abeam, where their shells land amidships on the engine room, so they
@@ -224,41 +256,21 @@ const PICKETS: [(f32, f32); 4] = [(310., 38.), (390., -126.), (-153., -444.), (5
 const PICKET_SHIFTS: [(f32, f32); 3] = [(0., 0.), (60., 80.), (60., -80.)];
 const COMBATANT_LIMIT: usize = 16;
 /// The warships lying at anchor off a base at the mouth of the channel in the first
-/// round, which is every base of a sector charted in a single stage.
+/// round of mixed waters, which is every base of a sector charted in a single stage.
+/// Each base's squadron is its waters' [`Doctrine::squadron`]: launched from the base's
+/// own docks before she came, and replaced by none but them. Two or more sail as one, in
+/// close order on the heaviest and in line of battle once they have her in reach (see
+/// `formation`).
 const GARRISON: [EnemyClass; 1] = [EnemyClass::Patrol];
-/// The squadron lying in each base's harbour when a sector opens, by the round of the
-/// run the sector lies in (see [`Battle::with_squadrons`]) and where the base stands up
-/// the channel: at its mouth, between, or the heavy yard at its head. Each was launched
-/// from the base's own docks before she came, and none is replaced but by them. Two or
-/// more sail as one, in close order on the heaviest and in line of battle once they
-/// have her in reach (see `formation`). The first rounds' are small, a cruiser and her
-/// two destroyers, and the last rounds' are battle fleets.
-#[rustfmt::skip]
-const SQUADRONS: [[&[EnemyClass]; 3]; 8] = {
-    use EnemyClass::*;
-    const D: EnemyClass = Destroyer;
-    const C: EnemyClass = Cruiser;
-    const B: EnemyClass = Battleship;
-    [
-        [&GARRISON, &[Patrol, Patrol, D], &[D, D, C]],
-        [&[Patrol], &[D, D, C], &[D, D, C, C]],
-        [&[Patrol, Patrol, D], &[D, D, C], &[D, D, C, B]],
-        [&[D, D, C], &[D, D, C], &[D, D, C, C, B]],
-        [&[D, D, C], &[D, D, C, B], &[D, D, C, C, B, B]],
-        [&[D, D, B], &[D, D, C, C, B], &[D, D, D, C, C, B, B]],
-        [&[D, D, C, B], &[D, D, C, C, B, B], &[D, D, D, D, C, C, C, B, B, B]],
-        [&[D, D, C, B], &[D, D, C, C, B, B], &[D, D, D, D, C, C, C, B, B, B]],
-    ]
-};
 /// Metres off at the least that the Regent lies when she enters Crown Deep: past the
 /// reach of her fleet's guns and her own, and inside her lookout's sight.
 const REGENT_RANGE: f32 = 800.;
 /// The Regent's battle fleet at Crown Deep, which forms its line on her.
 #[rustfmt::skip]
-const REGENT_FLEET: [EnemyClass; 10] = {
+const REGENT_FLEET: [EnemyClass; 12] = {
     use EnemyClass::*;
-    [Battleship, Battleship, Battleship, Cruiser, Cruiser, Cruiser,
-     Destroyer, Destroyer, Destroyer, Destroyer]
+    [Battleship, Battleship, Battleship, Cruiser, Cruiser, Cruiser, Cruiser,
+     Destroyer, Destroyer, Destroyer, Destroyer, Destroyer]
 };
 /// Seconds a base stays at alert after the base before it up the channel collapses: its
 /// lookout and radio keep its squadron, its batteries and its torpedo boats on her.
@@ -292,6 +304,26 @@ const GARRISON_STATIONS: [(f32, f32); 25] = [
     (500., -120.),
     (420., 230.),
     (420., -230.),
+];
+/// Where a boss's escort may put out, in metres off her bow beyond her own length and
+/// across it, best first: a screen ahead of her, widening as it fills.
+const ESCORT_STATIONS: [(f32, f32); 16] = [
+    (40., 45.),
+    (40., -45.),
+    (95., 0.),
+    (100., 85.),
+    (100., -85.),
+    (150., 40.),
+    (150., -40.),
+    (60., 120.),
+    (60., -120.),
+    (195., 95.),
+    (195., -95.),
+    (220., 0.),
+    (150., 160.),
+    (150., -160.),
+    (270., 50.),
+    (270., -50.),
 ];
 /// Raid intervals a slip stands empty after a launch. Three yards taking turns put a
 /// ship to sea about once an interval.
@@ -352,9 +384,6 @@ fn ripple(rounds: f32, dt: f32) -> f32 {
 }
 /// Seconds a clicked order stands while its guns finish training or loading.
 pub const VOLLEY_WINDOW: f32 = 0.4;
-/// Seconds the call for AP stands after the last HE round that AP would have opened
-/// the plate for.
-const AP_CALL: f32 = 5.;
 
 /// A click on the main battery trigger.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -400,12 +429,24 @@ pub struct Battle {
     alert_until: Vec<f32>,
     /// The round of the run whose squadrons lie in the harbours, from one.
     squadron_round: usize,
+    /// What holds these waters: what the harbours moor, the yards build and the boss
+    /// sails with, and how heavily its warships are gunned.
+    doctrine: Doctrine,
+    /// The fleet the scouts missed, if one lies here.
+    surprise: Option<Surprise>,
     /// The ships that sail as one, each led by her heaviest.
     squadrons: Vec<formation::Squadron>,
+    /// How hard every enemy blow lands on her, as a share of its own weight, and the
+    /// fraction of a hull point carried over to the next (see [`Battle::with_pressure`]).
+    pressure: f32,
+    pressure_carry: f32,
     /// The weights the sector's warships are gunned in, by its round. Without one, each
     /// ship carries her class's stock guns.
     muster: Option<weight::Muster>,
     raiders: Vec<Raider>,
+    /// Ships going down: each one's wreck effect, by its id, and the ship as she was
+    /// when she sank, every hole and burnt-out turret on her still there.
+    sunk: Vec<(u64, Raider)>,
     spotters: Vec<Spotter>,
     patrol_center: Vec2,
     /// The start and the marks of a passage in order, the road its ships follow when
@@ -440,15 +481,16 @@ pub struct Battle {
     /// wherever they bear on the sight.
     scope_up: bool,
     wing_guns: Vec<WingGun>,
+    /// Where her secondaries stand on the hull she has now, in the order they are fitted.
+    wing_stations: Vec<shipvivor_shipyard::WingStation>,
+    /// Where her AA mounts stand on the hull she has now, in the order they are fitted.
+    aa_stations: Vec<shipvivor_shipyard::AaStation>,
     secondaries: Secondaries,
     aa_mounts: Vec<AaMount>,
     anti_air: AntiAir,
     /// Ranks of training gear on every main gunhouse.
     training_gear: u16,
     last_strike: Option<(Impact, f32)>,
-    /// Seconds left of the call for AP: plate held an HE round lately that the same
-    /// gun's AP would have opened.
-    ap_called_for: f32,
     /// The player's heading and hull this tick, for placing hits along her length.
     keel: (Vec2, Hull),
     next_wave: f32,
@@ -467,6 +509,8 @@ pub struct Battle {
     /// Each base's torpedo boats: where they moor and when it sends them out. Empty in
     /// a sector that has none.
     flotillas: Vec<torpedo_boat::Flotilla>,
+    /// The airfields' aircraft in the air.
+    warplanes: Vec<Warplane>,
 }
 fn body(serial: &mut u64, pos: Vec2, heading: f32) -> Body {
     *serial += 1;
@@ -523,10 +567,9 @@ impl Battle {
             .islets
             .iter()
             .chain(&chart.coast)
-            .map(|islet| Landmark {
-                body: body(&mut serial, islet.pos, islet.heading),
-                radius: islet.radius,
-                kind: islet.kind,
+            .map(|islet| {
+                let at = body(&mut serial, islet.pos, islet.heading);
+                Landmark::new(at, islet.radius, islet.kind)
             })
             .collect();
         let mut b = Self {
@@ -536,7 +579,11 @@ impl Battle {
             harrier_due: vec![0.; ports.len()],
             alert_until: vec![f32::NEG_INFINITY; ports.len()],
             squadron_round: 1,
+            doctrine: Doctrine::Mixed,
+            surprise: None,
             squadrons: Vec::new(),
+            pressure: 1.,
+            pressure_carry: 0.,
             muster: None,
             spotters: ports
                 .iter()
@@ -553,6 +600,7 @@ impl Battle {
             landmarks,
             ports,
             raiders: vec![],
+            sunk: vec![],
             shots: vec![],
             torpedoes: vec![],
             racks: [0.; 2],
@@ -576,13 +624,24 @@ impl Battle {
             next_mount: 0,
             marked: None,
             scope_up: false,
-            wing_guns: WingGun::battery(Secondaries::STOCK.per_side),
+            wing_guns: shipvivor_shipyard::Design::breakwater()
+                .wing_stations()
+                .into_iter()
+                .take(2 * Secondaries::STOCK.per_side)
+                .map(WingGun::new)
+                .collect(),
+            wing_stations: shipvivor_shipyard::Design::breakwater().wing_stations(),
             secondaries: Secondaries::STOCK,
-            aa_mounts: (0..AntiAir::STOCK.mounts).map(AaMount::new).collect(),
+            aa_mounts: shipvivor_shipyard::Design::breakwater()
+                .aa_stations()
+                .into_iter()
+                .take(AntiAir::STOCK.mounts)
+                .map(AaMount::new)
+                .collect(),
+            aa_stations: shipvivor_shipyard::Design::breakwater().aa_stations(),
             anti_air: AntiAir::STOCK,
             training_gear: 0,
             last_strike: None,
-            ap_called_for: 0.,
             keel: (Vec2::NEG_Y, Hull::CRUISER),
             next_wave: wave_interval,
             wave_interval,
@@ -594,7 +653,10 @@ impl Battle {
             boss: EnemyClass::Parliament,
             floe: iceberg::Floe::slack(),
             flotillas: Vec::new(),
+            warplanes: Vec::new(),
         };
+        let works: Vec<u8> = chart.harbours.iter().map(|site| site.works).collect();
+        b.site_airfields(&works);
         for range in [28., 145., 265.] {
             let pos = b.navigable_position(ahead * range, 3.);
             b.salvage
@@ -675,6 +737,17 @@ impl Battle {
         self
     }
     /// How far ahead of the sector's clock its raids began.
+    /// Every blow the enemy lands on her hurts `pressure` times as much: shells, rams,
+    /// bombs and torpedoes alike. It is the one dial that turns the whole leg harder or
+    /// easier without changing what she meets. Fractions of a hull point carry from blow
+    /// to blow, so light hits scale as truly as heavy ones.
+    pub fn with_pressure(mut self, pressure: f32) -> Self {
+        self.pressure = pressure.max(0.);
+        self
+    }
+    pub fn pressure(&self) -> f32 {
+        self.pressure
+    }
     pub fn escalation(&self) -> f32 {
         self.escalation
     }
@@ -779,6 +852,17 @@ impl Battle {
     /// of the last stage with the most works. A base paired with it keeps one from
     /// between.
     pub fn squadron(&self, base: usize) -> &'static [EnemyClass] {
+        let place = self.place(base);
+        let doctrine = if self.surprised(base) {
+            self.surprise.map_or(self.doctrine, |s| s.doctrine)
+        } else {
+            self.doctrine
+        };
+        doctrine.squadron(self.squadron_round, place)
+    }
+    /// Where base `base` stands up the channel: 0 at its mouth, 2 the heavy yard (the
+    /// base of the last stage with the most works), 1 between.
+    fn place(&self, base: usize) -> usize {
         let last = self.ports.iter().map(Port::stage).max().unwrap_or(0);
         let works = |port: &Port| port.factories().len();
         let heavy = (self.ports.iter())
@@ -786,18 +870,16 @@ impl Battle {
             .map(works)
             .max()
             .unwrap_or(0);
-        let stage = self.ports[base].stage();
-        let place = match stage {
+        match self.ports[base].stage() {
             0 => 0,
-            _ if stage == last && works(&self.ports[base]) == heavy => 2,
+            stage if stage == last && works(&self.ports[base]) == heavy => 2,
             _ => 1,
-        };
-        SQUADRONS[self.squadron_round.clamp(1, SQUADRONS.len()) - 1][place]
+        }
     }
     /// The squadrons of round `round` of a run, counting from one, in place of the first
     /// round's.
     pub fn with_squadrons(mut self, round: usize) -> Self {
-        self.squadron_round = round.clamp(1, SQUADRONS.len());
+        self.squadron_round = round.clamp(1, 8);
         // Weigh the squadrons charted with the sector and moor these in their place. The
         // torpedo boats and coasters keep their moorings.
         self.raiders
@@ -805,6 +887,43 @@ impl Battle {
         self.squadrons.clear();
         self.garrison();
         self
+    }
+    /// Waters held by `doctrine`: the yards lay down its ships and each base moors its
+    /// torpedo boats. Its squadrons and the boss's escort follow from
+    /// [`Battle::with_squadrons`], which comes after, and from the round it sets. How
+    /// quickly its yards launch is the sector's to set, in the interval it charts.
+    pub fn with_doctrine(mut self, doctrine: Doctrine) -> Self {
+        let boats = self.doctrine.torpedo_boats();
+        self.doctrine = doctrine;
+        for port in &mut self.ports {
+            port.doctrine = doctrine;
+        }
+        if doctrine.torpedo_boats() != boats && !self.flotillas.is_empty() {
+            self.raiders.retain(|r| r.attack.is_none());
+            self.flotillas.clear();
+            self = self.with_torpedo_boats();
+        }
+        self
+    }
+    pub fn doctrine(&self) -> Doctrine {
+        self.doctrine
+    }
+    /// Hide `surprise` in these waters, ahead of [`Battle::with_squadrons`]. A sector with
+    /// no base between the mouth and the heavy yard hides it at the heavy yard.
+    pub fn with_surprise(mut self, mut surprise: Surprise) -> Self {
+        if !(0..self.ports.len()).any(|base| self.place(base) == surprise.place) {
+            surprise.place = 2;
+        }
+        self.surprise = Some(surprise);
+        self
+    }
+    /// The fleet the scouts missed, if one lies here.
+    pub fn surprise(&self) -> Option<Surprise> {
+        self.surprise
+    }
+    /// Base `base` moors the surprise's squadron.
+    pub fn surprised(&self, base: usize) -> bool {
+        self.surprise.is_some_and(|s| self.place(base) == s.place)
     }
     /// Each squadron afloat: its ships' ids, and whether it is in line of battle.
     pub fn squadrons(&self) -> impl Iterator<Item = (&[u64], bool)> {
@@ -917,6 +1036,45 @@ impl Battle {
                 port,
                 at: self.at_sea,
             });
+            self.sail_escort(at, out, player);
+        }
+    }
+    /// The boss's escort puts to sea with her, from her own yard, onto the open water
+    /// off her bow, and keeps station on her as one squadron. A ship with no clear water
+    /// to put out onto stays in the yard.
+    fn sail_escort(&mut self, at: Vec2, out: Vec2, player: Vec2) {
+        let boss = self.serial;
+        let mut squadron = vec![boss];
+        let room = self.boss.profile().hull.bow;
+        for &class in self.doctrine.escort(self.squadron_round) {
+            let hull = class.profile().hull;
+            let spot = ESCORT_STATIONS
+                .into_iter()
+                .map(|(ahead, across)| at + out * (room + ahead) + out.perp() * across)
+                .find(|&spot| {
+                    spot.distance(player) >= SPAWN_STANDOFF
+                        && (self.navigable_position(spot, hull.radius + 6.)).distance(spot) < 0.01
+                        && (self.floe.icebergs.iter())
+                            .all(|b| b.body.pos.distance(spot) > b.radius + hull.bow + 4.)
+                        && self.raiders.iter().all(|r| {
+                            r.body.pos.distance(spot) > r.class.profile().hull.bow + hull.bow + 4.
+                        })
+                });
+            if let Some(spot) = spot {
+                self.spawn(class, spot, spot + out);
+                let ship = self.raiders.last_mut().unwrap();
+                ship.has_contact = true;
+                squadron.push(ship.body.id);
+            }
+        }
+        self.form_squadron(squadron);
+    }
+    /// The escort the boss sails with in these waters, in the order it puts to sea.
+    pub fn escort(&self) -> &'static [EnemyClass] {
+        if self.flagship.is_some() {
+            self.doctrine.escort(self.squadron_round)
+        } else {
+            &[]
         }
     }
 
@@ -930,6 +1088,13 @@ impl Battle {
     }
     pub fn raiders(&self) -> &[Raider] {
         &self.raiders
+    }
+    /// The ship going down as the wreck effect with id `wreck`, as she was when she
+    /// sank.
+    pub fn sinking(&self, wreck: u64) -> Option<&Raider> {
+        self.sunk
+            .iter()
+            .find_map(|(id, ship)| (*id == wreck).then_some(ship))
     }
     pub fn nearest_ship(&self, player: Vec2) -> Option<&Raider> {
         self.raiders.iter().min_by(|a, b| {
@@ -963,11 +1128,6 @@ impl Battle {
     pub fn salvo_report(&self) -> Option<Impact> {
         self.last_strike.map(|(outcome, _)| outcome)
     }
-    /// Plate held one of the main battery's HE rounds in the last few seconds, and the
-    /// same gun's AP would have opened it.
-    pub fn ap_called_for(&self) -> bool {
-        self.ap_called_for > 0.
-    }
     pub fn effects(&self) -> &[Effect] {
         &self.effects
     }
@@ -978,11 +1138,20 @@ impl Battle {
         self.secondaries
     }
     /// Mount, arm and drill the secondaries as fitted. Guns already aboard keep their state.
+    /// Guns past the room her deck has wait ashore until a longer hull makes room.
     pub fn fit_secondaries(&mut self, fit: Secondaries) {
-        let wanted = WingGun::battery(fit.per_side);
-        self.wing_guns.truncate(wanted.len());
+        let wanted = (2 * fit.per_side).min(self.wing_stations.len());
+        self.wing_guns.truncate(wanted);
+        for (gun, &station) in self.wing_guns.iter_mut().zip(&self.wing_stations) {
+            gun.place(station);
+        }
         let aboard = self.wing_guns.len();
-        self.wing_guns.extend(wanted.into_iter().skip(aboard));
+        self.wing_guns.extend(
+            self.wing_stations[aboard..wanted]
+                .iter()
+                .copied()
+                .map(WingGun::new),
+        );
         self.secondaries = fit;
     }
     pub fn main_mount(&self, station: Station) -> &MainMount {
@@ -998,6 +1167,11 @@ impl Battle {
         fitting: impl Fn(&shipvivor_shipyard::GunStation) -> (MainShell, TurretLayout),
     ) {
         self.deck = DeckOffsets::for_design(design);
+        // The secondaries stand where this hull has room for them.
+        self.wing_stations = design.wing_stations();
+        self.fit_secondaries(self.secondaries);
+        self.aa_stations = design.aa_stations();
+        self.fit_anti_air(self.anti_air);
         let mut positions = design.gun_stations();
         positions.truncate(Station::SLOTS.len());
         self.main_mounts.truncate(positions.len());
@@ -1107,7 +1281,7 @@ impl Battle {
         let mount = &mut self.main_mounts[station.index()];
         let shell = mount.round(orders.shell);
         let reload = mount.reload(orders);
-        let Some(path) = mount.fire(reload, orders.shell.ammo) else {
+        let Some(path) = mount.fire(reload) else {
             return false;
         };
         path.launch(
@@ -1210,6 +1384,10 @@ impl Battle {
             }
             fx.age < fx.kind.lifetime()
         });
+        // A ship is gone once her wreck has gone under.
+        let effects = &self.effects;
+        self.sunk
+            .retain(|(id, _)| effects.iter().any(|fx| fx.body.id == *id));
         for (pos, heading) in landed {
             self.effects.push(Effect {
                 body: body(&mut self.serial, pos, heading),
@@ -1226,7 +1404,6 @@ impl Battle {
         self.last_strike = self
             .last_strike
             .and_then(|(outcome, left)| (left > dt).then_some((outcome, left - dt)));
-        self.ap_called_for = (self.ap_called_for - dt).max(0.);
         self.advance_effects(dt);
         self.drift_ice(dt, orders.player);
         self.at_sea += dt;
@@ -1253,6 +1430,8 @@ impl Battle {
             + self.floe.currents.at(orders.player);
         self.fly_air_raid(dt, orders.player, way);
         self.fly_harriers(dt, orders.player, way);
+        self.run_airfields(dt);
+        self.fly_warplanes(dt, orders.player, way, &mut events);
         for port in &mut self.ports {
             port.fire_turrets(
                 dt,
@@ -1413,8 +1592,7 @@ impl Battle {
                 self.fire_main(orders);
             }
         }
-        for (i, gun) in self.wing_guns.iter_mut().enumerate() {
-            gun.set_position(i, self.deck);
+        for gun in &mut self.wing_guns {
             gun.reload = (gun.reload - dt).max(0.);
             let target = self
                 .raiders
@@ -1481,10 +1659,13 @@ impl Battle {
         for r in &mut self.raiders {
             events.cargo += r.spill_cargo();
         }
-        self.raiders.retain_mut(|r| {
-            if r.afloat() {
-                return true;
+        let mut index = 0;
+        while index < self.raiders.len() {
+            if self.raiders[index].afloat() {
+                index += 1;
+                continue;
             }
+            let mut r = self.raiders.remove(index);
             events.sunk += 1;
             events.coasters += u16::from(r.class == EnemyClass::Coaster);
             events.torpedo_boats += u16::from(r.class == EnemyClass::TorpedoBoat);
@@ -1494,8 +1675,9 @@ impl Battle {
             }
             events.cargo += r.founder_cargo();
             events.regent_sunk |= r.class == EnemyClass::Regent;
+            let wreck = body(&mut self.serial, r.body.pos, r.body.heading);
             self.effects.push(Effect {
-                body: body(&mut self.serial, r.body.pos, r.body.heading),
+                body: wreck,
                 kind: EffectKind::Wreck(r.class),
                 height: 0.,
                 age: 0.,
@@ -1510,8 +1692,9 @@ impl Battle {
                 )),
                 Rewards::Packages => {}
             }
-            false
-        });
+            // She goes down as she was, with every mark of the fight on her.
+            self.sunk.push((wreck.id, r));
+        }
         self.receive_convoys();
         self.salvage.retain_mut(|package| {
             let stream = self.floe.currents.at(package.body.pos);
@@ -1521,6 +1704,15 @@ impl Battle {
             }
             true
         });
+        if self.pressure != 1. {
+            for blow in &mut events.blows {
+                let weight = f32::from(blow.damage) * self.pressure + self.pressure_carry;
+                let whole = weight.floor();
+                self.pressure_carry = weight - whole;
+                blow.damage = whole as u16;
+            }
+            events.damage = events.blows.iter().map(|b| b.damage).sum();
+        }
         events
     }
 }

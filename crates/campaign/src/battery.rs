@@ -71,12 +71,12 @@ impl ShipBeam {
         }
     }
     /// The most ranks of armor plate a hull this broad can carry. Each step of beam
-    /// gives her the stability for two more ranks of heavier side plate.
+    /// gives her the stability for four more ranks of heavier side plate.
     pub const fn most_armor(self) -> u16 {
         match self {
-            Self::Escort => 2,
-            Self::Cruiser => 4,
-            Self::Capital => 6,
+            Self::Escort => 4,
+            Self::Cruiser => 8,
+            Self::Capital => 12,
         }
     }
     pub fn name(self) -> &'static str {

@@ -190,7 +190,7 @@ impl ShoreTurret {
     const STRAY: (f32, f32) = (5., 1.5);
     /// The most marks a gunhouse keeps. Past this the oldest weather away.
     const POCKS: usize = 14;
-    fn new(side: f32, fore: f32, barrels: u8, heading: f32, index: usize) -> Self {
+    pub(super) fn new(side: f32, fore: f32, barrels: u8, heading: f32, index: usize) -> Self {
         Self {
             station: Vec2::new(side, fore),
             barrels,
@@ -218,7 +218,7 @@ impl ShoreTurret {
         self.pocks.push(Pock { at: local, calibre });
     }
     /// A heavy battery of two long guns, which ranges on her from far off.
-    fn heavy(side: f32, fore: f32, heading: f32, index: usize) -> Self {
+    pub(super) fn heavy(side: f32, fore: f32, heading: f32, index: usize) -> Self {
         let mut gun = Self::new(side, fore, 2, heading, index);
         gun.ranging = Some(Ranging::default());
         gun.strength = gun.max_strength();
@@ -363,6 +363,8 @@ pub struct Port {
     material_progress: f64,
     tier: usize,
     order_index: usize,
+    /// What holds the waters, which decides what the yard lays down at each tier.
+    pub(super) doctrine: super::Doctrine,
     pub(super) convoy_clock: f32,
     /// Seconds until the yard sends out its next group of coasters.
     pub(super) coaster_clock: f32,
@@ -380,6 +382,10 @@ pub struct Port {
     roused_at: f32,
     /// Has sighted the ship or been hit since the last look round, which rouses it.
     pub(super) alarm: bool,
+    /// The airfield beside the harbour, where the base is one: its runway, shelters,
+    /// hangars and tower stand on a flat island of their own, and its factories with
+    /// them. Its drydock and quay stay on the harbour island.
+    pub(super) airfield: Option<Box<super::Airfield>>,
 }
 impl Port {
     /// The classic layout: one harbour outside each of three gates, facing the fairway.
@@ -411,7 +417,11 @@ impl Port {
                      works,
                      stage,
                  }| {
-                    let works = usize::from(works.clamp(1, 3));
+                    // An airfield's harbour is laid out as a cannery's: one dock and one
+                    // gun. Its two factories stand on the airfield, with its other guns.
+                    let field = works == super::AIRFIELD_WORKS;
+                    let built = if field { 2 } else { usize::from(works.clamp(1, 3)) };
+                    let works = if field { 1 } else { built };
                     let convoy_clock =
                         [25., 38., 64.][works - 1] + 7. * f32::from(kindred[works - 1]);
                     kindred[works - 1] += 1;
@@ -439,7 +449,7 @@ impl Port {
                             .collect(),
                         has_contact: false,
                         stock: 2,
-                        factories: (0..works)
+                        factories: (0..built)
                             .map(|_| Factory {
                                 strength: FACTORY_STRENGTH,
                             })
@@ -448,6 +458,7 @@ impl Port {
                         material_progress: 0.,
                         tier: 0,
                         order_index: 0,
+                        doctrine: super::Doctrine::Mixed,
                         convoy_clock,
                         coaster_clock: super::COASTER_INTERVAL,
                         coasters_due: None,
@@ -455,6 +466,7 @@ impl Port {
                         roused: stage == 0,
                         roused_at: 0.,
                         alarm: false,
+                        airfield: None,
                     }
                 },
             )
@@ -507,7 +519,13 @@ impl Port {
     /// raise a dock again, and the base counts as destroyed. Its guns are their own
     /// matter and may fight on.
     pub fn wrecked(&self) -> bool {
-        self.live_docks() == 0 && self.live_factories() == 0
+        self.live_docks() == 0
+            && self.live_factories() == 0
+            && self.airfield.as_ref().is_none_or(|field| field.live_hangars() == 0)
+    }
+    /// The airfield the base works, if it is one.
+    pub fn airfield(&self) -> Option<&super::Airfield> {
+        self.airfield.as_deref()
     }
     /// The tallest structure still standing and its height, from which the base keeps
     /// its lookout: a drydock's gantry, else a factory, else a gun. `None` once nothing
@@ -540,6 +558,9 @@ impl Port {
     pub fn factory_position(&self, index: usize) -> Vec2 {
         // The twin mills occupy the same shingle bank, with a conveyor between them.
         // At the heavy yard the three furnace halls take separate faces of the shore.
+        if let Some(field) = &self.airfield {
+            return field.factory_position(index);
+        }
         let sites: &[(f32, f32)] = match self.factories.len() {
             1 => &[(-20.5, -7.)],
             2 => &[(19.5, -9.), (19.5, 9.)],
@@ -595,18 +616,7 @@ impl Port {
     }
 
     fn next_order(&self) -> (EnemyClass, u8) {
-        const PATROL: (EnemyClass, u8) = (EnemyClass::Patrol, 2);
-        const DESTROYER: (EnemyClass, u8) = (EnemyClass::Destroyer, 4);
-        const CRUISER: (EnemyClass, u8) = (EnemyClass::Cruiser, 7);
-        const BATTLESHIP: (EnemyClass, u8) = (EnemyClass::Battleship, YARD_CAPACITY);
-        let rotation: &[(EnemyClass, u8)] = match (self.tier, self.factories.len()) {
-            (0, _) => &[PATROL],
-            (1, 1) => &[DESTROYER, PATROL],
-            (1, _) => &[DESTROYER, DESTROYER, PATROL],
-            (_, 1) => &[DESTROYER],
-            (2, _) | (_, 2) => &[CRUISER, CRUISER, DESTROYER],
-            _ => &[BATTLESHIP, BATTLESHIP, CRUISER],
-        };
+        let rotation = (self.doctrine).rotation(self.tier, self.factories.len());
         rotation[self.order_index % rotation.len()]
     }
     pub(super) fn work(&mut self, dt: f32, tier: usize) {
@@ -738,7 +748,7 @@ impl Port {
         fell
     }
     /// Once the base is wrecked its storehouse is lost and its works stop for good.
-    fn settle(&mut self) {
+    pub(super) fn settle(&mut self) {
         if self.wrecked() {
             self.stock = 0;
             self.material_progress = 0.;

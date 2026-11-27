@@ -1,4 +1,5 @@
 pub(crate) mod customise;
+pub(crate) mod feedback;
 pub(crate) mod options;
 pub(crate) mod passage_chart;
 mod title;
@@ -10,6 +11,9 @@ use shipvivor_campaign::{
 
 const KNOTS_PER_MPS: f32 = 1.94384;
 const CHART_TABLE_WIDTH: f32 = 964.;
+/// Logical pixels the tallest chart table stands, the yard's with its three passage
+/// cards, with a margin above and below: the table is scaled to fit it in the window.
+const CHART_TABLE_HEIGHT: f32 = 840.;
 
 /// Whole compass degrees, 0 to 359.
 fn degrees(heading: f32) -> i32 {
@@ -73,14 +77,14 @@ pub(crate) enum Action {
     Card(Card),
     /// Select a section of the ship in the drydock, counted from the bow.
     Module(usize),
-    /// Pick out a refit on the selected section's list, to read its figures.
+    /// Pick out a refit on the selected section's list with the arrow keys, to read its
+    /// figures.
     Preview(usize),
-    /// Order a refit on the selected section's list.
+    /// Order a refit on the selected section's list at once, with a click on its tile or
+    /// its number key.
     Order(usize),
-    /// Pick out work on the hull panel, to read its figures.
-    Pick(shipvivor_campaign::DockJob),
-    /// Order work from the hull panel, or a section from the yard's stock dropped onto
-    /// the ship.
+    /// Order work from the hull panel at once, or a section from the yard's stock dropped
+    /// onto the ship.
     Draft(shipvivor_campaign::DockJob),
     /// Take back an order the yard has not yet built.
     Undo(usize),
@@ -103,6 +107,11 @@ pub(crate) enum Action {
     Options,
     /// On the options screen: how the ship earns experience.
     Rewards(shipvivor_encounter::Rewards),
+    /// On the options screen: whether rounds and runs end by asking for playtest scores.
+    Feedback(bool),
+    /// In the yard after a round, or on the report at a run's end: give one of the
+    /// playtest scores, or take it back with a second click.
+    Rate(crate::feedback::Metric, i8),
 }
 #[derive(Component)]
 pub struct ScreenRoot;
@@ -148,9 +157,15 @@ pub fn intent(
         Screen::Title if key(KeyCode::KeyC) => Some(Action::Customise),
         Screen::Title if key(KeyCode::KeyO) => Some(Action::Options),
         Screen::Options if key(KeyCode::Escape) || key(KeyCode::Enter) => Some(Action::Title),
-        Screen::Options => choice
-            .and_then(|i| options::REWARDS.get(i))
-            .map(|&(rewards, ..)| Action::Rewards(rewards)),
+        Screen::Options => [
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+        ]
+        .into_iter()
+        .position(key)
+        .and_then(options::keyed),
         Screen::Departure if key(KeyCode::Escape) => Some(Action::Title),
         Screen::Departure => {
             choice.and_then(|i| anchorages(run.seed).get(i).copied().map(Action::Depart))
@@ -244,7 +259,7 @@ pub fn intent(
                 ]
                 .into_iter()
                 .position(key)
-                .map(Action::Preview)
+                .map(Action::Order)
             }
         }
         Screen::Refit => choice.and_then(|i| run.offers().get(i).copied().map(Action::Card)),
@@ -275,10 +290,13 @@ pub fn scale(window: Single<&Window>, run: Res<Campaign>, mut scale: ResMut<UiSc
             .max(bridge_scale)
             .min(1.6)
     } else if shows_chart_table(screen) {
-        // Leave the table its usual side margins and room for the longest set of orders.
+        // Leave the table its usual side margins, and the yard's three passage cards
+        // room to stand whole: no larger than the window's height allows, even where
+        // that is smaller than the bridge's lettering.
+        let tall = window.height() / CHART_TABLE_HEIGHT;
         (window.width() * 0.92 / CHART_TABLE_WIDTH)
-            .min(window.height() / 600.)
-            .max(bridge_scale)
+            .min(tall)
+            .max(bridge_scale.min(tall))
     } else {
         bridge_scale
     };
@@ -352,6 +370,59 @@ fn action(
     }
     node
 }
+/// How hard a passage looks for her, in a line a narrow card holds: "Fair for your
+/// ship", or for a hard one what would help her most, "Hard: needs penetration, armor",
+/// with the second need only when it fits.
+pub(crate) fn verdict(outlook: &shipvivor_sim::Outlook) -> String {
+    let rating = outlook.rating.name();
+    let mut needs = outlook.needs.iter().map(|need| need.name());
+    let Some(first) = needs.next() else {
+        return format!("{rating} for your ship");
+    };
+    let one = format!("{rating}: needs {first}");
+    match needs.next() {
+        Some(second) if one.len() + second.len() + 2 <= CARD_LINE => format!("{one}, {second}"),
+        _ => one,
+    }
+}
+/// Characters a passage card holds on one line of its detail: its column is what the
+/// chart table leaves beside the plate, the same at any scale.
+pub(crate) const CARD_LINE: usize = 38;
+/// The verdict's ink on a card, from an easy passage to a deadly one.
+fn verdict_ink(rating: shipvivor_sim::Rating) -> Color {
+    [
+        Color::srgb_u8(126, 204, 146),
+        Color::srgb_u8(226, 196, 112),
+        Color::srgb_u8(240, 146, 84),
+        Color::srgb_u8(246, 104, 100),
+    ][rating.level() - 1]
+}
+/// The ships a flagship sails with, counted class by class in the order they sail:
+/// "2 battleships and a cruiser". `None` for a flagship that sails alone.
+pub(crate) fn escorted(escort: &[shipvivor_encounter::EnemyClass]) -> Option<String> {
+    let mut counts: Vec<(shipvivor_encounter::EnemyClass, usize)> = Vec::new();
+    for &class in escort {
+        match counts.iter_mut().find(|(c, _)| *c == class) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((class, 1)),
+        }
+    }
+    let parts: Vec<String> = (counts.into_iter())
+        .map(|(class, n)| {
+            let name = crate::mission_hud::ship_class(class).to_lowercase();
+            if n == 1 {
+                format!("a {name}")
+            } else {
+                format!("{n} {name}s")
+            }
+        })
+        .collect();
+    match parts.as_slice() {
+        [] => None,
+        [one] => Some(one.clone()),
+        [rest @ .., last] => Some(format!("{} and {last}", rest.join(", "))),
+    }
+}
 fn button_color(hover: bool) -> Color {
     if hover {
         Color::srgb_u8(52, 86, 89)
@@ -364,6 +435,7 @@ type Buttons = (
     With<Action>,
     Without<crate::cards::Dealt>,
     Without<crate::dockyard::YardButton>,
+    Without<feedback::Tile>,
 );
 
 pub fn hover(
@@ -421,7 +493,7 @@ type ScreenKey = (
     u16,
     Option<usize>,
     usize,
-    (u32, Option<shipvivor_campaign::DockJob>),
+    (u32, bool),
 );
 
 pub fn rebuild_screen(
@@ -433,8 +505,13 @@ pub fn rebuild_screen(
     patrol: (Res<Campaign>, Res<Encounter>),
     old: Query<Entity, With<ScreenRoot>>,
     mut last: Local<Option<ScreenKey>>,
+    ask: (
+        Res<crate::options::GameOptions>,
+        Option<Res<crate::telemetry::Logbook>>,
+    ),
 ) {
     let (run, battle) = patrol;
+    let ask = feedback::asking(&ask.0, ask.1.as_deref());
     let key = (
         run.screen(),
         run.stage,
@@ -442,7 +519,7 @@ pub fn rebuild_screen(
         run.fittings_remaining(),
         run.dock_option,
         run.dock_module,
-        (run.dock_revision, run.dock_draft),
+        (run.dock_revision, run.dock_receipt.is_some()),
     );
     if *last == Some(key) {
         return;
@@ -493,7 +570,7 @@ pub fn rebuild_screen(
         return;
     }
     if let Screen::Drydock(reason) = run.screen() {
-        crate::dockyard::screen(&mut cmd, root, &run, &battle, &art, reason);
+        crate::dockyard::screen(&mut cmd, root, &run, &battle, &art, reason, ask);
         return;
     }
     if run.screen() == Screen::Title {
@@ -530,18 +607,35 @@ pub fn rebuild_screen(
             for (i, stage) in anchorages(run.seed).into_iter().enumerate() {
                 let mission = stage.mission();
                 let sector = shipvivor_sim::Sector::of(stage, Grade::Moderate);
-                action(
+                let fleet = sector.fleet();
+                let card = action(
                     &mut cmd,
                     panel,
                     Some(Action::Depart(stage)),
                     &format!("[{}]  {}", i + 1, mission.name),
-                    &format!(
-                        "{} min. {}.\n{}.",
+                    "",
+                    false,
+                );
+                let outlook = shipvivor_sim::outlook::anchorage(&run, stage);
+                text(
+                    &mut cmd,
+                    card,
+                    verdict(&outlook),
+                    14.,
+                    verdict_ink(outlook.rating),
+                );
+                text(
+                    &mut cmd,
+                    card,
+                    format!(
+                        "{}.\n{} min. {}.\n{}.",
+                        fleet.name(),
                         mission.minutes,
                         sector.note(),
                         sector.patrols()
                     ),
-                    false,
+                    14.,
+                    pale(),
                 );
             }
             action(
@@ -604,40 +698,55 @@ pub fn rebuild_screen(
                 let (stage, required) = (exit.stage, exit.stars);
                 let open = run.stars() >= required;
                 let sector = shipvivor_sim::Sector::of(stage, exit.grade);
-                // Four lines a card, so three of them fit the table: the waters, how
-                // hard the passage runs and what it grants, and the spanner count on
-                // the chart spelled out: every star at the grade's rate, the same again
-                // for beating the clock, and every base, before any cargo. A locked card
-                // gives the breakdown's line to its lock. One fact a line, so a narrow
-                // card never wraps one phrase into the next.
+                // Six lines a card, so three of them fit the table: what holds the
+                // waters, who sails with the flagship, the waters, how hard the passage
+                // runs and what it grants, and the spanner count on the chart spelled
+                // out: every star at the grade's rate, the same again for beating the
+                // clock, and every base, before any cargo. A locked card gives the
+                // waters' line to its lock and keeps only the sum. One fact a line, so
+                // a narrow card never wraps one phrase into the next.
                 let grade = match (exit.perk, exit.under_air_cover(), stage.is_last_patrol()) {
                     (Perk::Repair(hull), ..) => format!("Moderate: repairs {hull} hull"),
                     (_, true, true) => "Tough: fitting, air to Crown Deep".to_string(),
                     (_, true, false) => "Tough: free fitting, air cover".to_string(),
                     _ => format!("{}: a free fitting", exit.grade.name()),
                 };
+                let fleet = sector.fleet();
+                let held = format!("{}: {}", fleet.name(), fleet.report().to_lowercase());
+                let escort = match escorted(sector.escort()) {
+                    Some(ships) => format!("Escort: {ships}"),
+                    None => fleet.suits().to_string(),
+                };
                 let most = sector.most_points();
                 let detail = if open {
                     format!(
-                        "{}\n{grade}\nUp to {most} points:\n{} a star and the clock, {} a base",
+                        "{held}\n{escort}\n{}\n{grade}\nUp to {most} points:\n{} a star and the clock, {} a base",
                         sector.note(),
                         exit.star_points(),
                         shipvivor_campaign::YARD_POINTS
                     )
                 } else {
                     format!(
-                        "Locked - needs {required} stars\n{}\n{grade}\nUp to {most} points",
-                        sector.note()
+                        "Locked - needs {required} stars\n{held}\n{escort}\n{grade}\nUp to {most} points"
                     )
                 };
-                action(
+                // How hard it looks for her as she stands goes first, in its own ink.
+                let outlook = passage_chart::outlook(&run, &exit);
+                let card = action(
                     &mut cmd,
                     panel,
                     open.then_some(Action::Depart(stage)),
                     &format!("[{}]  {}", i + 1, stage.mission().name),
-                    &detail,
+                    "",
                     false,
                 );
+                let ink = if open {
+                    verdict_ink(outlook.rating)
+                } else {
+                    pale()
+                };
+                text(&mut cmd, card, verdict(&outlook), 14., ink);
+                text(&mut cmd, card, detail, 14., pale());
             }
         }
         Screen::Intercept(reason) => {
@@ -729,6 +838,21 @@ pub fn rebuild_screen(
                     brass(),
                 );
             }
+            if ask {
+                let sheet = cmd
+                    .spawn((
+                        Node {
+                            margin: UiRect::vertical(px(6)),
+                            padding: UiRect::top(px(12)),
+                            border: UiRect::top(px(1)),
+                            ..column(0.)
+                        },
+                        BorderColor::all(trim()),
+                        ChildOf(panel),
+                    ))
+                    .id();
+                feedback::sheet(&mut cmd, sheet, "RATE THE RUN");
+            }
             action(
                 &mut cmd,
                 panel,
@@ -793,6 +917,60 @@ fn pause_note(run: &Campaign) -> String {
     };
     let clock = "Sink every base to finish the patrol. Each base wrecked puts 45 seconds on the clock, and finishing inside it pays a star's worth of yard points.";
     format!("Round {round} of {ROUNDS}.{air} {clock} {next}")
+}
+
+/// What the sight reads over part of an airfield: what it is, and how it stands.
+fn airfield_reading(
+    port: &shipvivor_encounter::Port,
+    base: usize,
+    part: shipvivor_encounter::AirfieldPart,
+) -> String {
+    use shipvivor_encounter::AirfieldPart;
+    let letter = crate::mission_hud::letter(base);
+    let Some(field) = port.airfield() else {
+        return format!("Airfield {letter}");
+    };
+    match part {
+        AirfieldPart::Hangar(i) => {
+            let condition = if field.hangar_live(i) {
+                "Building aircraft"
+            } else {
+                "Destroyed"
+            };
+            format!("Hangar {letter}{}  /  {condition}", i + 1)
+        }
+        AirfieldPart::Tower => match field.tower_raised() {
+            None => format!(
+                "Control tower {letter}  /  Next wing {:.0} s",
+                field.wing_due().max(0.)
+            ),
+            Some(raised) => format!(
+                "Control tower {letter}  /  Down, {:.0}% raised\nWings go up slowly",
+                raised * 100.
+            ),
+        },
+        AirfieldPart::Depot => {
+            if field.depot_live() {
+                format!("Fuel depot {letter}  /  {} trucks", field.trucks().len())
+            } else {
+                format!("Fuel depot {letter}  /  Burnt out")
+            }
+        }
+        AirfieldPart::Shelter(i) => {
+            let inside = field.shelters()[i].plane.map_or("Empty".to_string(), |plane| {
+                format!("{:.0}% fuelled", plane.fuel * 100.)
+            });
+            format!("Aircraft shelter {letter}{}  /  {inside}\nConcrete: no round goes through", i + 1)
+        }
+        AirfieldPart::Truck(_) => format!("Fuel truck  /  Airfield {letter}"),
+        AirfieldPart::Plane(i) => {
+            let kind = field.taxiing().get(i).map_or("Aircraft", |taxi| match taxi.kind {
+                shipvivor_encounter::PlaneKind::Bomber => "Light bomber",
+                shipvivor_encounter::PlaneKind::Torpedo => "Torpedo plane",
+            });
+            format!("{kind}  /  On the ground at {letter}")
+        }
+    }
 }
 
 /// The patrol's instruments. `icons` are the contact mark and the yard's spanner.
@@ -1320,6 +1498,8 @@ pub fn instruments(
                             None => name.to_owned(),
                         }
                     }
+                } else if let Some((base, part)) = contact.airfield {
+                    airfield_reading(&battle.ports()[base], base, part)
                 } else if let Some((base, factory)) = contact.factory {
                     let port = &battle.ports()[base];
                     let condition = if port.factories()[factory].live() {
@@ -1418,23 +1598,16 @@ pub fn instruments(
                 }
             }
             Instrument::Impact => {
-                use shipvivor_encounter::{Ammo, Impact};
-                let report = match battle.salvo_report() {
+                use shipvivor_encounter::Impact;
+                match battle.salvo_report() {
                     Some(Impact::Bounced) => "RICOCHET",
                     Some(Impact::Embedded) => "ARMOR HELD",
                     Some(Impact::Penetrated) => "PENETRATION",
                     Some(Impact::PassedThrough) => "OPEN BREACH",
                     Some(Impact::Overpenetrated) => "OVERPENETRATION",
                     None => "",
-                };
-                // Her plate is holding HE that the AP aboard would open. The call sits on
-                // a line of its own and stands until Q switches the crew to AP.
-                if battle.ap_called_for() && run.fittings.armor_piercing() && guns.ammo == Ammo::He
-                {
-                    format!("{report}\nPRESS Q TO USE AP")
-                } else {
-                    report.into()
                 }
+                .into()
             }
             Instrument::Flagship => {
                 let boss = crate::mission_hud::ship_class(
@@ -1455,19 +1628,19 @@ pub fn instruments(
                         )
                     } else if ship.screened() {
                         format!(
-                            "{name}    {range} m\n{n} / {} gun mounts intact  •  hull screened\nBreak the gold turrets or shoot off her side armour",
+                            "{name}    {range} m\n{n} / {} gun mounts intact  /  hull screened\nBreak the gold turrets or shoot off her side armour",
                             ship.guns().len()
                         )
                     } else if n > 0 {
                         let (flooded, fatal) = ship.vessel().flooding();
                         format!(
-                            "{name}    {range} m\n{n} / {} gun mounts intact  •  hull open  •  {flooded} / {fatal} flooded\nSink her",
+                            "{name}    {range} m\n{n} / {} gun mounts intact  /  hull open  /  {flooded} / {fatal} flooded\nSink her",
                             ship.guns().len()
                         )
                     } else {
                         let (flooded, fatal) = ship.vessel().flooding();
                         format!(
-                            "{name}    {range} m\nHull exposed  •  {flooded} / {fatal} compartments flooded"
+                            "{name}    {range} m\nHull exposed  /  {flooded} / {fatal} compartments flooded"
                         )
                     }
                 } else if let Some(shipvivor_encounter::Sortie::Due(due)) = battle.flagship() {
@@ -1538,13 +1711,8 @@ pub fn instruments(
                     } else {
                         "Click  One gun   Double-click  Salvo\nHold  Ripple     Space  At target"
                     };
-                    let ammo = if run.fittings.armor_piercing() {
-                        "   Q  HE / AP"
-                    } else {
-                        ""
-                    };
                     format!(
-                        "W/S  Engine   A/D  Rudder   C  Astern\nX  Pin / release   T  Gun / torpedo\nMouse  Look   RMB + drag  Trim lock\n{weapon}\n1-9  Turret   Z  Manual / Scope / Auto\nShift  Scope{ammo}   Tab  Chart   Esc  Pause"
+                        "W/S  Engine   A/D  Rudder   C  Astern\nX  Pin / release   T  Gun / torpedo\nMouse  Look   RMB + drag  Trim lock\n{weapon}\n1-9  Turret   Z  Manual / Scope / Auto\nShift  Scope   Tab  Chart   Esc  Pause"
                     )
                 }
             }

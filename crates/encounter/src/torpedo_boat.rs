@@ -179,11 +179,12 @@ impl Raider {
 }
 
 impl Battle {
-    /// Moor [`MOORED_PAIR`] torpedo boats off each base, on open water clear of the
-    /// harriers' moorings, the ice and every other ship. They lie there until it sends
-    /// them out.
+    /// Moor the waters' torpedo boats off each base ([`MOORED_PAIR`] in mixed waters; see
+    /// `Doctrine::torpedo_boats`), on open water clear of the harriers' moorings, the ice
+    /// and every other ship. They lie there until it sends them out.
     pub(crate) fn with_torpedo_boats(mut self) -> Self {
         let hull = EnemyClass::TorpedoBoat.profile().hull;
+        let boats = self.doctrine.torpedo_boats();
         for base in 0..self.ports.len() {
             let port = &self.ports[base];
             let (centre, forward) = (port.body.pos, port.body.forward());
@@ -192,7 +193,7 @@ impl Battle {
                 .collect();
             let mut moorings = Vec::new();
             for (across, ahead) in MOORINGS {
-                if moorings.len() == MOORED_PAIR {
+                if moorings.len() == boats {
                     break;
                 }
                 let spot = centre + forward.perp() * across + forward * ahead;

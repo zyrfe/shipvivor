@@ -9,6 +9,10 @@ mod harbour_models;
 mod harbour_signals;
 #[path = "mainland.rs"]
 mod mainland;
+#[path = "airfield_models.rs"]
+mod airfield_models;
+#[path = "warplane_model.rs"]
+mod warplane_model;
 #[path = "spotter_model.rs"]
 pub(crate) mod spotter_model;
 use crate::camera::{self, FollowCamera};
@@ -25,7 +29,8 @@ pub(crate) use harbour_signals::{
 };
 pub(crate) use mainland::MainlandPlugin;
 use shipvivor_encounter::{
-    Airframe, Battery, Body, EffectKind, EnemyClass, ISLAND_RADIUS, LandmarkKind, YardState,
+    Airframe, Battery, Body, EffectKind, EnemyClass, FOOTING, FeatureKind, ISLAND_RADIUS, Landmark,
+    LandmarkKind, YardState,
 };
 use std::collections::HashMap;
 
@@ -67,6 +72,13 @@ enum Shape {
     Gun(u8, EnemyClass, u8),
     /// One of a capital ship's side strakes, by its index among hers.
     Strake(EnemyClass, u8),
+    /// A ship's bridge and mast, sound, battered or wrecked: see `Raider::works_stage`.
+    Upperworks(EnemyClass, u8),
+    /// Smoke curling out of a fresh shell hole in a ship: the hole's place among her
+    /// scars, and in the top bits, which of its wisps.
+    Smoulder(u8),
+    /// Fire glowing in a fresh shell hole, by the hole's place among her scars.
+    Ember(u8),
     Socket(u8),
     GunFire(u8),
     Soot(u8),
@@ -99,6 +111,23 @@ enum Shape {
     /// A lump of ice thrown up where a berg breaks.
     Shard(u8),
     Fire,
+    /// An airfield's paving and markings, laid on its island.
+    FieldGround,
+    /// One of an airfield's concrete shelters, by its place in the row.
+    Shelter(u8),
+    AirHangar(bool),
+    Tower(bool),
+    Depot(bool),
+    Truck,
+    /// An airfield's aircraft, on the ground or in the air.
+    Warplane(shipvivor_encounter::PlaneKind),
+    /// A pine on a pine islet, by its place in the islet's plan.
+    Pine(u8),
+    /// A tier of a sea stack: the stack's place in its islet's plan, and the tier,
+    /// counted from zero at its foot.
+    StackTier(u8, u8),
+    /// A lighthouse tower, its lantern lit while it stands.
+    Lighthouse(bool),
 }
 #[derive(Component, Clone, Copy, Hash, PartialEq, Eq)]
 pub(crate) struct Actor(u64, Shape);
@@ -147,7 +176,6 @@ pub struct Kit {
     flak: Handle<StandardMaterial>,
     ball: Handle<Mesh>,
     drum: Handle<Mesh>,
-    terrain: Handle<StandardMaterial>,
     quay: Handle<StandardMaterial>,
     steel: Handle<StandardMaterial>,
     dark: Handle<StandardMaterial>,
@@ -155,9 +183,24 @@ pub struct Kit {
     gold: Handle<StandardMaterial>,
     flame: Handle<StandardMaterial>,
     foam: Handle<StandardMaterial>,
+    field_ground: Handle<Mesh>,
+    shelter: Handle<Mesh>,
+    air_hangars: [Handle<Mesh>; 2],
+    towers: [Handle<Mesh>; 2],
+    depots: [Handle<Mesh>; 2],
+    truck: Handle<Mesh>,
+    bomber: Handle<Mesh>,
+    torpedo_plane: Handle<Mesh>,
+    /// A pine islet's trees, and each tier of a stack islet's sea stacks, by their
+    /// places in the islet's plan.
+    pines: Vec<Handle<Mesh>>,
+    stack_tiers: Vec<[Handle<Mesh>; 4]>,
 }
 struct VesselMeshes {
     deckwork: Handle<Mesh>,
+    /// Her bridge and mast sound, battered and wrecked, for a class whose bridge isn't
+    /// part of her deckwork.
+    upperworks: Option<[Handle<Mesh>; 3]>,
     /// Her turret with one barrel, two, three and four.
     guns: [Handle<Mesh>; 4],
     /// Her side strakes, in the order the encounter counts them. A class that hangs
@@ -246,6 +289,7 @@ pub fn setup(
                 LandmarkKind::Stacks,
                 LandmarkKind::Glacier,
                 LandmarkKind::Mainland,
+                LandmarkKind::Airfield,
             ]
             .map(Coast::Landmark),
         )
@@ -289,13 +333,17 @@ pub fn setup(
             .into_iter()
             .map(|class| {
                 use bevy::camera::primitives::MeshAabb;
-                let deckwork = crate::fleet_models::superstructure(class);
-                let bounds = deckwork.get_aabb().expect("deckwork has vertices");
+                let bounds = (crate::fleet_models::superstructure(class).get_aabb())
+                    .expect("deckwork has vertices");
+                let upperworks =
+                    [0, 1, 2].map(|stage| crate::fleet_models::upperworks(class, stage));
                 (
                     class,
                     VesselMeshes {
                         masthead: bounds.max().y,
-                        deckwork: meshes.add(deckwork),
+                        deckwork: meshes.add(crate::fleet_models::deckwork(class)),
+                        upperworks: (upperworks.iter().all(Option::is_some))
+                            .then(|| upperworks.map(|mesh| meshes.add(mesh.unwrap()))),
                         guns: [1, 2, 3, 4]
                             .map(|barrels| meshes.add(crate::fleet_models::gun(class, barrels))),
                         strakes: (0..2 * shipvivor_encounter::STRAKES_A_SIDE)
@@ -319,7 +367,6 @@ pub fn setup(
         flak,
         ball: meshes.add(Sphere::new(1.).mesh().ico(1).unwrap()),
         drum: meshes.add(Cylinder::new(0.5, 1.).mesh().resolution(8)),
-        terrain: material(255, 255, 255, true),
         quay: material(151, 121, 89, false),
         steel: material(202, 201, 174, false),
         dark: material(49, 55, 62, false),
@@ -327,12 +374,162 @@ pub fn setup(
         gold: material(249, 189, 70, true),
         flame: material(255, 117, 37, true),
         foam: material(196, 240, 222, true),
+        field_ground: meshes.add(airfield_models::ground()),
+        shelter: meshes.add(airfield_models::shelter()),
+        air_hangars: [false, true].map(|live| meshes.add(airfield_models::hangar(live))),
+        towers: [false, true].map(|live| meshes.add(airfield_models::tower(live))),
+        depots: [false, true].map(|live| meshes.add(airfield_models::depot(live))),
+        truck: meshes.add(airfield_models::truck()),
+        bomber: meshes.add(warplane_model::bomber()),
+        torpedo_plane: meshes.add(warplane_model::torpedo_plane()),
+        pines: (LandmarkKind::Pines.sites().iter().enumerate())
+            .map(|(i, site)| meshes.add(foreshore::pine(site, i)))
+            .collect(),
+        stack_tiers: (LandmarkKind::Stacks.sites().iter().enumerate())
+            .map(|(i, site)| [0, 1, 2, 3].map(|t| meshes.add(foreshore::stack_tier(site, i, t))))
+            .collect(),
     });
 }
 /// The air station's strafer is the attack plane's airframe at this share of its size,
 /// 5 m across. A harrier is drawn at the second share, a little over 3 m across.
 const STRAFER: f32 = 0.315;
 const HARRIER: f32 = 0.2;
+
+/// Turns an airfield model's own frame, x along the runway and z out from the shore,
+/// onto its island.
+fn field_rotation(field: &shipvivor_encounter::Field) -> Quat {
+    let along = Vec3::new(field.along.x, 0., field.along.y);
+    let out = Vec3::new(field.seaward.x, 0., field.seaward.y);
+    Quat::from_mat3(&Mat3::from_cols(along, Vec3::Y, out))
+}
+
+/// How large an airfield's aircraft is drawn.
+fn warplane_scale(kind: shipvivor_encounter::PlaneKind) -> f32 {
+    match kind {
+        shipvivor_encounter::PlaneKind::Bomber => warplane_model::BOMBER,
+        shipvivor_encounter::PlaneKind::Torpedo => warplane_model::TORPEDO_PLANE,
+    }
+}
+
+/// Every airfield: its paving, shelters, hangars, tower and depot as they stand, its
+/// trucks, the aircraft in its shelters and on its ground, and its aircraft in the air.
+fn draw_airfields(
+    wanted: &mut HashMap<Actor, Transform>,
+    battle: &shipvivor_encounter::Battle,
+    run: &Campaign,
+) {
+    use airfield_models::LEVEL;
+    use shipvivor_encounter::HANGARS;
+    use warplane_model::WHEELS;
+    let spin = |rate: f32| {
+        Transform::from_translation(spotter_model::HUB)
+            .with_rotation(Quat::from_rotation_z(battle.at_sea() * rate))
+    };
+    for port in battle.ports() {
+        let Some(field) = port.airfield() else {
+            continue;
+        };
+        let id = port.body.id;
+        let turn = field_rotation(&field.field);
+        let at = |p: Vec2, y: f32| Transform::from_translation(p.extend(y).xzy()).with_rotation(turn);
+        wanted.insert(Actor(id, Shape::FieldGround), at(field.field.centre, 0.));
+        for (i, shelter) in field.shelters().iter().enumerate() {
+            let p = field.shelter_position(i);
+            wanted.insert(Actor(dock_key(id, 10 + i), Shape::Shelter(i as u8)), at(p, LEVEL));
+            // An aircraft waits inside, its nose to the doors.
+            if let Some(parked) = shelter.plane {
+                let k = warplane_scale(parked.kind);
+                let mut plane = at(p, LEVEL + WHEELS * k).with_scale(Vec3::splat(k));
+                plane.rotate_local_y(std::f32::consts::PI);
+                wanted.insert(Actor(dock_key(id, 40 + i), Shape::Warplane(parked.kind)), plane);
+            }
+        }
+        for i in 0..HANGARS.len() {
+            let shape = Shape::AirHangar(field.hangar_live(i));
+            wanted.insert(Actor(dock_key(id, 20 + i), shape), at(field.hangar_position(i), LEVEL));
+        }
+        let tower = Shape::Tower(field.tower_live());
+        wanted.insert(Actor(dock_key(id, 30), tower), at(field.tower_position(), LEVEL));
+        let depot = Shape::Depot(field.depot_live());
+        wanted.insert(Actor(dock_key(id, 31), depot), at(field.depot_position(), LEVEL));
+        if !field.depot_live() {
+            // The burnt-out tanks smoulder on.
+            let t = (run.elapsed * 0.4).fract();
+            let mut smoke = at(field.depot_position(), LEVEL + 2. + t * 9.);
+            smoke.translation.x += t * t * 4.;
+            smoke.scale = Vec3::splat(1. + 2.6 * (t * std::f32::consts::PI).sin());
+            wanted.insert(Actor(dock_key(id, 32), Shape::Smoke), smoke);
+        }
+        for truck in field.trucks() {
+            wanted.insert(Actor(truck.body.id, Shape::Truck), pose(&truck.body, LEVEL));
+        }
+        for taxi in field.taxiing() {
+            let k = warplane_scale(taxi.kind);
+            let airframe = pose(&taxi.body, LEVEL + WHEELS * k).with_scale(Vec3::splat(k));
+            wanted.insert(Actor(taxi.body.id, Shape::Warplane(taxi.kind)), airframe);
+            if !taxi.sheltered() {
+                wanted.insert(Actor(taxi.body.id, Shape::Propeller), airframe.mul_transform(spin(40.)));
+            }
+        }
+    }
+    for plane in battle.warplanes() {
+        let k = warplane_scale(plane.kind);
+        let mut airframe = pose(&plane.body, plane.altitude).with_scale(Vec3::splat(k));
+        airframe.rotate_local_z(plane.bank);
+        wanted.insert(Actor(plane.body.id, Shape::Warplane(plane.kind)), airframe);
+        wanted.insert(Actor(plane.body.id, Shape::Propeller), airframe.mul_transform(spin(44.)));
+    }
+}
+
+/// The model a downed aircraft falls as, and its scale.
+fn downed_shape(frame: Airframe) -> (Shape, f32) {
+    match frame {
+        Airframe::Spotter => (Shape::Spotter, spotter_model::ALOFT),
+        Airframe::Attack => (Shape::AttackPlane, STRAFER),
+        Airframe::Harrier => (Shape::AttackPlane, HARRIER),
+        Airframe::Bomber | Airframe::TorpedoPlane => (Shape::AttackPlane, STRAFER * 1.15),
+    }
+}
+
+/// Fuel going up on an airfield: a flash, then a ball of burning fuel that lifts into
+/// the mushroom cloud its smoke rolls up into, with fire left burning on the ground.
+/// The depot's is more than twice a truck's.
+fn fuel_blast(
+    wanted: &mut HashMap<Actor, Transform>,
+    e: &shipvivor_encounter::Effect,
+    age: f32,
+    depot: bool,
+) {
+    let size = if depot { 2.3 } else { 1. };
+    let t = (age / e.kind.lifetime()).clamp(0., 1.);
+    let origin = pose(&e.body, e.height);
+    let id = e.body.id;
+    // The cap climbs fast at first, then slows as it cools.
+    let rise = size * (1.5 + 13. * t.powf(0.55));
+    if age < 0.5 {
+        let flash = (age * 14.).min(1.) * (1. - age / 0.5);
+        wanted.insert(
+            Actor(id, Shape::ImpactFlash),
+            origin.with_scale(Vec3::splat((2. + 6. * flash) * size)),
+        );
+    }
+    if t < 0.4 {
+        let glow = (age * 12.).min(1.) * (1. - t / 0.4);
+        for i in 0..2_u8 {
+            let mut ball = origin;
+            ball.translation += Vec3::Y * (rise * 0.8 + f32::from(i) * 0.6 * size);
+            let swell = size * (1.2 + 3.5 * t.sqrt()) * (0.6 + 0.4 * glow);
+            ball.scale = Vec3::splat(swell * if i == 0 { 1. } else { 0.7 });
+            wanted.insert(Actor(id, Shape::Blast(i)), ball);
+        }
+    }
+    if t < 0.65 {
+        let mut fire = origin;
+        fire.scale = Vec3::splat(0.55 * size * (1. - t / 0.65) + 0.05 * (age * 21.).sin());
+        wanted.insert(Actor(id, Shape::Fire), fire);
+    }
+    // Its smoke rolls up into a mushroom cloud in `gunsmoke`.
+}
 /// Moored, an airframe rides with its origin this many model metres above the water,
 /// which puts its floats just under.
 const AFLOAT: f32 = 2.94;
@@ -379,6 +576,209 @@ fn enemy_track(
 
 fn pose(b: &Body, h: f32) -> Transform {
     Transform::from_xyz(b.pos.x, h, b.pos.y).with_rotation(Quat::from_rotation_y(-b.heading))
+}
+
+/// Seconds a fresh shell hole in a ship smoulders, and the share of that it glows.
+const SMOULDER: f32 = 30.;
+const GLOWING: f32 = 0.3;
+/// Holes that smoulder on one ship at a time, the freshest first.
+const SMOULDERING: usize = 8;
+
+/// Metres across the middle of the mark a round leaves on a ship, from the scale the
+/// encounter gives it (its calibre over six inches): about a third of a metre from a
+/// four-inch round and a metre from an eighteen-inch, growing slower than the bore so
+/// that heavy rounds don't paint over the whole of her side.
+fn scar_radius(scale: f32) -> f32 {
+    0.12 * (6. * scale).max(1.).powf(0.75)
+}
+
+/// A ship and all she carries as the fight has left her, posed by `ship`: her upperworks
+/// at the stage they are battered to and smoking, every crater and hole in her plating,
+/// the fresh holes smouldering, her strakes as far as each is shaken loose, and her
+/// guns, the knocked-out ones burning. A ship going down is drawn the same, under her
+/// wreck's `id`. `clock` is the battle's time, and `elapsed` the run's, for flicker.
+fn draw_vessel(
+    r: &shipvivor_encounter::Raider,
+    id: u64,
+    ship: Transform,
+    clock: f32,
+    elapsed: f32,
+    kit: &Kit,
+    wanted: &mut HashMap<Actor, Transform>,
+) {
+    use std::f32::consts::PI;
+    let p = r.class.profile();
+    let s = p.gun_scale;
+    let local = |at: Vec3| ship.mul_transform(Transform::from_translation(at));
+    // Smoke drifts downwind across the world, whichever way she lies.
+    let drifting = |mut xf: Transform, drift: f32| {
+        xf.translation.x += drift;
+        xf
+    };
+    wanted.insert(Actor(id, Shape::Ship(r.class)), ship);
+    let stage = r.works_stage();
+    if kit.fleet[&r.class].upperworks.is_some() {
+        wanted.insert(Actor(id, Shape::Upperworks(r.class, stage)), ship);
+        // Smoke pours from her shot-up bridge, and fire licks round the wreck of it.
+        let top = p.deck + s * if stage >= 2 { 0.9 } else { 1.7 };
+        for puff in 0..stage {
+            let life = (elapsed * 0.5 + f32::from(puff) * 0.5 + (id % 7) as f32 * 0.13).fract();
+            let mut cloud = drifting(
+                local(Vec3::new(0., top + s * 2.6 * life, 0.)),
+                life * life * 2.4,
+            );
+            let swell = 0.2 + (PI * life).sin() * (0.5 + 0.9 * life);
+            cloud.scale = Vec3::splat(s * swell * (0.6 + 0.4 * f32::from(stage)));
+            wanted.insert(Actor(id, Shape::Soot(200 + puff)), cloud);
+        }
+        if stage >= 2 {
+            let mut flame = local(Vec3::new(0.2 * s, top - 0.1, 0.));
+            flame.scale = Vec3::splat(s * (0.42 + 0.1 * (elapsed * 9. + id as f32).sin()));
+            wanted.insert(Actor(id, Shape::GunFire(200)), flame);
+        }
+    }
+    // Craters where her plate held, holes where it gave, and smoke and fire out of the
+    // freshest holes.
+    let mut fresh = Vec::new();
+    for (i, scar) in r.scars().iter().enumerate() {
+        let open = armor_fx::opened(scar.impact);
+        let radius = scar_radius(scar.scale);
+        let surface = Transform::from_translation(scar.position + scar.normal * 0.08)
+            .with_rotation(
+                Quat::from_rotation_arc(Vec3::Z, scar.normal)
+                    * Quat::from_rotation_z(i as f32 * 2.3),
+            )
+            .with_scale(Vec3::splat(radius));
+        wanted.insert(
+            Actor(id, Shape::Scar(i as u8, open)),
+            ship.mul_transform(surface),
+        );
+        let age = clock - scar.at;
+        if open && (0. ..SMOULDER).contains(&age) {
+            fresh.push((i, age));
+        }
+    }
+    fresh.sort_by(|a, b| a.1.total_cmp(&b.1));
+    for &(i, age) in fresh.iter().take(SMOULDERING) {
+        let scar = &r.scars()[i];
+        let fade = 1. - age / SMOULDER;
+        // A heavy shell's hole is wider, but no hole smokes like a funnel.
+        let size = 1.6 * scar_radius(scar.scale).min(1.);
+        let mouth = scar.position + scar.normal * 0.09;
+        for wisp in 0..2_u8 {
+            let life = (elapsed * 0.55 + f32::from(wisp) * 0.5 + i as f32 * 0.37).fract();
+            let rise = scar.normal * size * (0.2 + 0.5 * life) + Vec3::Y * size * 2.2 * life;
+            let mut puff = drifting(local(mouth + rise), life * life * 1.4);
+            let swell = 0.06 + 0.26 * (PI * life).sin() * (0.4 + life);
+            puff.scale = Vec3::splat(size * fade * swell);
+            wanted.insert(Actor(id, Shape::Smoulder(i as u8 | wisp << 6)), puff);
+        }
+        // Fire glows deep in the hole for a while, flush with her side.
+        if age < SMOULDER * GLOWING {
+            let glow = 1. - age / (SMOULDER * GLOWING);
+            let flicker = 0.85 + 0.2 * (elapsed * 13. + i as f32 * 1.9).sin();
+            // Just proud of the black of the hole, inside its torn edges.
+            let lift = 0.09 + 0.03 * scar_radius(scar.scale);
+            let mut ember = ship.mul_transform(
+                Transform::from_translation(scar.position + scar.normal * lift)
+                    .with_rotation(Quat::from_rotation_arc(Vec3::Z, scar.normal)),
+            );
+            let across = scar_radius(scar.scale) * 0.3 * (0.4 + 0.6 * glow) * flicker;
+            ember.scale = Vec3::new(across, across, 0.02);
+            wanted.insert(Actor(id, Shape::Ember(i as u8)), ember);
+        }
+    }
+    if r.class == EnemyClass::Battleship {
+        let height = p.deck + 2.48 * s;
+        // Her director stands over her bridge, and goes with it.
+        if r.director_lost || stage > 0 {
+            let life = (elapsed * 0.65).fract();
+            let mut soot = drifting(local(Vec3::Y * (height + life * 4.)), life * life * 2.);
+            soot.scale = Vec3::splat(0.3 + life * (1. - life) * 4.);
+            wanted.insert(Actor(id, Shape::Smoke), soot);
+        } else {
+            wanted.insert(Actor(id, Shape::Director), local(Vec3::Y * height));
+        }
+    }
+    // Her deck-edge armour, less any strake shot off her, each sagging out from her side
+    // as it is shaken loose.
+    let (foot, rise) = shipvivor_encounter::STRAKE_RISE;
+    for (i, strake) in r.strakes().iter().enumerate().filter(|(_, s)| s.on()) {
+        let loose = strake.loose();
+        let out = strake.abeam.signum();
+        let skew = if i % 2 == 0 { 1. } else { -1. };
+        let middle = Vec3::new(
+            strake.abeam,
+            (foot + 0.5 * rise) * p.deck - 0.2 * loose,
+            strake.aft,
+        );
+        let sag = Transform::from_translation(middle).with_rotation(
+            Quat::from_rotation_z(-out * 0.34 * loose) * Quat::from_rotation_y(skew * 0.07 * loose),
+        );
+        wanted.insert(
+            Actor(id, Shape::Strake(r.class, i as u8)),
+            ship.mul_transform(sag),
+        );
+    }
+    for (i, gun) in r.secondaries.iter().enumerate() {
+        let at = gun.offset();
+        let mount = Transform::from_xyz(at.x, p.deck, -at.y)
+            .with_rotation(Quat::from_rotation_y(-gun.train()))
+            .with_scale(Vec3::splat(0.72));
+        wanted.insert(
+            Actor(
+                id,
+                if gun.live() {
+                    Shape::SecondaryMount(i as u8)
+                } else {
+                    Shape::GunFire((32 + i) as u8)
+                },
+            ),
+            ship.mul_transform(mount),
+        );
+    }
+    for (i, gun) in r.guns().iter().enumerate() {
+        let i = i as u8;
+        let (side, fore, riser) = gun.offset();
+        let turn = Quat::from_rotation_y(-gun.train());
+        let at =
+            |y: f32| ship.mul_transform(Transform::from_xyz(side, y, -fore).with_rotation(turn));
+        let base = p.deck + riser;
+        let mut socket = at(p.deck + riser * 0.5 + 0.08);
+        socket.scale = Vec3::new(2.26 * s, riser + 0.24, 2.26 * s);
+        wanted.insert(Actor(id, Shape::Socket(i)), socket);
+        if gun.live() {
+            wanted.insert(
+                Actor(id, Shape::Gun(i, r.class, r.barrels())),
+                at(base).with_scale(Vec3::splat(s)),
+            );
+        } else {
+            let flame = s * (0.52 + 0.12 * (elapsed * 8. + f32::from(i)).sin());
+            wanted.insert(
+                Actor(id, Shape::GunFire(i)),
+                at(base + 0.45).with_scale(Vec3::splat(flame)),
+            );
+            let t = (elapsed * 0.58 + f32::from(i) * 0.43).fract();
+            let mut soot = drifting(at(base + s * (0.85 + 2.3 * t)), t * t * s * 1.4);
+            soot.scale = Vec3::splat(s * (0.12 + 0.52 * (PI * t).sin()));
+            wanted.insert(Actor(id, Shape::Soot(i)), soot);
+        }
+    }
+    if r.is_disabled() {
+        let mut xf = local(Vec3::Y * (p.deck + 0.9));
+        xf.scale = Vec3::splat(s);
+        xf.scale.y *= 1. + 0.16 * (elapsed * 9.).sin();
+        wanted.insert(Actor(id, Shape::Fire), xf);
+        for puff in 0..3 {
+            let life = (elapsed * 0.58 + f32::from(puff) / 3.).fract();
+            let mut cloud = local(Vec3::Y * (p.deck + s * (1.6 + 5.8 * life)));
+            cloud.translation.x += life * life * 3.;
+            cloud.translation.z += 1.4 * life;
+            let swell = 0.12 + (PI * life).sin() * (0.7 + 1.7 * life);
+            cloud.scale = Vec3::splat(swell * s);
+            wanted.insert(Actor(id, Shape::FunnelSmoke(puff)), cloud);
+        }
+    }
 }
 /// Shrink each aircraft flying close past the camera, and the propeller turning on its
 /// nose, so that it never blots out the view (see `camera::lens_clearance`).
@@ -448,13 +848,6 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
                         Vec3::ZERO,
                         Vec3::ONE,
                     );
-                }
-                Coast::Landmark(LandmarkKind::Beacon) => {
-                    part(&kit.drum, &kit.steel, v(0., 9., 0.), v(4.8, 12., 4.8));
-                    part(&kit.drum, &kit.red, v(0., 11., 0.), v(4.9, 2.6, 4.9));
-                    part(&kit.drum, &kit.dark, v(0., 15., 0.), v(6., 1., 6.));
-                    part(&kit.drum, &kit.gold, v(0., 16.6, 0.), v(3.7, 2.4, 3.7));
-                    part(&kit.plume, &kit.red, v(0., 18.6, 0.), v(5.6, 2., 5.6));
                 }
                 Coast::Landmark(_) => {}
             }
@@ -542,11 +935,37 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
                 Vec3::ZERO,
                 Vec3::ONE,
             );
-            // Her colours stay hoisted as she goes down.
-            for (hoist, scale) in crate::fleet_models::ensigns(class) {
-                let at = Transform::from_translation(hoist).with_scale(Vec3::splat(scale));
-                kit.signals.spawn_flag(cmd, root, Side::Enemy, at);
+            // Her colours stay hoisted as she goes down, unless they fly from her
+            // upperworks and go with them.
+            if !crate::fleet_models::colours_aloft(class) {
+                for (hoist, scale) in crate::fleet_models::ensigns(class) {
+                    let at = Transform::from_translation(hoist).with_scale(Vec3::splat(scale));
+                    kit.signals.spawn_flag(cmd, root, Side::Enemy, at);
+                }
             }
+        }
+        Shape::Upperworks(class, stage) => {
+            if let Some(stages) = &kit.fleet[&class].upperworks {
+                part(
+                    &stages[usize::from(stage.min(2))],
+                    &kit.gunmetal,
+                    Vec3::ZERO,
+                    Vec3::ONE,
+                );
+            }
+            // Battered, her mast is down and her colours with it.
+            if stage == 0 && crate::fleet_models::colours_aloft(class) {
+                for (hoist, scale) in crate::fleet_models::ensigns(class) {
+                    let at = Transform::from_translation(hoist).with_scale(Vec3::splat(scale));
+                    kit.signals.spawn_flag(cmd, root, Side::Enemy, at);
+                }
+            }
+        }
+        Shape::Smoulder(_) => part(&kit.ball, &kit.smoke, Vec3::ZERO, Vec3::ONE),
+        // A flat glowing disc deep in a hole, hotter at its heart.
+        Shape::Ember(_) => {
+            part(&kit.ball, &kit.flame, Vec3::ZERO, Vec3::ONE);
+            part(&kit.ball, &kit.gold, Vec3::Z * 0.2, Vec3::new(0.5, 0.5, 1.));
         }
         Shape::Gun(_, class, barrels) => {
             let gun = &kit.fleet[&class].guns[usize::from(barrels.clamp(1, 4) - 1)];
@@ -563,9 +982,10 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
         ),
         Shape::Socket(_) => part(&kit.drum, &kit.dark, Vec3::ZERO, Vec3::ONE),
         Shape::Primer(_) => part(&kit.ball, &kit.foam, Vec3::ZERO, v(0.5, 0.35, 0.5)),
+        // Lit, so a crater's dish and a hole's torn edges catch the light.
         Shape::Scar(_, open) | Shape::Pock(_, _, open) => part(
             &kit.scars[usize::from(open)],
-            &kit.terrain,
+            &kit.gunmetal,
             Vec3::ZERO,
             Vec3::ONE,
         ),
@@ -649,6 +1069,105 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
         }
         Shape::Debris(_) => part(&kit.cube, &kit.dark, Vec3::ZERO, v(0.8, 0.7, 1.3)),
         Shape::Shard(_) => part(&kit.cube, &kit.foam, Vec3::ZERO, v(1., 0.75, 1.25)),
+        Shape::FieldGround => part(&kit.field_ground, &kit.construction, Vec3::ZERO, Vec3::ONE),
+        Shape::Shelter(_) => part(&kit.shelter, &kit.construction, Vec3::ZERO, Vec3::ONE),
+        Shape::AirHangar(live) => part(
+            &kit.air_hangars[usize::from(live)],
+            &kit.construction,
+            Vec3::ZERO,
+            Vec3::ONE,
+        ),
+        Shape::Tower(live) => part(
+            &kit.towers[usize::from(live)],
+            &kit.construction,
+            Vec3::ZERO,
+            Vec3::ONE,
+        ),
+        Shape::Depot(live) => part(
+            &kit.depots[usize::from(live)],
+            &kit.construction,
+            Vec3::ZERO,
+            Vec3::ONE,
+        ),
+        Shape::Truck => part(&kit.truck, &kit.construction, Vec3::ZERO, Vec3::ONE),
+        Shape::Warplane(kind) => {
+            let airframe = match kind {
+                shipvivor_encounter::PlaneKind::Bomber => &kit.bomber,
+                shipvivor_encounter::PlaneKind::Torpedo => &kit.torpedo_plane,
+            };
+            part(airframe, &kit.gunmetal, Vec3::ZERO, Vec3::ONE);
+        }
+        Shape::Pine(i) => part(
+            &kit.pines[usize::from(i)],
+            &kit.ground,
+            Vec3::ZERO,
+            Vec3::ONE,
+        ),
+        Shape::StackTier(stack, tier) => part(
+            &kit.stack_tiers[usize::from(stack)][usize::from(tier)],
+            &kit.ground,
+            Vec3::ZERO,
+            Vec3::ONE,
+        ),
+        // Drawn up from its foot. The lantern goes dark when the tower falls.
+        Shape::Lighthouse(lit) => {
+            part(&kit.drum, &kit.steel, v(0., 6., 0.), v(4.8, 12., 4.8));
+            part(&kit.drum, &kit.red, v(0., 8., 0.), v(4.9, 2.6, 4.9));
+            part(&kit.drum, &kit.dark, v(0., 12., 0.), v(6., 1., 6.));
+            let lantern = if lit { &kit.gold } else { &kit.dark };
+            part(&kit.drum, lantern, v(0., 13.6, 0.), v(3.7, 2.4, 3.7));
+            part(&kit.plume, &kit.red, v(0., 15.6, 0.), v(5.6, 2., 5.6));
+        }
+    }
+}
+/// Seconds a felled pine takes to go over, and a broken lighthouse.
+const PINE_FALL: f32 = 1.3;
+const TOWER_FALL: f32 = 2.4;
+/// Height of a lighthouse's foot above the sea.
+const TOWER_FOOT: f32 = 3.;
+
+/// What stands on a small island: its pines, the tiers left of its stacks and its
+/// lighthouse. Whatever was brought down goes over the way it fell, slowly at first and
+/// then faster, and lies where it came to rest.
+fn draw_features(wanted: &mut HashMap<Actor, Transform>, island: &Landmark, now: f32) {
+    let turn = Quat::from_rotation_y(-island.body.heading);
+    for (i, feature) in island.features.iter().enumerate() {
+        let key = |shape| Actor(island.body.id, shape);
+        let foot = feature.pos.extend(0.).xzy();
+        // The way it fell, and how far over it has gone, to `rest` radians at most.
+        let over = |seconds: f32, rest: f32| {
+            feature.fell.map(|(when, way)| {
+                let t = ((now - when) / seconds).clamp(0., 1.);
+                let way = way.extend(0.).xzy();
+                let axis = Vec3::Y.cross(way).normalize();
+                (way, Quat::from_axis_angle(axis, rest * t * t))
+            })
+        };
+        let i = i as u8;
+        match feature.site.kind {
+            FeatureKind::Pine => {
+                let tilt = over(PINE_FALL, 1.45).map_or(Quat::IDENTITY, |(_, tilt)| tilt);
+                let root = Transform::from_translation(foot + Vec3::Y * FOOTING);
+                wanted.insert(key(Shape::Pine(i)), root.with_rotation(tilt * turn));
+            }
+            FeatureKind::Stack => {
+                for tier in 0..feature.tiers() {
+                    let at = Transform::from_translation(foot).with_rotation(turn);
+                    wanted.insert(key(Shape::StackTier(i, tier)), at);
+                }
+            }
+            FeatureKind::Lighthouse => {
+                let base = foot + Vec3::Y * TOWER_FOOT;
+                let mut tower = Transform::from_translation(base).with_rotation(turn);
+                // It goes over on the edge of its foot.
+                if let Some((way, tilt)) = over(TOWER_FALL, 1.5) {
+                    let pivot = base + way * 2.4;
+                    tower.translation = pivot + tilt * (base - pivot);
+                    tower.rotation = tilt * turn;
+                }
+                wanted.insert(key(Shape::Lighthouse(feature.standing())), tower);
+            }
+        }
     }
 }
 pub fn sync(
@@ -674,6 +1193,7 @@ pub fn sync(
                 Actor(island.body.id, Shape::Coast(Coast::Landmark(island.kind))),
                 pose(&island.body, 0.).with_scale(Vec3::new(scale, 1., scale)),
             );
+            draw_features(&mut wanted, island, battle.at_sea());
         }
         if let Some(plane) = battle.air_station().and_then(|base| base.aircraft.as_ref()) {
             let mut airframe = pose(&plane.body, plane.altitude).with_scale(Vec3::splat(STRAFER));
@@ -699,6 +1219,7 @@ pub fn sync(
                 );
             }
         }
+        draw_airfields(&mut wanted, &battle, &run);
         // A harrier is the attack plane drawn small, and its propeller turns faster.
         for plane in battle.harriers() {
             let mut airframe = pose(&plane.body, plane.altitude).with_scale(Vec3::splat(HARRIER));
@@ -737,7 +1258,12 @@ pub fn sync(
                     airframe.mul_transform(spin),
                 );
             }
-            let harbour = Harbour::for_factories(port.factories().len());
+            // An airfield's harbour is a cannery's, its factories on the field beside it.
+            let harbour = if port.airfield().is_some() {
+                Harbour::Cannery
+            } else {
+                Harbour::for_factories(port.factories().len())
+            };
             for (index, dock) in port.docks().iter().enumerate() {
                 let key = dock_key(port.body.id, index);
                 let yard = Body {
@@ -817,7 +1343,11 @@ pub fn sync(
                 };
                 let i = index as u8;
                 let live = factory.live();
-                let foot = pose(&mill, 3.2);
+                let mut foot = pose(&mill, 3.2);
+                if let Some(field) = port.airfield() {
+                    foot.rotation = field_rotation(&field.field);
+                    foot.translation.y = airfield_models::LEVEL;
+                }
                 if index == 0
                     && battle
                         .air_station()
@@ -889,11 +1419,19 @@ pub fn sync(
         }
         for r in battle.raiders() {
             let p = r.class.profile();
-            wanted.insert(Actor(r.body.id, Shape::Ship(r.class)), pose(&r.body, 0.));
             let ship = pose(&r.body, 0.);
+            draw_vessel(
+                r,
+                r.body.id,
+                ship,
+                battle.at_sea(),
+                run.elapsed,
+                &kit,
+                &mut wanted,
+            );
             // Smoke streams from every funnel of a ship with steam up, and trails back
             // along her track to show which way she is going. Disabled, she burns
-            // instead (below).
+            // instead (see `draw_vessel`).
             if !r.is_disabled() {
                 for (stack, &(lip, _)) in kit.fleet[&r.class].funnels.iter().enumerate() {
                     wanted.insert(
@@ -934,110 +1472,17 @@ pub fn sync(
                     );
                 }
             }
-            for (i, scar) in r.scars().iter().enumerate() {
-                let open = armor_fx::opened(scar.impact);
-                let radius = scar.scale * if open { 1.34 } else { 0.90 };
-                let surface = Transform::from_translation(scar.position + scar.normal * 0.08)
-                    .with_rotation(Quat::from_rotation_arc(Vec3::Z, scar.normal))
-                    .with_scale(Vec3::splat(radius));
-                wanted.insert(
-                    Actor(r.body.id, Shape::Scar(i as u8, open)),
-                    ship.mul_transform(surface),
-                );
-            }
-            if r.class == EnemyClass::Battleship {
-                let height = p.deck + 2.48 * p.gun_scale;
-                if r.director_lost {
-                    let life = (run.elapsed * 0.65).fract();
-                    let mut soot = pose(&r.body, height + life * 4.);
-                    soot.translation.x += life * life * 2.;
-                    soot.scale = Vec3::splat(0.3 + life * (1. - life) * 4.);
-                    wanted.insert(Actor(r.body.id, Shape::Smoke), soot);
-                } else {
-                    wanted.insert(Actor(r.body.id, Shape::Director), pose(&r.body, height));
-                }
-            }
-            // Her deck-edge armour, less any strake shot off her.
-            let (foot, rise) = shipvivor_encounter::STRAKE_RISE;
-            for (i, strake) in r.strakes().iter().enumerate().filter(|(_, s)| s.on()) {
-                let middle = Vec3::new(strake.abeam, (foot + 0.5 * rise) * p.deck, strake.aft);
-                wanted.insert(
-                    Actor(r.body.id, Shape::Strake(r.class, i as u8)),
-                    ship.mul_transform(Transform::from_translation(middle)),
-                );
-            }
-            for (i, gun) in r.secondaries.iter().enumerate() {
-                let base = gun.station(&r.body, p);
-                let mount = Body {
-                    pos: Vec2::new(base.x, base.z),
-                    heading: gun.bearing(&r.body),
-                    ..r.body
-                };
-                wanted.insert(
-                    Actor(
-                        r.body.id,
-                        if gun.live() {
-                            Shape::SecondaryMount(i as u8)
-                        } else {
-                            Shape::GunFire((32 + i) as u8)
-                        },
-                    ),
-                    pose(&mount, base.y).with_scale(Vec3::splat(0.72)),
-                );
-            }
+            // A gun about to fire glows at its breech.
             for (i, gun) in r.guns().iter().enumerate() {
-                let i = i as u8;
-                let base = gun.base(&r.body, p);
-                let bearing = Body {
-                    pos: Vec2::new(base.x, base.z),
-                    heading: gun.bearing(&r.body),
-                    ..r.body
-                };
-                let mut socket = pose(&bearing, p.deck + gun.riser() * 0.5 + 0.08);
-                socket.scale =
-                    Vec3::new(2.26 * p.gun_scale, gun.riser() + 0.24, 2.26 * p.gun_scale);
-                wanted.insert(Actor(r.body.id, Shape::Socket(i)), socket);
-                if gun.live() {
+                if gun.charging() && !r.is_disabled() {
+                    let (side, fore, _) = gun.offset();
+                    let pulse = 0.8 + 0.35 * (run.elapsed * 18.).sin();
+                    let glow = Transform::from_xyz(side, gun.top(p) + 0.28, -fore)
+                        .with_scale(Vec3::splat(pulse * p.gun_scale));
                     wanted.insert(
-                        Actor(r.body.id, Shape::Gun(i, r.class, r.barrels())),
-                        pose(&bearing, base.y).with_scale(Vec3::splat(p.gun_scale)),
+                        Actor(r.body.id, Shape::Primer(i as u8)),
+                        ship.mul_transform(glow),
                     );
-                    if gun.charging() && !r.is_disabled() {
-                        let pulse = 0.8 + 0.35 * (run.elapsed * 18.).sin();
-                        wanted.insert(
-                            Actor(r.body.id, Shape::Primer(i)),
-                            pose(&bearing, gun.top(p) + 0.28)
-                                .with_scale(Vec3::splat(pulse * p.gun_scale)),
-                        );
-                    }
-                } else {
-                    let flame =
-                        p.gun_scale * (0.52 + 0.12 * (run.elapsed * 8. + f32::from(i)).sin());
-                    wanted.insert(
-                        Actor(r.body.id, Shape::GunFire(i)),
-                        pose(&bearing, base.y + 0.45).with_scale(Vec3::splat(flame)),
-                    );
-                    let t = (run.elapsed * 0.58 + f32::from(i) * 0.43).fract();
-                    let mut soot = pose(&bearing, base.y + p.gun_scale * (0.85 + 2.3 * t));
-                    soot.translation.x += t * t * p.gun_scale * 1.4;
-                    soot.scale =
-                        Vec3::splat(p.gun_scale * (0.12 + 0.52 * (std::f32::consts::PI * t).sin()));
-                    wanted.insert(Actor(r.body.id, Shape::Soot(i)), soot);
-                }
-            }
-            if r.is_disabled() {
-                let mut xf = pose(&r.body, p.deck + 0.9);
-                xf.scale = Vec3::splat(p.gun_scale);
-                xf.scale.y *= 1. + 0.16 * (run.elapsed * 9.).sin();
-                wanted.insert(Actor(r.body.id, Shape::Fire), xf);
-                for puff in 0..3 {
-                    let life = (run.elapsed * 0.58 + f32::from(puff) / 3.).fract();
-                    let mut cloud = pose(&r.body, p.deck + p.gun_scale * (1.6 + 5.8 * life));
-                    cloud.translation.x += life * life * 3.;
-                    cloud.translation.z += 1.4 * life;
-                    let swell = 0.12 + (std::f32::consts::PI * life).sin() * (0.7 + 1.7 * life);
-                    cloud.scale = Vec3::splat(swell * p.gun_scale);
-                    wanted.insert(Actor(r.body.id, Shape::FunnelSmoke(puff)), cloud);
                 }
             }
         }
@@ -1128,7 +1573,23 @@ pub fn sync(
                     let mut xf = pose(&e.body, -age * age * 0.68);
                     xf.rotate_local_z(age * 0.42);
                     xf.rotate_local_x(age * 0.12);
-                    wanted.insert(Actor(e.body.id, Shape::Ship(class)), xf);
+                    // She goes down as the fight left her.
+                    if let Some(r) = battle.sinking(e.body.id) {
+                        draw_vessel(
+                            r,
+                            e.body.id,
+                            xf,
+                            battle.at_sea(),
+                            run.elapsed,
+                            &kit,
+                            &mut wanted,
+                        );
+                    } else {
+                        wanted.insert(Actor(e.body.id, Shape::Ship(class)), xf);
+                        if kit.fleet[&class].upperworks.is_some() {
+                            wanted.insert(Actor(e.body.id, Shape::Upperworks(class, 0)), xf);
+                        }
+                    }
                     if class.is_flagship() {
                         for (i, offset) in [-22., 15., -7., 26., 0.].into_iter().enumerate() {
                             let t = (age - i as f32 * 0.43) / 1.3;
@@ -1189,11 +1650,7 @@ pub fn sync(
                 }
                 EffectKind::Downed(frame) if e.height > 0. => {
                     // Nose dropping and rolling as she falls, burning, trailing black smoke.
-                    let (shape, scale) = match frame {
-                        Airframe::Spotter => (Shape::Spotter, spotter_model::ALOFT),
-                        Airframe::Attack => (Shape::AttackPlane, STRAFER),
-                        Airframe::Harrier => (Shape::AttackPlane, HARRIER),
-                    };
+                    let (shape, scale) = downed_shape(frame);
                     let mut airframe = pose(&e.body, e.height).with_scale(Vec3::splat(scale));
                     let roll = if e.body.id % 2 == 0 { 1. } else { -1. };
                     airframe.rotate_local_x(-(0.12 + 0.75 * age).min(1.15));
@@ -1218,11 +1675,7 @@ pub fn sync(
                 EffectKind::Downed(frame) => {
                     // Down on the water, the wreck lies over on a broken float, then
                     // settles by the nose and goes under.
-                    let (shape, scale) = match frame {
-                        Airframe::Spotter => (Shape::Spotter, spotter_model::ALOFT),
-                        Airframe::Attack => (Shape::AttackPlane, STRAFER),
-                        Airframe::Harrier => (Shape::AttackPlane, HARRIER),
-                    };
+                    let (shape, scale) = downed_shape(frame);
                     let under = (1. - (e.kind.lifetime() - age) / SINKING).clamp(0., 1.);
                     let mut wreck = pose(&e.body, (AFLOAT - SUNK * under * under) * scale)
                         .with_scale(Vec3::splat(scale));
@@ -1313,8 +1766,18 @@ pub fn sync(
                         wanted.insert(Actor(e.body.id, Shape::Shard(i)), shard);
                     }
                 }
-                EffectKind::Demolition { dock } => {
-                    let size = if dock { 1.65 } else { 1. };
+                EffectKind::FuelBlast { depot } => fuel_blast(&mut wanted, e, age, depot),
+                EffectKind::Demolition { .. } | EffectKind::Felled(_) | EffectKind::Toppled(_) => {
+                    // A hangar comes down nearly as hard as a dock, a tower lighter, and a
+                    // tier of rock off a sea stack lighter still.
+                    let size = match e.kind {
+                        EffectKind::Demolition { dock: true } => 1.65,
+                        EffectKind::Felled(shipvivor_encounter::FieldWork::Hangar) => 1.4,
+                        EffectKind::Felled(_) => 0.8,
+                        EffectKind::Toppled(FeatureKind::Lighthouse) => 0.9,
+                        EffectKind::Toppled(_) => 0.7,
+                        _ => 1.,
+                    };
                     let t = age / e.kind.lifetime();
                     let origin = pose(&e.body, e.height);
                     if age < 0.58 {

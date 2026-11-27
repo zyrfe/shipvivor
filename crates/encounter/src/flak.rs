@@ -2,11 +2,12 @@
 //! the crew leads an enemy aircraft to be, and an aircraft inside the burst takes its
 //! damage. Bursts scatter about the aim, so a steady pass is hit often but not always.
 use super::{
-    AntiAir, Battery, Battle, DeckOffsets, Effect, EffectKind, Events, Orders, body,
+    AntiAir, Battery, Battle, Effect, EffectKind, Events, Orders, body,
     projectile::{AA_SPEED, FlightPath},
 };
 use glam::{Vec2, Vec3, Vec3Swizzles};
 use shipvivor_compass::direction;
+use shipvivor_shipyard::AaStation;
 
 /// Metres from a burst inside which an aircraft is hit.
 pub const BURST_RADIUS: f32 = 7.;
@@ -25,11 +26,6 @@ pub(super) const REPLACEMENT: f32 = 45.;
 const TRAINING: f32 = 100_f32.to_radians();
 /// Metres above the waterline of an AA mount's trunnions.
 const MOUNT_HEIGHT: f32 = 3.5;
-/// Where each pair of mounts stands in the order they are fitted: metres out from the
-/// centreline, and forward of amidships. The bridge wings, where she is built with a
-/// pair, then abaft the after funnel, then between the funnels, each in a tub at the
-/// height of the bridge wing deck.
-const STATIONS: [(f32, f32); AntiAir::MOST_MOUNTS / 2] = [(1.3, 1.3), (1.0, -4.85), (1.45, -1.6)];
 
 /// What kind of aircraft went down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +36,10 @@ pub enum Airframe {
     Attack,
     /// A light harrier from a base's mooring.
     Harrier,
+    /// An airfield's light bomber.
+    Bomber,
+    /// An airfield's torpedo plane.
+    TorpedoPlane,
 }
 
 /// One light anti-aircraft mount, worked by its crew.
@@ -54,28 +54,22 @@ pub struct AaMount {
     rounds: u32,
 }
 impl AaMount {
-    pub(super) fn new(index: usize) -> Self {
-        let (abeam, fore) = Self::station(index);
+    /// A mount standing at `station`, trained out on its beam: see
+    /// `Design::aa_stations` for where they stand.
+    pub(super) fn new(station: AaStation) -> Self {
         Self {
             reload: 0.,
-            abeam,
-            fore,
-            train: abeam.signum() * std::f32::consts::FRAC_PI_2,
+            abeam: station.abeam,
+            fore: station.fore,
+            train: station.abeam.signum() * std::f32::consts::FRAC_PI_2,
             elevation: 0.35,
             rounds: 0,
         }
     }
-    /// Where the mount at `index` in fitting order stands on the stock hull: metres to
-    /// starboard and forward of amidships. Port comes before starboard in each pair.
-    pub fn station(index: usize) -> (f32, f32) {
-        let (x, fore) = STATIONS[(index / 2).min(STATIONS.len() - 1)];
-        let side = if index.is_multiple_of(2) { -1. } else { 1. };
-        (side * x, fore)
-    }
-    /// Whether the mount at `index` stands on a bridge wing, which goes with the bridge
-    /// and needs no column of its own.
-    pub fn on_bridge_wing(index: usize) -> bool {
-        index / 2 == 0
+    /// Stand at `station`, where the yard has moved it, keeping its load and laying.
+    pub(super) fn place(&mut self, station: AaStation) {
+        self.abeam = station.abeam;
+        self.fore = station.fore;
     }
     pub fn deck_x(&self) -> f32 {
         self.abeam
@@ -98,20 +92,6 @@ impl AaMount {
     }
 }
 
-impl DeckOffsets {
-    /// Where the AA mount at `index` stands once the yard has moved the bridge or the
-    /// machinery: the bridge wings go with the bridge, the others with the machinery.
-    pub fn aa_position(self, index: usize) -> (f32, f32) {
-        let (x, fore) = AaMount::station(index);
-        let shift = if AaMount::on_bridge_wing(index) {
-            self.bridge_z
-        } else {
-            self.machinery_z
-        };
-        (x * self.beam_scale, fore - shift)
-    }
-}
-
 /// An enemy aircraft the guns can engage: where it is and where it is heading.
 struct Quarry {
     at: Vec3,
@@ -125,12 +105,21 @@ impl Battle {
     pub fn aa_mounts(&self) -> &[AaMount] {
         &self.aa_mounts
     }
-    /// Mount, arm and drill the AA battery as fitted. Mounts already aboard keep their state.
+    /// Mount, arm and drill the AA battery as fitted. Mounts already aboard keep their
+    /// state. Mounts past the room her deck has wait ashore until a longer hull makes room.
     pub fn fit_anti_air(&mut self, fit: AntiAir) {
-        let wanted = fit.mounts.min(AntiAir::MOST_MOUNTS);
+        let wanted = fit.mounts.min(self.aa_stations.len());
         self.aa_mounts.truncate(wanted);
+        for (mount, &station) in self.aa_mounts.iter_mut().zip(&self.aa_stations) {
+            mount.place(station);
+        }
         let aboard = self.aa_mounts.len();
-        self.aa_mounts.extend((aboard..wanted).map(AaMount::new));
+        self.aa_mounts.extend(
+            self.aa_stations[aboard..wanted]
+                .iter()
+                .copied()
+                .map(AaMount::new),
+        );
         self.anti_air = fit;
     }
 
@@ -155,7 +144,27 @@ impl Battle {
             at: plane.position_3d(),
             way: plane.way,
         });
-        raid.into_iter().chain(spotters).chain(harriers).collect()
+        let warplanes = self.warplanes.iter().map(|plane| Quarry {
+            at: plane.position_3d(),
+            way: plane.way,
+        });
+        // Aircraft rolling out or taking off are in reach of the AA as well.
+        let rolling = self
+            .ports
+            .iter()
+            .filter_map(|port| port.airfield())
+            .flat_map(|field| field.taxiing())
+            .filter(|taxi| !taxi.sheltered())
+            .map(|taxi| Quarry {
+                at: taxi.position_3d(),
+                way: taxi.velocity(),
+            });
+        raid.into_iter()
+            .chain(spotters)
+            .chain(harriers)
+            .chain(warplanes)
+            .chain(rolling)
+            .collect()
     }
 
     /// Each mount trains on the nearest enemy aircraft in reach and fires a round fused
@@ -168,7 +177,6 @@ impl Battle {
         let fit = self.anti_air;
         let power = self.gun_train_rate;
         for (i, mount) in self.aa_mounts.iter_mut().enumerate() {
-            (mount.abeam, mount.fore) = self.deck.aa_position(i);
             mount.reload = (mount.reload - dt).max(0.);
             let pivot = mount.pivot(orders.player, orders.heading);
             let Some(target) = quarry
@@ -276,6 +284,35 @@ impl Battle {
                 body: body(&mut self.serial, pos, heading),
                 height,
                 kind: EffectKind::Downed(Airframe::Harrier),
+                age: 0.,
+            });
+        }
+        for n in (0..self.warplanes.len()).rev() {
+            let plane = &mut self.warplanes[n];
+            if caught(plane.position_3d()) {
+                plane.health = plane.health.saturating_sub(damage);
+                if plane.health == 0 {
+                    self.down_warplane(n, events);
+                }
+            }
+        }
+        // A burst over an airfield wrecks an aircraft rolling there, and its fuel goes up.
+        let rolling: Vec<(usize, Vec2)> = (self.ports.iter().enumerate())
+            .filter_map(|(i, port)| port.airfield().map(|field| (i, field)))
+            .flat_map(|(i, field)| {
+                field
+                    .taxiing()
+                    .iter()
+                    .filter(|taxi| !taxi.sheltered() && caught(taxi.position_3d()))
+                    .map(move |taxi| (i, taxi.body.pos))
+            })
+            .collect();
+        for (port, at) in rolling {
+            self.ground_blast(port, at, 0.5, events);
+            self.effects.push(Effect {
+                body: body(&mut self.serial, at, 0.),
+                height: super::FIELD_LEVEL,
+                kind: EffectKind::FuelBlast { depot: false },
                 age: 0.,
             });
         }

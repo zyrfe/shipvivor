@@ -68,6 +68,16 @@ impl Weight {
             _ => UltraHeavy,
         }
     }
+    /// Barrels a turret of `class` carries on average in round `round`'s roster, counting
+    /// from one: her class's own for a class that comes in no weights.
+    pub fn mean_barrels(class: EnemyClass, round: usize) -> f32 {
+        let Some(row) = Self::row(class) else {
+            return f32::from(class.profile().barrels);
+        };
+        let weights = ROSTER[round.clamp(1, ROSTER.len()) - 1][row];
+        let barrels: u8 = weights.iter().map(|w| w.barrels()).sum();
+        f32::from(barrels) / weights.len() as f32
+    }
     /// Where `class` stands in a roster's row, if she comes in weights.
     pub(super) fn row(class: EnemyClass) -> Option<usize> {
         match class {

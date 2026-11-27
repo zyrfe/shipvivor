@@ -497,7 +497,7 @@ fn no_more_than_four_are_out_and_each_base_sends_one_pair_at_a_time() {
                 r.moored_at().is_none() && r.torpedo_mooring().is_some_and(|(home, _)| home == sent)
             }) {
                 let at = boat.body.pos;
-                boat.hit_hull(at, 99);
+                boat.hit_hull(at, 99.);
             }
             sunk_at = Some(t);
         }
@@ -539,7 +539,7 @@ fn a_boat_lost_is_replaced_off_her_base_slip_but_not_by_a_wrecked_base() {
             .unwrap();
         let (_, mooring) = boat.torpedo_mooring().unwrap();
         let at = boat.body.pos;
-        boat.hit_hull(at, 99);
+        boat.hit_hull(at, 99.);
         mooring
     };
     let vacant = sink(&mut b, 0);

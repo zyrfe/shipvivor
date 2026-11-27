@@ -7,7 +7,7 @@ use crate::state::{Campaign, Encounter, Mode, Screen};
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use shipvivor_campaign::DockModule;
-use shipvivor_encounter::{catapult_layout, launcher_layout};
+use shipvivor_encounter::{catapult_layout, launcher_layout, plane_index, planes_on};
 use shipvivor_shipyard::StrikeCraft;
 use std::collections::HashMap;
 
@@ -22,7 +22,7 @@ const TROLLEY: f32 = 2.32;
 const PUFF_LIFE: f32 = 1.1;
 const PUFF_EVERY: f32 = 0.035;
 /// Bombs that can be falling at once: a full stick from every plane.
-const BOMBS: usize = 10;
+const BOMBS: usize = 40;
 
 /// The plane on one catapult. It is hidden while the plane is flying.
 #[derive(Component)]
@@ -35,6 +35,8 @@ pub struct CatapultPlane {
 #[derive(Component)]
 pub struct Rig {
     kind: DockModule,
+    /// Which section of its kind it stands on, counted from the bow.
+    instance: usize,
     slot: usize,
 }
 /// A catapult's girder and rails, shortened when catapults stand side by side.
@@ -68,9 +70,11 @@ pub struct Puff {
 }
 
 /// The most catapults a plane section carries, and launchers a rack.
-const RIGS: usize = 3;
+const RIGS: usize = 4;
+/// The most floatplanes she flies, from every plane section together.
+const MOST_PLANES: usize = shipvivor_campaign::limits::PLANES as usize + 1;
 /// The salvos a launcher's box is drawn for, smallest first.
-const SALVOS: [usize; 3] = [2, 3, 4];
+const SALVOS: [usize; 5] = [2, 3, 4, 5, 6];
 
 /// Meshes and paint for the deck gear, made once when the ship is built.
 pub(crate) struct Parts {
@@ -136,7 +140,11 @@ pub(crate) fn equip(
             for slot in 0..RIGS {
                 let rig = commands
                     .spawn((
-                        Rig { kind, slot },
+                        Rig {
+                            kind,
+                            instance,
+                            slot,
+                        },
                         Transform::default(),
                         Visibility::Hidden,
                         ChildOf(gear),
@@ -225,7 +233,11 @@ pub(crate) fn equip(
             for slot in 0..RIGS {
                 let rig = commands
                     .spawn((
-                        Rig { kind, slot },
+                        Rig {
+                            kind,
+                            instance,
+                            slot,
+                        },
                         Transform::default(),
                         Visibility::Hidden,
                         ChildOf(gear),
@@ -254,12 +266,13 @@ pub(crate) fn equip(
                     at(0., 0.3, 0., 1.35, 0.45, 0.7),
                 );
                 // The box of cells, raised toward the bow: two cells abreast, three
-                // abreast, or two over two.
+                // abreast, two over two, or three over two or three.
                 for cells in SALVOS {
                     let (width, height) = match cells {
                         2 => (1.2, 0.84),
                         3 => (1.75, 0.84),
-                        _ => (1.2, 1.2),
+                        4 => (1.2, 1.2),
+                        _ => (1.75, 1.2),
                     };
                     let cradle = commands
                         .spawn((
@@ -281,7 +294,22 @@ pub(crate) fn equip(
                     let doors: &[(f32, f32)] = match cells {
                         2 => &[(-0.29, 0.42), (0.29, 0.42)],
                         3 => &[(-0.56, 0.42), (0., 0.42), (0.56, 0.42)],
-                        _ => &[(-0.29, 0.33), (0.29, 0.33), (-0.29, 0.87), (0.29, 0.87)],
+                        4 => &[(-0.29, 0.33), (0.29, 0.33), (-0.29, 0.87), (0.29, 0.87)],
+                        5 => &[
+                            (-0.56, 0.33),
+                            (0., 0.33),
+                            (0.56, 0.33),
+                            (-0.29, 0.87),
+                            (0.29, 0.87),
+                        ],
+                        _ => &[
+                            (-0.56, 0.33),
+                            (0., 0.33),
+                            (0.56, 0.33),
+                            (-0.56, 0.87),
+                            (0., 0.87),
+                            (0.56, 0.87),
+                        ],
                     };
                     // Two rows of cells are each a little lower than one.
                     let door = if cells > 3 { 0.44 } else { 0.58 };
@@ -384,7 +412,7 @@ pub fn setup(
             ..default()
         }),
     };
-    for index in 0..RIGS {
+    for index in 0..MOST_PLANES {
         let plane = commands
             .spawn((
                 Airborne(index),
@@ -420,6 +448,12 @@ fn at_sea(run: &Campaign) -> bool {
 }
 
 /// How the strike craft are fitted out: as planned in the yard, as shipped at sea.
+/// Plane sections aboard the ship as drawn.
+fn plane_sections(run: &Campaign) -> usize {
+    run.display_design()
+        .count(shipvivor_shipyard::Component::Catapult)
+}
+
 fn fitted(run: &Campaign, battle: &Encounter) -> StrikeCraft {
     if matches!(run.screen(), Screen::Drydock(_)) {
         run.display_fittings().strike_craft()
@@ -440,9 +474,12 @@ pub fn rig(
     mut boxes: Query<(&Cells, &mut Visibility), Without<Rig>>,
 ) {
     let craft = fitted(&run, &battle);
+    // The planes are shared out between the plane sections.
+    let sections = plane_sections(&run);
+    let planes = |instance| planes_on(craft.planes, sections, instance);
     for (rig, mut pose, mut shown) in &mut rigs {
         let layout = match rig.kind {
-            DockModule::Floatplane => catapult_layout(craft.planes),
+            DockModule::Floatplane => catapult_layout(planes(rig.instance)),
             _ => launcher_layout(craft.launchers),
         };
         let Some(&(fore, abeam)) = layout.get(rig.slot) else {
@@ -454,18 +491,20 @@ pub fn rig(
         // Launchers side by side are built smaller, so their boxes clear one another.
         let size = match (rig.kind, craft.launchers) {
             (DockModule::Missiles, 2) => 0.85,
-            (DockModule::Missiles, 3..) => 0.75,
+            (DockModule::Missiles, 3) => 0.75,
+            (DockModule::Missiles, 4..) => 0.7,
             _ => 1.,
         };
         pose.scale = Vec3::splat(size);
     }
     // Catapults side by side are shorter, so their ends stay on the section.
-    let girder = if craft.planes > 1 { 0.8 } else { 1. };
+    let crowded = planes(0) > 1;
+    let girder = if crowded { 0.8 } else { 1. };
     for mut pose in &mut girders {
         pose.scale.z = girder;
     }
     for mut pose in &mut cranes {
-        *pose = if craft.planes > 1 {
+        *pose = if crowded {
             // On the centreline abaft the catapults, its jib swung out to port clear of
             // the planes.
             Transform::from_xyz(0., 0., 2.25).with_rotation(Quat::from_rotation_arc(
@@ -495,12 +534,12 @@ pub fn stow(
 ) {
     let sea = at_sea(&run);
     let craft = battle.strike_craft();
+    let sections = plane_sections(&run);
     for (plane, mut shown) in &mut planes {
-        let index = plane.instance * craft.planes + plane.slot;
+        let index = plane_index(craft.planes, sections, plane.instance, plane.slot);
         let aloft = sea
-            && battle
-                .floatplanes()
-                .get(index)
+            && index
+                .and_then(|index| battle.floatplanes().get(index))
                 .is_some_and(|plane| !plane.aboard());
         shown.set_if_neq(if aloft {
             Visibility::Hidden

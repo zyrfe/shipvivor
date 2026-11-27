@@ -296,23 +296,33 @@ pub fn clearance(cmd: &mut Commands, root: Entity, battle: &Encounter, run: &Cam
 }
 
 /// The bases of a stage that has just been roused, to announce: "BASE D STIRRING", or
-/// "BASES B + C STIRRING" for a pair.
+/// "BASES B + C STIRRING" for a pair. A stage that holds the fleet the scouts missed
+/// says so: "BASE E STIRRING  /  SCOUTS MISSED A BATTLE LINE".
 fn stirring(battle: &Encounter) -> Option<String> {
     let now = battle.at_sea();
-    let fresh: Vec<&str> = battle
-        .ports()
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| {
+    let fresh: Vec<usize> = (0..battle.ports().len())
+        .filter(|&i| {
+            let p = &battle.ports()[i];
             p.stage() > 0 && !p.wrecked() && p.roused_at().is_some_and(|at| now - at < STIRRING)
         })
-        .map(|(i, _)| letter(i))
         .collect();
-    match fresh.as_slice() {
-        [] => None,
-        [one] => Some(format!("BASE {one} STIRRING")),
-        many => Some(format!("BASES {} STIRRING", many.join(" + "))),
-    }
+    let letters: Vec<&str> = fresh.iter().map(|&i| letter(i)).collect();
+    let stirring = match letters.as_slice() {
+        [] => return None,
+        [one] => format!("BASE {one} STIRRING"),
+        many => format!("BASES {} STIRRING", many.join(" + ")),
+    };
+    let missed = (battle.surprise())
+        .filter(|_| fresh.iter().any(|&i| battle.surprised(i)))
+        .map(|surprise| match surprise.doctrine {
+            shipvivor_encounter::Doctrine::BattleLine => "A BATTLE LINE",
+            shipvivor_encounter::Doctrine::Flotillas => "THE FLOTILLAS",
+            shipvivor_encounter::Doctrine::Mixed => "A SQUADRON",
+        });
+    Some(match missed {
+        Some(fleet) => format!("{stirring}  /  SCOUTS MISSED {fleet}"),
+        None => stirring,
+    })
 }
 
 fn cardinal(bearing: f32) -> &'static str {
@@ -540,12 +550,29 @@ pub fn update(
                     .effects()
                     .iter()
                     .rev()
-                    .find(|fx| matches!(fx.kind, EffectKind::Demolition { .. }))
+                    .find(|fx| {
+                        matches!(
+                            fx.kind,
+                            EffectKind::Demolition { .. }
+                                | EffectKind::Felled(_)
+                                | EffectKind::FuelBlast { depot: true }
+                        )
+                    })
                 {
-                    let base = battle.ports().iter().enumerate().min_by(|(_, a), (_, b)| {
-                        anchor(a)
-                            .distance_squared(fx.body.pos)
-                            .total_cmp(&anchor(b).distance_squared(fx.body.pos))
+                    // An airfield's works stand on their own island, which may lie nearer
+                    // another base's harbour than their own.
+                    let on_field = battle.ports().iter().enumerate().find(|(_, p)| {
+                        p.airfield().is_some_and(|field| {
+                            field.field.centre.distance(fx.body.pos)
+                                < shipvivor_encounter::AIRFIELD_RADIUS + 10.
+                        })
+                    });
+                    let base = on_field.or_else(|| {
+                        battle.ports().iter().enumerate().min_by(|(_, a), (_, b)| {
+                            anchor(a)
+                                .distance_squared(fx.body.pos)
+                                .total_cmp(&anchor(b).distance_squared(fx.body.pos))
+                        })
                     });
                     let Some((i, port)) = base else {
                         continue;
@@ -569,6 +596,16 @@ pub fn update(
                             ""
                         };
                         (format!("BASE {id}    DRYDOCK DOWN{after}"), brass())
+                    } else if let EffectKind::Felled(work) = fx.kind {
+                        let text = match work {
+                            shipvivor_encounter::FieldWork::Hangar => "HANGAR DOWN",
+                            shipvivor_encounter::FieldWork::Tower => {
+                                "CONTROL TOWER DOWN    WINGS SLOWED"
+                            }
+                        };
+                        (format!("BASE {id}    {text}"), brass())
+                    } else if matches!(fx.kind, EffectKind::FuelBlast { .. }) {
+                        (format!("BASE {id}    FUEL DEPOT ABLAZE"), brass())
                     } else {
                         (format!("BASE {id}    FACTORY KNOCKED OUT"), brass())
                     }

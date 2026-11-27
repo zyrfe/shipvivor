@@ -1,21 +1,9 @@
 //! Faceted hull contact and ship-local hit marks. The hull outline is shared with the mesh.
 use super::{EnemyClass, Raider};
 use glam::{Vec2, Vec3, Vec3Swizzles};
-use shipvivor_artillery::{Ammo, ArmorGrade, ArmorPanel, Cell, ContactAngle, Impact, ShellClass};
+use shipvivor_artillery::{ArmorGrade, ArmorPanel, Cell, ContactAngle, Impact, Round, Strike};
 
-pub const HULL_OUTLINE: [(f32, f32); 11] = [
-    (0., -16.),
-    (1.65, -11.7),
-    (2.7, -5.),
-    (2.75, 6.),
-    (2.1, 12.7),
-    (1.4, 14.1),
-    (-1.4, 14.1),
-    (-2.1, 12.7),
-    (-2.75, 6.),
-    (-2.7, -5.),
-    (-1.65, -11.7),
-];
+pub use shipvivor_shipyard::HULL_OUTLINE;
 
 /// Breakwater's deck edge after the yard inserts frames ahead of the after gun.
 pub fn breakwater_outline(extension: f32) -> [(f32, f32); 11] {
@@ -53,22 +41,34 @@ enum Surface {
     Deck,
     Tower,
 }
+/// A mark a round left on her plating: a crater where the plate held it, or a hole
+/// where it went in. Positions and normals are in her deck's frame.
+#[derive(Clone, Copy)]
 pub struct Scar {
     pub position: Vec3,
     pub normal: Vec3,
     pub impact: Impact,
     pub scale: f32,
+    /// Seconds into the battle that a round last went in here, or that the mark was
+    /// made, if none has. A fresh hole smoulders.
+    pub at: f32,
     surface: Surface,
     cell: Cell,
 }
 
 pub(super) struct Plating {
     belt: ArmorPanel,
+    /// The plate of the strakes hung over her belt, where they still hang.
+    strake_plate: ArmorPanel,
+    /// The thin plating behind the strakes, bared where one has been shot off.
+    inner: ArmorPanel,
     deck: ArmorPanel,
     tower: ArmorPanel,
     strakes: Vec<Strake>,
     pub scars: Vec<Scar>,
 }
+/// Scars a hull keeps. The oldest mark goes when a new one would pass this.
+const SCARS: usize = 32;
 
 /// Strakes of side armour hung along each side of a battleship or a flagship.
 pub const STRAKES_A_SIDE: usize = 7;
@@ -78,9 +78,9 @@ pub const STRAKE_RISE: (f32, f32) = (0.4, 0.67);
 const GLANCING_WEAR: f32 = 0.25;
 
 /// One of the plates of armour hung along a capital ship's side over her belt. Every
-/// main-battery round that strikes it wears it, whether her plate holds the round or
-/// not, and enough of them shake it loose. The hull behind it lies bare from then on:
-/// any round there goes straight in, and a flagship's turrets screen none of it.
+/// round that strikes it wears it, whether its plate holds the round or not, even a
+/// light gun's, and enough of them shake it loose. Behind it lies only thin plating:
+/// from then on light rounds open her there, and a flagship's turrets screen none of it.
 #[derive(Clone, Copy, Debug)]
 pub struct Strake {
     /// Metres to starboard of her centreline, negative to port.
@@ -91,11 +91,21 @@ pub struct Strake {
     pub length: f32,
     /// Wear it stands before it comes away.
     strength: f32,
+    /// Wear it stood when it was hung.
+    full: f32,
 }
 impl Strake {
     /// Still hung on her side.
     pub fn on(&self) -> bool {
         self.strength > 0.
+    }
+    /// How far it has been shaken loose: 0 when sound, 1 once it has come away.
+    pub fn loose(&self) -> f32 {
+        if self.full > 0. {
+            1. - self.strength / self.full
+        } else {
+            0.
+        }
     }
     /// Whether the point `local` on her side, in her deck's frame, lies behind it.
     fn covers(&self, local: Vec2) -> bool {
@@ -106,27 +116,36 @@ impl Strake {
 /// What became of a round on her hull.
 pub(super) struct Struck {
     pub impact: Impact,
+    /// The share of the round's damage that reached behind the plate.
+    pub share: f32,
+    /// Inches of plate the round met there.
+    pub plate: f32,
     /// The outward normal of the face it met, in the world.
     pub normal: Vec3,
-    /// The grade of the plate there.
-    pub grade: ArmorGrade,
     /// It went in where a strake has been shot off her side.
     pub bare: bool,
     /// The strake it shook loose, by its index.
     pub loosed: Option<usize>,
 }
 impl EnemyClass {
-    /// The grade of her side belt, which a round has to open to reach her hull.
+    /// The grade of her side belt, which a round has to open to reach her hull: capital
+    /// on the battleship and on every boss, which are at least as well found as she is.
     pub fn belt(self) -> ArmorGrade {
-        if self == EnemyClass::Battleship {
+        if self.plated() {
             ArmorGrade::Capital
         } else {
             ArmorGrade::Light
         }
     }
-    /// The grade of plate on her main turrets.
+    /// The grade of the strakes hung over her belt, for a class that hangs them: as heavy
+    /// as the belt itself.
+    pub fn strake_plate(self) -> ArmorGrade {
+        ArmorGrade::Capital
+    }
+    /// The grade of plate on her main turrets: reinforced on the battleship and the
+    /// bosses, light on the smaller classes.
     pub fn turret_plate(self) -> ArmorGrade {
-        if matches!(self, EnemyClass::Battleship | EnemyClass::Commodore) {
+        if self.plated() {
             ArmorGrade::Reinforced
         } else {
             ArmorGrade::Light
@@ -142,8 +161,8 @@ impl EnemyClass {
             _ => 0.,
         }
     }
-    /// Whether she hangs strakes of armour along her sides: the battleships and the
-    /// flagships do.
+    /// Whether she hangs strakes of armour along her sides: the battleship and the
+    /// bosses do, and they carry capital plate.
     pub fn plated(self) -> bool {
         self.strake_strength() > 0.
     }
@@ -162,11 +181,18 @@ impl EnemyClass {
     }
 }
 impl Raider {
-    /// The plate a round has to open to hurt her: her belt, or while a flagship's
-    /// turrets still screen her hull, theirs.
+    /// The plate a round has to open to do her its full damage: while a flagship's
+    /// turrets still screen her hull, theirs, or else her side, strakes and all.
     pub fn telling_plate(&self) -> ArmorGrade {
         if self.screened() {
             self.class.turret_plate()
+        } else if self.plate.strakes.iter().any(Strake::on) {
+            let (belt, strake) = (self.class.belt(), self.class.strake_plate());
+            if belt.inches() > strake.inches() {
+                belt
+            } else {
+                strake
+            }
         } else {
             self.class.belt()
         }
@@ -188,9 +214,11 @@ impl Raider {
 
 impl Plating {
     pub fn new(class: EnemyClass) -> Self {
-        let heavy = class == EnemyClass::Battleship;
+        let heavy = class.plated();
         Self {
             belt: ArmorPanel::new(class.belt(), 88, 4),
+            strake_plate: ArmorPanel::new(class.strake_plate(), 88, 4),
+            inner: ArmorPanel::new(ArmorGrade::Light, 88, 4),
             deck: ArmorPanel::new(
                 if heavy {
                     ArmorGrade::Reinforced
@@ -210,6 +238,7 @@ impl Plating {
                             aft,
                             length,
                             strength: class.strake_strength(),
+                            full: class.strake_strength(),
                         }
                     })
                     .collect()
@@ -269,21 +298,20 @@ impl Raider {
     }
 
     /// What became of a round on her hull. `wear` is what it takes out of a strake it
-    /// strikes on her side, held or not.
+    /// strikes on her side, held or not. `luck`, from 0 to 1, decides whether a round
+    /// with penetration to spare goes clean through, and `clock` is the battle's time.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn strike_hull(
         &mut self,
         point: Vec3,
         travel: Vec3,
-        (ammo, shell): (Ammo, ShellClass),
-        bore: u16,
+        round: Round,
         tower: bool,
         wear: f32,
+        luck: f32,
+        clock: f32,
     ) -> Struck {
-        let scale = super::MainShell {
-            bore,
-            ..super::MainShell::STOCK
-        }
-        .scale();
+        let scale = round.calibre / 6.;
         let p = self.class.profile();
         let local = self.deck_local(point.xz());
         let mut anchor = local.extend(point.y).xzy();
@@ -347,30 +375,28 @@ impl Raider {
             None
         };
         let bare = strake.is_some_and(|i| !self.plate.strakes[i].on());
-        let (outcome, grade) = if bare {
-            // Nothing is left on her side here to keep a round out.
-            (Impact::Penetrated, ArmorGrade::Light)
-        } else {
-            let panel = match surface {
-                Surface::Belt => &mut self.plate.belt,
-                Surface::Deck => &mut self.plate.deck,
-                Surface::Tower => &mut self.plate.tower,
-            };
-            let grade = panel.grade();
-            let outcome = panel
-                .resolve_ammo(ammo, shell, angle, &[cell], bore)
-                .expect("local armor cell");
-            (outcome, grade)
+        let panel = match (surface, strake) {
+            // A strake still hung takes the round on its own plate. Where one has been
+            // shot off, only the thin plating behind it is left to keep a round out.
+            (Surface::Belt, Some(_)) if bare => &mut self.plate.inner,
+            (Surface::Belt, Some(_)) => &mut self.plate.strake_plate,
+            (Surface::Belt, None) => &mut self.plate.belt,
+            (Surface::Deck, _) => &mut self.plate.deck,
+            (Surface::Tower, _) => &mut self.plate.tower,
         };
+        let plate = panel.plate_at(cell);
+        let Strike { impact, share } = panel
+            .strike(round, angle, cell, luck)
+            .expect("local armor cell");
         let mut loosed = None;
         if let Some(i) = strake.filter(|_| !bare) {
             let s = &mut self.plate.strakes[i];
-            let share = if outcome == Impact::Bounced {
+            let worn = if impact == Impact::Bounced {
                 GLANCING_WEAR
             } else {
                 1.
             };
-            s.strength = (s.strength - wear * share).max(0.);
+            s.strength = (s.strength - wear * worn).max(0.);
             if !s.on() {
                 loosed = Some(i);
             }
@@ -382,43 +408,51 @@ impl Raider {
                 .iter_mut()
                 .find(|s| s.surface == surface && s.cell == cell)
             {
-                if outcome == Impact::Penetrated {
-                    old.impact = outcome;
-                    old.scale = scale;
+                // A crater opened up into a hole, or a hole a heavier round tore wider.
+                if impact.opened() && (!old.impact.opened() || scale > old.scale) {
+                    old.impact = impact;
                     old.position = anchor;
                 }
+                old.scale = old.scale.max(scale);
+                if impact.opened() {
+                    old.at = clock;
+                }
             } else {
-                if scars.len() >= 32 {
+                if scars.len() >= SCARS {
                     scars.remove(0);
                 }
                 scars.push(Scar {
                     position: anchor,
                     normal,
-                    impact: outcome,
+                    impact,
                     scale,
+                    at: clock,
                     surface,
                     cell,
                 });
             }
         }
         Struck {
-            impact: outcome,
+            impact,
+            share,
+            plate,
             normal: world,
-            grade,
             bare,
             loosed,
         }
     }
 
-    /// As [`Raider::strike_hull`], for a round on her main gun `i`.
+    /// As [`Raider::strike_hull`], for a round on her main gun `i`: what became of it,
+    /// the outward normal of the face it met, the grade of the plate there and the
+    /// inches of it the round met.
     pub(super) fn strike_mount(
         &mut self,
         i: usize,
         point: Vec3,
         travel: Vec3,
-        (ammo, shell): (Ammo, ShellClass),
-        bore: u16,
-    ) -> (Impact, Vec3, ArmorGrade) {
+        round: Round,
+        luck: f32,
+    ) -> (Strike, Vec3, ArmorGrade, f32) {
         let profile = self.class.profile();
         let gun = &mut self.guns[i];
         let base = gun.base(&self.body, profile);
@@ -434,10 +468,11 @@ impl Raider {
             )
         };
         let cell = (radial_cell(n, gun.bearing(&self.body)), row);
-        let outcome = gun
+        let plate = gun.plate.plate_at(cell);
+        let strike = gun
             .plate
-            .resolve_ammo(ammo, shell, incidence(travel, normal), &[cell], bore)
+            .strike(round, incidence(travel, normal), cell, luck)
             .expect("local mount cell");
-        (outcome, normal, gun.plate.grade())
+        (strike, normal, gun.plate.grade(), plate)
     }
 }

@@ -10,7 +10,7 @@ use bevy::{
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
-use shipvivor_encounter::{Ammo, Control, MainMount, MainShell, MountStatus, Station, Volley};
+use shipvivor_encounter::{Control, MainMount, MainShell, MountStatus, Station, Volley};
 use shipvivor_shipyard::{Component as Equipment, Design, Frame};
 
 /// Plan pixels per metre across and along the hull. The beam is drawn a little wide to read.
@@ -78,8 +78,6 @@ pub enum Readout {
     Bar(Station, usize),
     State(Station, usize),
     Summary,
-    /// What the crew loads next, once AP is fitted.
-    Selection,
 }
 
 fn navy() -> Color {
@@ -433,14 +431,6 @@ pub fn spawn(cmd: &mut Commands, root: Entity, plan: Handle<Image>, run: &Campai
         ))
         .id();
     label(cmd, heading, "MAIN BATTERY", 13., brass(), None);
-    label(
-        cmd,
-        heading,
-        "",
-        12.,
-        Color::WHITE,
-        Some(Readout::Selection),
-    );
     let groups = cmd
         .spawn((
             Node {
@@ -589,17 +579,11 @@ pub fn spawn(cmd: &mut Commands, root: Entity, plan: Handle<Image>, run: &Campai
 }
 
 /// The colour and words for one barrel: its countdown while loading, else its mount's state.
-/// With AP fitted, the words start with the round in the barrel or going into it.
-fn barrel_state(mount: &MainMount, tube: usize, with_ammo: bool) -> (Color, String) {
-    let round = if with_ammo {
-        format!("{} ", mount.ammo(tube).label())
-    } else {
-        String::new()
-    };
+fn barrel_state(mount: &MainMount, tube: usize) -> (Color, String) {
     if mount.status() != MountStatus::Disabled && !mount.loaded(tube) {
         // Round up so a barrel never reads 0.0 s while it is still loading.
         let tenths = (mount.reload_left(tube) * 10.).ceil() / 10.;
-        return (ink(MountStatus::Loading), format!("{round}{tenths:.1} s"));
+        return (ink(MountStatus::Loading), format!("{tenths:.1} s"));
     }
     let status = mount.status();
     let words = match status {
@@ -608,13 +592,7 @@ fn barrel_state(mount: &MainMount, tube: usize, with_ammo: bool) -> (Color, Stri
         MountStatus::Masked => "MASKED",
         MountStatus::Disabled => "OUT",
     };
-    (ink(status), format!("{round}{words}"))
-}
-fn ammo_ink(ammo: Ammo) -> Color {
-    match ammo {
-        Ammo::He => Color::srgb_u8(255, 154, 84),
-        Ammo::Ap => Color::srgb_u8(214, 224, 232),
-    }
+    (ink(status), words.to_string())
 }
 
 type SightParts<'a> = (&'a SightMark, &'a mut Node, &'a mut UiTransform);
@@ -682,7 +660,6 @@ pub fn update(
             node.display = shown;
         }
     }
-    let with_ammo = run.fittings.armor_piercing();
     // The icons grow with the gunhouses, by half as much.
     for (turret, mut pose) in &mut turrets {
         let mount = battle.main_mount(turret.0);
@@ -700,7 +677,7 @@ pub fn update(
     for (barrel, mut node, mut fill) in &mut barrels {
         let mount = battle.main_mount(barrel.0);
         node.height = percent(100. * mount.load_fraction(barrel.1));
-        fill.0 = barrel_state(mount, barrel.1, false).0;
+        fill.0 = barrel_state(mount, barrel.1).0;
     }
     let relative = view.bearing - helm.heading;
     let direction = Vec2::new(relative.sin(), -relative.cos());
@@ -768,18 +745,14 @@ pub fn update(
                     node.width = percent(100. * mount.load_fraction(tube));
                 }
                 if let Some(mut fill) = fill {
-                    fill.0 = barrel_state(mount, tube, false).0;
+                    fill.0 = barrel_state(mount, tube).0;
                 }
                 continue;
             }
             Readout::State(station, tube) => {
-                let (color, words) = barrel_state(battle.main_mount(station), tube, with_ammo);
+                let (color, words) = barrel_state(battle.main_mount(station), tube);
                 (words, color)
             }
-            Readout::Selection if with_ammo => {
-                (format!("LOAD {}", guns.ammo.label()), ammo_ink(guns.ammo))
-            }
-            Readout::Selection => (String::new(), Color::WHITE),
             Readout::Summary => match battle.standing_volley() {
                 Some(Volley::Salvo) => ("SALVO".into(), brass()),
                 Some(Volley::Single) => ("STANDING BY".into(), brass()),

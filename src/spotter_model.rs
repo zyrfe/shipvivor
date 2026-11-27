@@ -10,7 +10,7 @@ const SEA: Color = Color::srgb(0.32, 0.44, 0.44);
 const GLASS: Color = Color::srgb(0.21, 0.44, 0.54);
 
 /// Aircraft, canopy and floats are skinned around elliptical frames along the keel.
-fn skin(mesh: &mut Facets, x: f32, stations: &[(f32, f32, f32, f32, Color)]) {
+pub(crate) fn skin(mesh: &mut Facets, x: f32, stations: &[(f32, f32, f32, f32, Color)]) {
     for pair in stations.windows(2) {
         let point = |(z, y, width, height, _), rib: usize| {
             let (s, c) = (rib as f32 * std::f32::consts::TAU / 12.).sin_cos();
@@ -31,7 +31,7 @@ fn skin(mesh: &mut Facets, x: f32, stations: &[(f32, f32, f32, f32, Color)]) {
 }
 
 /// Camber, clipped tips and the outer recognition band read from the bridge below.
-fn wing(mesh: &mut Facets, half_span: f32, y: f32, z: f32, chord: f32, color: Color) {
+pub(crate) fn wing(mesh: &mut Facets, half_span: f32, y: f32, z: f32, chord: f32, color: Color) {
     for side in [-1., 1.] {
         let section = |span: f32| {
             let tip = ((span - 0.88) / 0.12).max(0.);
