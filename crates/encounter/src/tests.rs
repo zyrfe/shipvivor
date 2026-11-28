@@ -3948,7 +3948,10 @@ fn a_punishing_passage_moors_twice_the_squadrons_and_its_yards_work_twice_over()
     assert_eq!(doubled.wave_interval, charted.wave_interval / 2.);
     // Setting it again changes nothing.
     let again = doubled.with_strength(2);
-    assert_eq!(again.ports[0].production_per_minute(), 2. * charted.ports[0].production_per_minute());
+    assert_eq!(
+        again.ports[0].production_per_minute(),
+        2. * charted.ports[0].production_per_minute()
+    );
 }
 
 #[test]

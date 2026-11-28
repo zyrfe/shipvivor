@@ -670,7 +670,7 @@ fn anti_air(stage: &mut Stage) {
 /// three times, then each character on the line's beat, a space only the selector and
 /// escapement, and a carriage return between lines that takes two and a half beats.
 fn teletype(stage: &mut Stage) {
-    const BEAT: f32 = 0.1;
+    const BEAT: f32 = 0.075;
     const LINES: [&str; 4] = [
         "FLASH 140612Z FEB CTF 88",
         "IRONR EGENT SORTI EDBAS EEBRG",

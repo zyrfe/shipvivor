@@ -835,6 +835,14 @@ impl Soundboard {
     pub fn silence(&self) {
         self.cues.send(Cue::Hush);
     }
+    /// The game speaking, at a strength of its own from 0 to 1: see [`Cue::Notice`].
+    pub fn notice(&self, sound: Sound, level: f32, serial: u64) {
+        self.cues.send(Cue::Notice {
+            sound,
+            level,
+            serial,
+        });
+    }
 }
 
 /// A local interface sound that plays while the encounter is paused.

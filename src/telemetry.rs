@@ -1536,7 +1536,10 @@ impl RunLog {
                     String::new()
                 }
             ) + &if run.survival_points() > 0 {
-                format!(", and coming through punishing pays {}", run.survival_points())
+                format!(
+                    ", and coming through punishing pays {}",
+                    run.survival_points()
+                )
             } else {
                 String::new()
             }

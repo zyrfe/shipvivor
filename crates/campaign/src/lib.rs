@@ -590,7 +590,11 @@ impl Exit {
     /// How many times over its bases moor and launch their ships: 1, or
     /// [`PUNISHING_STRENGTH`] on a punishing passage.
     pub fn strength(&self) -> usize {
-        if self.punishing { PUNISHING_STRENGTH } else { 1 }
+        if self.punishing {
+            PUNISHING_STRENGTH
+        } else {
+            1
+        }
     }
     /// Yard points coming through this passage pays on top of its stars and bases.
     pub fn survival_points(&self) -> u16 {
@@ -1367,7 +1371,11 @@ impl Run {
     /// How many times over the bases of these waters moor and launch their ships: 1, or
     /// [`PUNISHING_STRENGTH`] on a punishing passage.
     pub fn strength(&self) -> usize {
-        if self.punishing { PUNISHING_STRENGTH } else { 1 }
+        if self.punishing {
+            PUNISHING_STRENGTH
+        } else {
+            1
+        }
     }
     /// Yard points coming through a punishing patrol pays, once she has:
     /// [`SURVIVAL_POINTS`], or none.
@@ -2671,7 +2679,10 @@ mod tests {
         assert!(r.toggle_punishing(0) && r.toggle_punishing(2) && r.toggle_punishing(2));
         let exits = r.exits().unwrap();
         assert_eq!(exits.map(|e| e.punishing), [true, false, false]);
-        assert_eq!((exits[0].strength(), exits[1].strength()), (PUNISHING_STRENGTH, 1));
+        assert_eq!(
+            (exits[0].strength(), exits[1].strength()),
+            (PUNISHING_STRENGTH, 1)
+        );
         assert_eq!(exits[0].survival_points(), SURVIVAL_POINTS);
         let banked = r.points();
         assert!(r.depart(exits[0].stage));

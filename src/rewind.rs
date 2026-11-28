@@ -389,7 +389,7 @@ enum Control {
 fn steer(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    time: Res<Time<Real>>,
+    time: Res<Time>,
     controls: Query<(&Control, &RelativeCursorPosition)>,
     mut timeline: ResMut<Timeline>,
     mut live: Live,

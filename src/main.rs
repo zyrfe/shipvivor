@@ -38,6 +38,7 @@ mod state;
 mod strike_craft;
 mod surfaces;
 mod telemetry;
+mod teletype;
 #[cfg(test)]
 mod tests;
 mod threat_ring;
@@ -71,6 +72,7 @@ fn main() {
         .add_plugins(sound::SoundPlugin)
         .add_plugins(snapshot::SnapshotPlugin)
         .add_plugins(telemetry::TelemetryPlugin)
+        .add_plugins(teletype::TeletypePlugin)
         .add_plugins(icefield::IcefieldPlugin)
         .add_plugins(gunsmoke::GunsmokePlugin)
         .add_plugins(battle_view::MainlandPlugin);
