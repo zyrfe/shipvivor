@@ -64,6 +64,8 @@ enum Row {
     Guns,
     Secondaries,
     Machinery,
+    /// Her torpedoes, the same in every set of tubes.
+    Torpedoes,
     Hull,
 }
 fn row_of(job: DockJob) -> Row {
@@ -76,8 +78,10 @@ fn row_of(job: DockJob) -> Row {
             TripleTurrets | QuadTurrets | Caps | Velocity | Loader | Shells,
         ) => Row::Guns,
         DockJob::Fitting(TrainingGear) => Row::Guns,
+        DockJob::Fitting(SuppressingFire | LongBaseRangefinders | PlungingFire) => Row::Guns,
         DockJob::Fitting(Turbines | Hardening | Pumps) => Row::Machinery,
         DockJob::Fitting(Armor) => Row::Hull,
+        DockJob::Fitting(GuidedTorpedoes | QuickTubes | LongRunningTorpedoes) => Row::Torpedoes,
         DockJob::Fitting(_) => Row::Secondaries,
         DockJob::Insert { .. } | DockJob::WidenBeam => Row::Hull,
     }
@@ -207,11 +211,28 @@ pub(super) fn caption(job: DockJob, run: &Campaign) -> &'static str {
             MoreMissiles => "Salvo",
             MorePlanes => "Planes",
             MoreBombs => "Bombs",
-            // The size of gunhouse the next rank builds, or the last once it is fitted.
-            SecondaryTurrets => match run.fittings.next_secondary_bore() {
-                Some(..=4) => "4-inch",
-                _ => "6-inch",
+            // The bore her class of hull carries.
+            SecondaryTurrets => match run.fittings.gunhouse_bore() {
+                Some(..=4) | None => "4-inch",
+                Some(5..=6) => "6-inch",
+                Some(_) => "8-inch",
             },
+            // What the next rank of guidance brings, or the last once it is fitted.
+            GuidedTorpedoes => match run.fittings.guidance {
+                0 => "Guided",
+                1 => "Steer",
+                2 => "Fan",
+                _ => "Five",
+            },
+            QuickTubes => "Reload",
+            LongRunningTorpedoes => "Run",
+            SuppressingFire => "Suppress",
+            LongBaseRangefinders => "Finder",
+            PlungingFire => "Plunge",
+            Overdrive => "Overdrive",
+            BattleshipPlate => "Plate",
+            SuperchargedShells => "Super",
+            AutoLoaders => "Auto",
         },
     }
 }

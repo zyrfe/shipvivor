@@ -476,6 +476,11 @@ fn long_round_clears_a_nearby_boat_then_splashes_at_the_sight() {
     b.raiders.clear();
     // The bow pair would finish the boat off before the round arrives.
     b.wing_guns.clear();
+    // Laid true, so the round comes down on the sight itself.
+    b.fit_fire_control(FireControl {
+        dispersion: 0.,
+        ..FireControl::STOCK
+    });
     b.spawn(EnemyClass::Patrol, Vec2::new(0., -110.), Vec2::ZERO);
     cripple(&mut b.raiders[0]);
     let goal = Vec3::new(0., 0., -260.);
@@ -2579,7 +2584,8 @@ fn a_spread_hits_the_first_ship_once_and_land_stops_it() {
 #[test]
 fn fitted_secondaries_add_guns_fire_faster_and_hit_harder() {
     // She is built with a pair amidships and a pair on the bow, and her stock hull has
-    // room for six a side. More than that wait for a longer hull.
+    // room for five a side, the forward turret's beams kept clear. More than that wait
+    // for a longer hull.
     let stock = battle();
     assert_eq!(stock.wing_guns().len(), 4);
     let mut b = battle();
@@ -2588,14 +2594,14 @@ fn fitted_secondaries_add_guns_fire_faster_and_hit_harder() {
         ..Secondaries::STOCK
     };
     b.fit_secondaries(full);
-    assert_eq!(shipvivor_shipyard::Design::breakwater().wing_room(), 6);
-    assert_eq!(b.wing_guns().len(), 12);
+    assert_eq!(shipvivor_shipyard::Design::breakwater().wing_room(), 5);
+    assert_eq!(b.wing_guns().len(), 10);
     let at = |i: usize| (b.wing_guns()[i].deck_x(), b.wing_guns()[i].deck_fore());
     assert_eq!(at(0), (-2.18, 0.));
     assert_eq!(at(3), (1.35, 10.6));
     assert_eq!(at(5), (2.18, 3.8));
-    // Then beside the forward turret, and abaft the machinery.
-    assert!(at(6).1 > 5. && at(7).0 > 0. && at(9).1 < 0.);
+    // Then abaft the machinery, clear of the forward turret.
+    assert!(at(6).1 < 0. && at(7).0 > 0. && at(9).1 < 0.);
     b.fit_secondaries(Secondaries::STOCK);
     assert_eq!(b.wing_guns().len(), 4);
 
@@ -2638,9 +2644,9 @@ fn fitted_secondaries_add_guns_fire_faster_and_hit_harder() {
     }
     let (one, hurt) = engage(Secondaries::STOCK);
     assert!(one >= 3 && hurt > 0., "{one} rounds, {hurt} hull");
-    // Five of her six a side stand on the beam, all but the bow gun.
-    let (five, _) = engage(full);
-    assert_eq!(five, 5 * one, "every station on the beam joins in");
+    // Four of her five a side stand on the beam, all but the bow gun.
+    let (four, _) = engage(full);
+    assert_eq!(four, 4 * one, "every station on the beam joins in");
     let (quick, _) = engage(Secondaries {
         reload: Secondaries::STOCK.reload / 2.,
         ..Secondaries::STOCK
@@ -2663,8 +2669,9 @@ fn fitted_secondaries_add_guns_fire_faster_and_hit_harder() {
 #[test]
 fn a_secondary_gunhouse_fires_its_own_bore_and_reaches_as_far_as_it_engages() {
     /// The widest secondary round in flight, in inches, and how far out the farthest
-    /// flies, in five seconds' fire at a cruiser lying `range` metres off her beam.
-    fn engage(fit: Secondaries, range: f32) -> (f32, f32) {
+    /// flies, in five seconds' fire at a cruiser lying `range` metres off her beam, with
+    /// her deck guns fitted as `fit` and her gunhouses as `houses`.
+    fn engage(fit: Secondaries, houses: Gunhouses, range: f32) -> (f32, f32) {
         let mut b = battle();
         b.raiders.clear();
         b.landmarks.clear();
@@ -2672,7 +2679,13 @@ fn a_secondary_gunhouse_fires_its_own_bore_and_reaches_as_far_as_it_engages() {
         let at = Vec2::new(range, 0.);
         b.spawn(EnemyClass::Cruiser, at, at + Vec2::NEG_Y);
         toughen(&mut b.raiders[0], 100.);
+        // An empty bay abaft her machinery gives a gunhouse its deck edge.
+        let mut design = shipvivor_shipyard::Design::breakwater();
+        let bay = shipvivor_shipyard::Module::new(shipvivor_shipyard::Frame::Straight, []);
+        design.insert(4, bay).unwrap();
+        b.fit_design(&design, |s| (MainShell::STOCK, s.gunhouse.barrels));
         b.fit_secondaries(fit);
+        b.fit_gunhouses(houses);
         let orders = Orders {
             player: Vec2::ZERO,
             ..distant_observer()
@@ -2689,23 +2702,28 @@ fn a_secondary_gunhouse_fires_its_own_bore_and_reaches_as_far_as_it_engages() {
         }
         (widest, farthest)
     }
-    let house = |bore, range| Secondaries {
-        gunhouse: Some(bore),
+    let house = |bore, range| Gunhouses {
+        per_side: 1,
+        bore,
         range,
+        ..Gunhouses::NONE
+    };
+    // A deck gun fires its light round, and a gunhouse the round of its bore.
+    let (light, _) = engage(Secondaries::STOCK, Gunhouses::NONE, 120.);
+    assert!((light - Secondaries::STOCK.bore).abs() < 0.01, "{light}");
+    let (four, _) = engage(Secondaries::STOCK, house(4, 340.), 120.);
+    let (eight, _) = engage(Secondaries::STOCK, house(8, 500.), 120.);
+    assert!(
+        (four - 4.).abs() < 0.01 && (eight - 8.).abs() < 0.01,
+        "{four}, {eight}"
+    );
+    // An eight-inch gunhouse engages out to 500 metres, and its rounds carry that far
+    // rather than falling short, where the deck guns' reach falls far short of it.
+    let deck = Secondaries {
+        range: 100.,
         ..Secondaries::STOCK
     };
-    // A shielded mount fires its light round, and a gunhouse the round of its bore.
-    let (light, _) = engage(Secondaries::STOCK, 120.);
-    assert!((light - Secondaries::MOUNT_BORE).abs() < 0.01, "{light}");
-    let (four, _) = engage(house(4, 260.), 120.);
-    let (six, _) = engage(house(6, 340.), 120.);
-    assert!(
-        (four - 4.).abs() < 0.01 && (six - 6.).abs() < 0.01,
-        "{four}, {six}"
-    );
-    // With every rangefinder a six-inch gunhouse engages out past 500 metres, and its
-    // rounds carry that far rather than falling short.
-    let (_, far) = engage(house(6, 540.), 500.);
+    let (_, far) = engage(deck, house(8, 520.), 500.);
     assert!(far > 480., "rounds fly {far} m at a cruiser 500 m off");
 }
 
@@ -4266,8 +4284,9 @@ fn a_row_of_secondaries_fires_ragged_and_never_through_the_gun_beside_it() {
     };
     // A mark fine on the starboard bow, and another on her quarter. Alone on the beam,
     // the gun abaft the bridge bears on both. In a row it would fire through the guns
-    // ahead of it and astern, so only the bow gun bears on the first, and only the gun
-    // at the after end of the row on the second.
+    // ahead of it and astern, so only the bow gun and the gun beside the bridge, with
+    // the forward turret's beam kept clear ahead of it, bear on the first, and only the
+    // gun at the after end of the row on the second.
     let fine = shipvivor_compass::direction(15_f32.to_radians()) * 120.;
     let quarter = shipvivor_compass::direction(170_f32.to_radians()) * 120.;
     let bears = |b: &Battle, mark: Vec2| -> Vec<usize> {
@@ -4279,7 +4298,7 @@ fn a_row_of_secondaries_fires_ragged_and_never_through_the_gun_beside_it() {
     assert_eq!(bears(&b, fine), [1, 3]);
     assert_eq!(bears(&b, quarter), [1]);
     b.fit_secondaries(full);
-    assert_eq!(bears(&b, fine), [3]);
+    assert_eq!(bears(&b, fine), [3, 5]);
     let aftermost = (0..b.wing_guns.len())
         .filter(|&i| b.wing_guns[i].deck_x() > 0.)
         .min_by(|&x, &y| {
@@ -4289,10 +4308,10 @@ fn a_row_of_secondaries_fires_ragged_and_never_through_the_gun_beside_it() {
         .unwrap();
     assert_eq!(bears(&b, quarter), [aftermost]);
     // On the beam, every gun of that side but the bow gun.
-    assert_eq!(bears(&b, Vec2::X * 120.), [1, 5, 7, 9, 11]);
+    assert_eq!(bears(&b, Vec2::X * 120.), [1, 5, 7, 9]);
 
-    // A cruiser off the starboard beam: five guns bear, and each fires in its own time
-    // rather than all five together, at the rate they fired before.
+    // A cruiser off the starboard beam: four guns bear, and each fires in its own time
+    // rather than all four together, at the rate they fired before.
     b.raiders.clear();
     b.next_wave = 1000.;
     b.spawn(
@@ -4315,7 +4334,7 @@ fn a_row_of_secondaries_fires_ragged_and_never_through_the_gun_beside_it() {
         }
     }
     let rounds: usize = volleys.iter().sum();
-    assert!((26..=36).contains(&rounds), "{rounds} rounds");
+    assert!((20..=29).contains(&rounds), "{rounds} rounds");
     assert!(volleys.iter().all(|&guns| guns <= 2), "{volleys:?}");
     assert!(volleys.len() * 5 >= rounds * 4, "{volleys:?}");
 }
@@ -4413,4 +4432,221 @@ fn a_secondarys_rounds_fall_about_the_mark_and_not_all_on_it() {
     // Twice as far off, twice as wide.
     let far = (0..400).map(|serial| projectile::strewn(from, mark * Vec3::new(2., 1., 1.), serial));
     assert!(far.map(|f| f.z.abs()).fold(0., f32::max) > 6.);
+}
+
+/// A quiet sea far from the route's islands, with no waves, convoys or crew fire of hers.
+fn open_water() -> Battle {
+    let mut b = battle();
+    b.raiders.clear();
+    b.next_wave = 1000.;
+    b.wing_guns.clear();
+    for port in &mut b.ports {
+        port.convoy_clock = 1000.;
+    }
+    b
+}
+/// Hove to well clear of a ship at `(2000, 1300)`, out of her reach.
+fn far_off() -> Orders {
+    Orders {
+        player: Vec2::new(2000., 2900.),
+        ..hove_to()
+    }
+}
+const ANCHORAGE: Vec2 = Vec2::new(2000., 1300.);
+/// A fast round, reaching well past a kilometre.
+const LONG_SHELL: MainShell = MainShell {
+    velocity: 3,
+    ..MainShell::STOCK
+};
+/// A main-battery round fired at the anchored ship from `range` metres due south.
+fn fire_on_anchored(b: &mut Battle, range: f32) {
+    let mark = b.raiders[0].aim_point(ANCHORAGE + Vec2::Y * range);
+    let gun = (ANCHORAGE + Vec2::Y * range).extend(3.).xzy();
+    let path = projectile::FlightPath::main(gun, mark, LONG_SHELL).expect("a path to her");
+    path.launch(
+        &mut b.shots,
+        &mut b.effects,
+        &mut b.serial,
+        Battery::Main,
+        LONG_SHELL.breach_force(),
+    );
+}
+/// A destroyer riding at anchor, built stout enough to take hits without sinking.
+fn anchored(b: &mut Battle) {
+    b.spawn(EnemyClass::Destroyer, ANCHORAGE, ANCHORAGE + Vec2::Y);
+    b.raiders[0].moored = Some(0);
+    toughen(&mut b.raiders[0], 20.);
+}
+
+#[test]
+fn a_main_battery_hit_suppresses_her_crews_for_longer_the_farther_it_lands() {
+    let held = |suppression: u16, range: f32| {
+        let mut b = open_water();
+        b.fit_fire_control(FireControl {
+            suppression,
+            ..FireControl::STOCK
+        });
+        anchored(&mut b);
+        fire_on_anchored(&mut b, range);
+        // She fired it herself: the hit is reckoned from where she lies.
+        let orders = Orders {
+            player: ANCHORAGE + Vec2::Y * range,
+            ..hove_to()
+        };
+        for _ in 0..240 {
+            b.step(1. / 60., &orders);
+            if b.raiders[0].suppressed() > 0. {
+                return b.raiders[0].suppressed();
+            }
+        }
+        0.
+    };
+    assert_eq!(held(0, 500.), 0., "no card, no suppression");
+    // At 500 m, two seconds at the first rank and four at the third, a little less for
+    // the bow she was struck on standing nearer, and the step it came in.
+    assert!((1.85..=2.).contains(&held(1, 500.)), "{}", held(1, 500.));
+    assert!((3.7..=4.).contains(&held(3, 500.)), "{}", held(3, 500.));
+    assert!(held(2, 250.) < held(2, 500.) && held(2, 500.) < held(2, 750.));
+}
+
+#[test]
+fn a_suppressed_ship_holds_fire_and_loads_nothing_until_her_crews_recover() {
+    let muzzles = |b: &Battle| {
+        (b.effects.iter())
+            .filter(|fx| {
+                fx.age == 0.
+                    && matches!(
+                        fx.kind,
+                        EffectKind::Muzzle(Battery::Raider | Battery::EnemySecondary)
+                    )
+            })
+            .count()
+    };
+    let mut b = open_water();
+    let orders = hove_to();
+    b.spawn(EnemyClass::Destroyer, Vec2::new(0., -200.), Vec2::ZERO);
+    b.raiders[0].moored = Some(0);
+    toughen(&mut b.raiders[0], 20.);
+    let dt = 1. / 60.;
+    // She opens fire on her own.
+    let mut opened = false;
+    for _ in 0..60 * 20 {
+        b.step(dt, &orders);
+        if muzzles(&b) > 0 {
+            opened = true;
+            break;
+        }
+    }
+    assert!(opened, "she engages at 200 m");
+    b.raiders[0].suppress(3.);
+    let mut during = 0;
+    for _ in 0..(2.9 / dt) as usize {
+        b.step(dt, &orders);
+        during += muzzles(&b);
+    }
+    assert_eq!(during, 0, "her crews hold fire while thrown off");
+    // Back at their guns they fire again once the rounds they had not finished loading
+    // are in: no sooner than the reload she broke off.
+    let mut after = 0;
+    for _ in 0..(1.2 * b.raiders[0].class.profile().reload() / dt) as usize {
+        b.step(dt, &orders);
+        after += muzzles(&b);
+    }
+    assert!(after > 0, "she fights on once they recover");
+    // A flagship's crews are held half as long.
+    let mut regent = Raider::new(b.raiders[0].body, EnemyClass::Regent);
+    regent.suppress(3.);
+    assert!((regent.suppressed() - 1.5).abs() < 1e-5);
+}
+
+#[test]
+fn rangefinders_tighten_only_long_fire_and_a_destroyer_lays_wider_than_a_cruiser() {
+    let gun = Vec3::new(0., 3., 0.);
+    // How far a run of rounds laid at `range` lands from the mark, on the mean.
+    let off = |fire: FireControl, range: f32| {
+        let mark = Vec3::new(0., 1.5, -range);
+        let path = projectile::FlightPath::main(gun, mark, LONG_SHELL).unwrap();
+        let aimed = path.trajectory().end();
+        (0..400)
+            .map(|seed| {
+                let laid = path.laid_off(fire, seed).trajectory().end();
+                laid.xz().distance(aimed.xz())
+            })
+            .sum::<f32>()
+            / 400.
+    };
+    let stock = FireControl::STOCK;
+    let ranged = FireControl {
+        rangefinders: 3,
+        ..stock
+    };
+    let reach = LONG_SHELL.reach();
+    // Inside half her reach the rangefinders change nothing.
+    assert!((off(ranged, 0.4 * reach) - off(stock, 0.4 * reach)).abs() < 1e-3);
+    // Well out, three ranks take 45% off.
+    let (far, tight) = (off(stock, 0.85 * reach), off(ranged, 0.85 * reach));
+    assert!(
+        far > 3. && (tight / far - 0.55).abs() < 0.02,
+        "{far} {tight}"
+    );
+    // Farther is wider.
+    assert!(off(stock, 0.85 * reach) > 1.5 * off(stock, 0.4 * reach));
+    // The light cruiser lays tighter than stock and the heavy destroyer looser.
+    let hull = |dispersion| FireControl {
+        dispersion,
+        ..stock
+    };
+    let (cruiser, destroyer) = (off(hull(0.8), 600.), off(hull(1.25), 600.));
+    assert!(destroyer > 1.5 * cruiser, "{cruiser} {destroyer}");
+}
+
+#[test]
+fn every_main_round_fired_falls_a_little_off_the_sight() {
+    let mut b = battle();
+    b.raiders.clear();
+    b.wing_guns.clear();
+    let goal = Vec3::new(0., 0., -260.);
+    let mut orders = Orders {
+        aim: Aim::Track(goal),
+        ..hove_to()
+    };
+    for _ in 0..30 {
+        b.step(1. / 60., &orders);
+    }
+    orders.aim = Aim::Sight(goal);
+    b.step(1. / 60., &orders);
+    orders.aim = Aim::Hold;
+    for _ in 0..60 {
+        b.step(1. / 60., &orders);
+    }
+    let splash = (b.effects.iter())
+        .find(|fx| fx.kind == EffectKind::Splash)
+        .expect("the round came down");
+    let (along, across) = FireControl::STOCK.scatter(260., MainShell::STOCK.reach());
+    let miss = splash.body.pos.distance(goal.xz());
+    assert!(miss > 0.05 && miss < along.hypot(across) + 1., "{miss}");
+}
+
+#[test]
+fn plunging_fire_hits_harder_only_beyond_its_range() {
+    let lost = |plunging: u16, range: f32| {
+        let mut b = open_water();
+        b.fit_fire_control(FireControl {
+            plunging,
+            ..FireControl::STOCK
+        });
+        anchored(&mut b);
+        let before = b.raiders[0].hull();
+        fire_on_anchored(&mut b, range);
+        let orders = far_off();
+        for _ in 0..300 {
+            b.step(1. / 60., &orders);
+        }
+        before - b.raiders[0].hull()
+    };
+    let short = gunnery::PLUNGE_RANGE - 50.;
+    let long = gunnery::PLUNGE_RANGE + 50.;
+    assert!(lost(0, long) > 0., "the round struck her");
+    assert_eq!(lost(3, short), lost(0, short));
+    assert!(lost(3, long) > lost(0, long));
 }

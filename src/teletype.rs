@@ -57,6 +57,10 @@ const TOP: f32 = 404.;
 const BOTTOM: f32 = 196.;
 const RIGHT: f32 = 18.;
 const MACHINE_HEIGHT: f32 = 28.;
+/// The window the machine stands at its own size in, and grows with past it: two and a
+/// half times on a 4K screen.
+const READ_WIDTH: f32 = 1536.;
+const READ_HEIGHT: f32 = 840.;
 
 /// How urgently a message goes out, which sets its place in the queue and its bells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -577,8 +581,9 @@ pub fn print(
     tty.run(time.delta_secs(), || dtg(&run, &battle), &board);
 }
 
+/// The machine, built at this many times its size.
 #[derive(Component)]
-pub struct Machine;
+pub struct Machine(f32);
 #[derive(Component)]
 pub struct Paper;
 #[derive(Component)]
@@ -592,16 +597,18 @@ fn paper() -> Color {
     Color::srgb_u8(241, 234, 212)
 }
 
-pub fn setup(mut cmd: Commands) {
+/// Build the machine at `k` times its size.
+fn build(cmd: &mut Commands, k: f32) {
+    let s = |v: f32| px(v * k);
     let root = cmd
         .spawn((
-            Machine,
+            Machine(k),
             Node {
                 position_type: PositionType::Absolute,
                 right: px(RIGHT),
                 top: px(TOP),
                 bottom: px(BOTTOM),
-                width: px(PAPER_WIDTH + 20.),
+                width: s(PAPER_WIDTH + 20.),
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::FlexStart,
@@ -615,16 +622,16 @@ pub fn setup(mut cmd: Commands) {
         .spawn((
             Paper,
             Node {
-                width: px(PAPER_WIDTH),
-                height: px(PAPER_HEIGHT),
-                min_height: px(0),
+                width: s(PAPER_WIDTH),
+                height: s(PAPER_HEIGHT),
+                min_height: s(0.),
                 flex_shrink: 1.,
                 overflow: Overflow::clip(),
-                border_radius: BorderRadius::top(px(CURL * 0.5)),
+                border_radius: BorderRadius::top(s(CURL * 0.5)),
                 ..default()
             },
             BackgroundColor(paper()),
-            BoxShadow::new(Color::BLACK.with_alpha(0.35), px(0), px(2), px(0), px(6)),
+            BoxShadow::new(Color::BLACK.with_alpha(0.35), s(0.), s(2.), s(0.), s(6.)),
             ChildOf(root),
         ))
         .id();
@@ -632,14 +639,14 @@ pub fn setup(mut cmd: Commands) {
         cmd.spawn((
             PaperLine(n),
             Text::new(""),
-            TextFont::from_font_size(FONT),
+            TextFont::from_font_size(FONT * k),
             TextColor(Ink::Code.color()),
             TextLayout::no_wrap(),
             Node {
                 position_type: PositionType::Absolute,
-                left: px(MARGIN),
-                bottom: px(0),
-                height: px(LINE),
+                left: s(MARGIN),
+                bottom: s(0.),
+                height: s(LINE),
                 ..default()
             },
             UiTransform::default(),
@@ -652,12 +659,12 @@ pub fn setup(mut cmd: Commands) {
         TypeHead,
         Node {
             position_type: PositionType::Absolute,
-            left: px(MARGIN),
-            bottom: px(PLATEN_GAP - 1.),
-            width: px(ADVANCE + 2.),
-            height: px(LINE + 1.),
-            border: UiRect::top(px(2)),
-            border_radius: BorderRadius::top(px(2)),
+            left: s(MARGIN),
+            bottom: s(PLATEN_GAP - 1.),
+            width: s(ADVANCE + 2.),
+            height: s(LINE + 1.),
+            border: UiRect::top(s(2.)),
+            border_radius: BorderRadius::top(s(2.)),
             ..default()
         },
         BackgroundColor(Color::srgba_u8(52, 58, 60, 224)),
@@ -668,10 +675,10 @@ pub fn setup(mut cmd: Commands) {
     cmd.spawn((
         Node {
             position_type: PositionType::Absolute,
-            left: px(0),
-            right: px(0),
-            top: px(0),
-            height: px(CURL),
+            left: s(0.),
+            right: s(0.),
+            top: s(0.),
+            height: s(CURL),
             ..default()
         },
         BackgroundGradient::from(LinearGradient::to_bottom(vec![
@@ -689,14 +696,14 @@ pub fn setup(mut cmd: Commands) {
     let cover = cmd
         .spawn((
             Node {
-                width: px(PAPER_WIDTH + 20.),
-                height: px(MACHINE_HEIGHT),
+                width: s(PAPER_WIDTH + 20.),
+                height: s(MACHINE_HEIGHT),
                 flex_shrink: 0.,
-                padding: UiRect::new(px(12), px(12), px(11), px(0)),
+                padding: UiRect::new(s(12.), s(12.), s(11.), s(0.)),
                 justify_content: JustifyContent::SpaceBetween,
                 align_items: AlignItems::Center,
-                border: UiRect::top(px(1)),
-                border_radius: BorderRadius::new(px(5), px(5), px(3), px(3)),
+                border: UiRect::top(s(1.)),
+                border_radius: BorderRadius::new(s(5.), s(5.), s(3.), s(3.)),
                 ..default()
             },
             BackgroundGradient::from(LinearGradient::to_bottom(vec![
@@ -704,18 +711,18 @@ pub fn setup(mut cmd: Commands) {
                 ColorStop::auto(Color::srgb_u8(62, 70, 73)),
             ])),
             BorderColor::all(Color::srgb_u8(150, 160, 160)),
-            BoxShadow::new(Color::BLACK.with_alpha(0.4), px(0), px(3), px(0), px(6)),
+            BoxShadow::new(Color::BLACK.with_alpha(0.4), s(0.), s(3.), s(0.), s(6.)),
             ChildOf(root),
         ))
         .id();
     cmd.spawn((
         Node {
             position_type: PositionType::Absolute,
-            left: px(6),
-            right: px(6),
-            top: px(-3),
-            height: px(8),
-            border_radius: BorderRadius::all(px(4)),
+            left: s(6.),
+            right: s(6.),
+            top: s(-3.),
+            height: s(8.),
+            border_radius: BorderRadius::all(s(4.)),
             ..default()
         },
         BackgroundGradient::from(LinearGradient::to_bottom(vec![
@@ -726,17 +733,17 @@ pub fn setup(mut cmd: Commands) {
     ));
     cmd.spawn((
         Text::new("FLEET BROADCAST"),
-        TextFont::from_font_size(9.),
+        TextFont::from_font_size(9. * k),
         TextColor(Color::srgb_u8(214, 190, 128)),
         ChildOf(cover),
     ));
     cmd.spawn((
         Lamp,
         Node {
-            width: px(8),
-            height: px(8),
-            border: UiRect::all(px(1)),
-            border_radius: BorderRadius::all(px(4)),
+            width: s(8.),
+            height: s(8.),
+            border: UiRect::all(s(1.)),
+            border_radius: BorderRadius::all(s(4.)),
             ..default()
         },
         BackgroundColor(Color::srgb_u8(70, 48, 20)),
@@ -750,9 +757,9 @@ pub fn setup(mut cmd: Commands) {
 /// sight behind it.
 #[allow(clippy::type_complexity)]
 pub fn draw(
-    run: Res<Campaign>,
-    tty: Res<Teletype>,
-    mut machine: Query<&mut Visibility, With<Machine>>,
+    mut cmd: Commands,
+    (run, tty, window, ui): (Res<Campaign>, Res<Teletype>, Single<&Window>, Res<UiScale>),
+    mut machine: Query<(Entity, &Machine, &mut Visibility)>,
     mut sheet: Query<
         (&ComputedNode, &mut Node),
         (With<Paper>, Without<PaperLine>, Without<TypeHead>),
@@ -771,13 +778,29 @@ pub fn draw(
     mut head: Query<&mut Node, (With<TypeHead>, Without<PaperLine>, Without<Paper>)>,
     mut lamp: Query<&mut BackgroundColor, With<Lamp>>,
 ) {
+    // The bridge's lettering stops growing at full size; the machine keeps on growing
+    // with the window, so its print can be read on a large screen.
+    let k = (window.width() / READ_WIDTH)
+        .min(window.height() / READ_HEIGHT)
+        .max(ui.0)
+        / ui.0;
     let show = shown(&run);
-    for mut vis in &mut machine {
+    let mut built = false;
+    for (machine, &Machine(size), mut vis) in &mut machine {
+        if (size - k).abs() > 0.01 {
+            cmd.entity(machine).despawn();
+            continue;
+        }
+        built = true;
         vis.set_if_neq(if show {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         });
+    }
+    if !built {
+        build(&mut cmd, k);
+        return;
     }
     if !show {
         return;
@@ -787,13 +810,14 @@ pub fn draw(
     };
     // The paper rises a line over FEED seconds after each line feed, quick off the mark.
     let feed = (tty.fed / FEED).min(1.);
-    let lift = (1. - (1. - feed) * (1. - feed) - 1.) * LINE;
+    let (line_h, curl, gap) = (LINE * k, CURL * k, PLATEN_GAP * k);
+    let lift = (1. - (1. - feed) * (1. - feed) - 1.) * line_h;
     // It rolls out of the machine as it prints, until it reaches over the roll, and
     // shows no more than there is room for.
-    let rolled = PLATEN_GAP + tty.paper.len() as f32 * LINE + lift + CURL;
-    sheet_node.height = px(rolled.clamp(PLATEN_GAP + 2. * LINE + CURL, PAPER_HEIGHT));
+    let rolled = gap + tty.paper.len() as f32 * line_h + lift + curl;
+    sheet_node.height = px(rolled.clamp(gap + 2. * line_h + curl, PAPER_HEIGHT * k));
     let height = sheet.size().y * sheet.inverse_scale_factor();
-    let tangent = height - CURL;
+    let tangent = height - curl;
     for (PaperLine(n), mut text, mut color, mut node, mut transform, mut vis) in &mut lines {
         let Some((line, ink)) = tty
             .paper
@@ -804,19 +828,19 @@ pub fn draw(
             vis.set_if_neq(Visibility::Hidden);
             continue;
         };
-        let flat = PLATEN_GAP + *n as f32 * LINE + lift + 0.5 * LINE;
+        let flat = gap + *n as f32 * line_h + lift + 0.5 * line_h;
         // Over the roll a line a distance `past` round it stands at the roll's sine of
         // the angle it has turned, and is seen edge-on as it turns.
         let (centre, turned) = if flat > tangent {
-            let angle = (flat - tangent) / CURL;
-            (tangent + CURL * angle.min(PI_2).sin(), angle)
+            let angle = (flat - tangent) / curl;
+            (tangent + curl * angle.min(PI_2).sin(), angle)
         } else {
             (flat, 0.)
         };
         let facing = turned.min(PI_2).cos();
         // A line turned past the top of the roll is behind it. The paper's clip does not
         // reach a squashed line, so one that would stand over its edge is not shown.
-        if centre + 0.5 * LINE * facing > height - 1. {
+        if centre + 0.5 * line_h * facing > height - 1. {
             vis.set_if_neq(Visibility::Hidden);
             continue;
         }
@@ -825,13 +849,13 @@ pub fn draw(
             text.0.clone_from(line);
         }
         color.0 = ink.color().with_alpha(facing * facing);
-        node.bottom = px(centre - 0.5 * LINE);
+        node.bottom = px(centre - 0.5 * line_h);
         transform.scale = Vec2::new(1., facing.max(0.05));
     }
     let column = tty.paper.back().map_or(0, |line| line.0.chars().count());
     for mut node in &mut head {
-        node.left = px(MARGIN + column as f32 * ADVANCE - 1.);
-        node.bottom = px(PLATEN_GAP - 1. + lift);
+        node.left = px((MARGIN + column as f32 * ADVANCE - 1.) * k);
+        node.bottom = px((PLATEN_GAP - 1.) * k + lift);
     }
     for mut bg in &mut lamp {
         bg.0 = if tty.busy() {
@@ -848,7 +872,6 @@ impl Plugin for TeletypePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Teletype>()
             .add_observer(embark)
-            .add_systems(Startup, setup)
             .add_systems(Update, (listen, print, draw).chain());
     }
 }

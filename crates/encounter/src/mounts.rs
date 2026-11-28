@@ -1,12 +1,12 @@
 //! Deck-relative training for Breakwater's mounts, with each barrel loaded on its own.
 use super::{
-    MainShell, Orders, Secondaries, TurretLayout,
+    Gunhouses, MainShell, Orders, Secondaries, TurretLayout,
     projectile::{FlightPath, Trajectory},
 };
 use glam::{FloatExt, Vec2, Vec3, Vec3Swizzles};
 use shipvivor_artillery::ArmorGrade;
 use shipvivor_compass::direction;
-use shipvivor_shipyard::{GunStation, Obstruction, WingStation};
+use shipvivor_shipyard::{Design, Emplacement, GunStation, Obstruction, WingLayout, WingStation};
 use std::f32::consts::{PI, TAU};
 
 const CRUISER_TRAVERSE: f32 = shipvivor_artillery::STOCK_TRAVERSE.to_radians();
@@ -443,9 +443,10 @@ impl DeckOffsets {
     }
 }
 
-/// Metres round a shielded secondary that its neighbours' fire keeps clear of, and round
-/// one rebuilt as a four-inch gunhouse and as a six-inch one, each broader than the last.
-const WING_BERTH: (f32, f32, f32) = (1.5, 1.75, 1.9);
+/// Metres round a deck gun's shielded mount that its neighbours' fire keeps clear of, and
+/// round a secondary gunhouse of four inches and less, six and eight, each broader than
+/// the last.
+const WING_BERTH: (f32, f32, f32, f32) = (1.5, 1.75, 1.9, 2.15);
 /// Metres round a main turret that the secondaries' fire keeps clear of, for a six-inch
 /// gunhouse: its ring and a little over.
 const TURRET_BERTH: f32 = 1.5;
@@ -456,21 +457,60 @@ pub(super) const RAGGED: f32 = 0.18;
 /// when something comes into it. Each crew takes its own time.
 pub(super) const STAND_EASY: f32 = 0.5;
 
-/// The first `count` of `stations` as the guns `fit` there may train: each arc cut
-/// short of the guns beside it and of the main turrets.
+/// Where her deck guns and gunhouses stand on `design`, with each number of gunhouses a
+/// side, from none to as many as her deck has room for.
+pub(super) fn wing_layouts(design: &Design) -> std::sync::Arc<[WingLayout]> {
+    (0..=design.gunhouse_room())
+        .map(|houses| design.wing_layout(houses))
+        .collect()
+}
+
+/// The deck guns `fit` has, then the gunhouses `houses` has, where `layout` stands them,
+/// as far as it has room. Each gun on deck trains only as far as its fire clears the guns
+/// and gunhouses beside it and the main turrets. A casemate's arc is cut by the port in
+/// her side, and nothing on deck stands in its way.
 pub(super) fn wing_berths(
-    stations: &[WingStation],
-    count: usize,
+    layout: &WingLayout,
     fit: Secondaries,
+    houses: Gunhouses,
     turrets: &[MainMount],
 ) -> Vec<WingStation> {
-    let berth = match fit.gunhouse {
-        None => WING_BERTH.0,
-        Some(..=4) => WING_BERTH.1,
-        Some(_) => WING_BERTH.2,
+    let deck = &layout.deck[..(2 * fit.per_side).min(layout.deck.len())];
+    let gunhouses = &layout.gunhouses[..(2 * houses.per_side).min(layout.gunhouses.len())];
+    let house_berth = match houses.bore {
+        ..=4 => WING_BERTH.1,
+        5..=6 => WING_BERTH.2,
+        _ => WING_BERTH.3,
+    };
+    let berth = |s: &WingStation| match s.emplacement {
+        Emplacement::Gunhouse => house_berth,
+        _ => WING_BERTH.0,
     };
     let standing: Vec<Obstruction> = turrets.iter().map(MainMount::standing).collect();
-    shipvivor_shipyard::clear_arcs(&stations[..count.min(stations.len())], berth, &standing)
+    let on_deck: Vec<&WingStation> = deck
+        .iter()
+        .chain(gunhouses)
+        .filter(|s| s.emplacement != Emplacement::Casemate)
+        .collect();
+    deck.iter()
+        .chain(gunhouses)
+        .map(|station| {
+            if station.emplacement == Emplacement::Casemate {
+                return *station;
+            }
+            let others: Vec<Obstruction> = on_deck
+                .iter()
+                .filter(|other| !std::ptr::eq(**other, station))
+                .map(|other| Obstruction {
+                    abeam: other.abeam,
+                    fore: other.fore,
+                    radius: berth(other),
+                })
+                .chain(standing.iter().copied())
+                .collect();
+            shipvivor_shipyard::clear_arcs(std::slice::from_ref(station), 0., &others)[0]
+        })
+        .collect()
 }
 
 /// A shielded close-range gun on the bow or the beam, worked by the crew.
@@ -485,6 +525,12 @@ pub struct WingGun {
     arc: (f32, f32),
     /// Bearing from `home`.
     train: f32,
+    /// Times it has fired, every barrel at once.
+    fired: u32,
+    /// A deck gun on deck or in a casemate, or a secondary gunhouse.
+    emplacement: Emplacement,
+    /// Something was in its arc and reach at the last look.
+    pub(super) engaged: bool,
 }
 impl WingGun {
     /// A gun standing at `station`, trained fore and aft and loaded.
@@ -496,6 +542,9 @@ impl WingGun {
             arc: station.arc,
             train: 0.,
             reload: 0.,
+            fired: 0,
+            emplacement: station.emplacement,
+            engaged: false,
         }
     }
     /// Stand at `station`, where the yard has moved it, keeping its load and as much of
@@ -506,6 +555,10 @@ impl WingGun {
         self.home = station.home;
         self.arc = station.arc;
         self.train = self.train.clamp(station.arc.0, station.arc.1);
+        if self.emplacement != station.emplacement {
+            self.emplacement = station.emplacement;
+            self.reload = 0.;
+        }
     }
     pub fn deck_x(&self) -> f32 {
         self.abeam
@@ -516,6 +569,23 @@ impl WingGun {
     }
     pub fn deck_bearing(&self) -> f32 {
         self.home + self.train
+    }
+    /// Times the gun has fired, every barrel at once. It counts on from wherever the
+    /// battle was rewound to.
+    pub fn fired(&self) -> u32 {
+        self.fired
+    }
+    /// A deck gun on deck or in a casemate, or a secondary gunhouse.
+    pub fn emplacement(&self) -> Emplacement {
+        self.emplacement
+    }
+    /// It had something in its arc and reach at the last look. A casemate's crew opens
+    /// its port only then.
+    pub fn engaged(&self) -> bool {
+        self.engaged
+    }
+    pub(super) fn count_round(&mut self) {
+        self.fired = self.fired.wrapping_add(1);
     }
     pub(super) fn pivot(&self, player: Vec2, heading: f32) -> Vec3 {
         (player + direction(heading).perp() * self.deck_x() + direction(heading) * self.fore)

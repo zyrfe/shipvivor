@@ -116,12 +116,15 @@ impl Changes {
             .map(|(i, _)| i)
             .collect();
         let (wings, wings_then) = (now.secondaries(), then.secondaries());
-        let wings_from =
-            if wings.barrels != wings_then.barrels || wings.gunhouse != wings_then.gunhouse {
-                Some(0)
-            } else {
-                (wings.per_side > wings_then.per_side).then_some(2 * wings_then.per_side)
-            };
+        let houses_changed = now.gunhouses() != then.gunhouses();
+        let wings_from = if wings.barrels != wings_then.barrels
+            || wings.bore != wings_then.bore
+            || houses_changed
+        {
+            Some(0)
+        } else {
+            (wings.per_side > wings_then.per_side).then_some(2 * wings_then.per_side)
+        };
         let aa = then.anti_air().mounts;
         let aa_from = (now.anti_air().mounts > aa).then_some(aa);
         Self {

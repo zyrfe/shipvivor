@@ -1869,13 +1869,13 @@ pub fn instruments(
                     None => "",
                 };
                 // A ship well inside a torpedo's run that loaded tubes bear on: the call
-                // stands on a line of its own until T brings the tubes up.
+                // stands on a line of its own until T lays the tubes.
                 let quarry = view
                     .target(&battle)
                     .or_else(|| battle.nearest_ship(helm.position));
                 let tubes_bear = quarry.is_some_and(|ship| {
                     let at = ship.body.pos;
-                    at.distance(helm.position) < shipvivor_encounter::TORPEDO_RANGE * 0.8
+                    at.distance(helm.position) < battle.torpedo_range() * 0.8
                         && battle
                             .tubes_for_aim(
                                 helm.heading,
@@ -1884,7 +1884,7 @@ pub fn instruments(
                             .is_some_and(|set| battle.tube_sets()[set].loaded())
                 });
                 if tubes_bear {
-                    format!("{report}\nPRESS T FOR TORPEDOES")
+                    format!("{report}\nHOLD T FOR TORPEDOES")
                 } else {
                     report.into()
                 }
@@ -2007,12 +2007,12 @@ pub fn instruments(
                         .into()
                 } else {
                     let weapon = if guns.torpedo_mode {
-                        "Click  Launch spread (420 m)"
+                        "Release T  Launch spread"
                     } else {
                         "Click  One gun   Double-click  Salvo\nHold  Ripple     Space  At target"
                     };
                     format!(
-                        "W/S  Engine   A/D  Rudder   C  Astern\nX  Pin / release   T  Gun / torpedo\nMouse  Look   RMB + drag  Trim lock\n{weapon}\n1-9  Turret   Z  Manual / Scope / Auto\nShift  Scope   Tab  Chart   Esc  Pause"
+                        "W/S  Engine   A/D  Rudder   C  Astern\nX  Pin / release   Hold T  Torpedoes\nMouse  Look   RMB + drag  Trim lock\n{weapon}\n1-9  Turret   Z  Manual / Scope / Auto\nShift  Scope   Tab  Chart   Esc  Pause"
                     )
                 }
             }

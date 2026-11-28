@@ -77,6 +77,8 @@ pub struct Sea {
     foam: Handle<Image>,
     shoals: Handle<Image>,
     chart: Vec4,
+    /// The tubes' launch sectors, painted on the water while she lays her torpedoes.
+    pub fans: crate::fire_control::Fans,
 }
 impl FromWorld for Sea {
     fn from_world(world: &mut World) -> Self {
@@ -113,6 +115,7 @@ impl FromWorld for Sea {
             weather,
             seconds: 0.,
             stirred: false,
+            fans: default(),
         }
     }
 }
@@ -172,6 +175,7 @@ struct Waters {
     chart: Vec4,
     sky: u32,
     wakes: Wakes,
+    fans: crate::fire_control::Fans,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
@@ -551,6 +555,7 @@ pub fn roll(
         } else {
             sea.tracks.draw(helm.position)
         },
+        fans: sea.fans.clone(),
     };
     // Writing a material also rebinds the patch textures written above.
     for (_, surface) in surfaces.iter_mut() {

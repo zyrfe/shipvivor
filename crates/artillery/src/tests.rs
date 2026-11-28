@@ -147,7 +147,8 @@ fn bore_caps_and_velocity_drive_a_round_through_heavier_plate_and_range_costs_it
     };
     assert_eq!(eight.penetration(), 8.);
     assert_eq!(capped.penetration(), 6.);
-    assert!(fast.penetration() > 5. && fast.penetration() < 5.5);
+    // Three ranks of velocity drive the round half again as fast, and as hard.
+    assert!((fast.penetration() - 6.).abs() < 1e-4);
     // Every round loses some of it as it flies, and a faster round gets there sooner,
     // so it keeps more at the same distance.
     assert!(stock.penetration_at(1.) < stock.penetration());

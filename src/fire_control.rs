@@ -1,11 +1,10 @@
 //! Water-level launch sectors and target-relative markings on the bridge sight.
 use crate::{
     camera::ShipView,
-    scene::Facets,
     state::{Campaign, Encounter, Guns, PlayerHelm, Screen},
 };
-use bevy::{light::NotShadowCaster, prelude::*};
-use shipvivor_compass::{direction, heading};
+use bevy::{prelude::*, render::render_resource::ShaderType};
+use shipvivor_compass::heading;
 use shipvivor_encounter::{
     FIXED_HALF_ARC, RACK_HALF_ARC, Raider, SPREAD_HALF_ARC, TORPEDO_RANGE, TORPEDO_SPEED,
 };
@@ -13,91 +12,55 @@ use shipvivor_encounter::{
 /// Sectors of each width the sight can show at once: one for each beam of every set of
 /// tubes amidships, or for every set in the bow and the stern.
 const TRAVERSE_SLOTS: usize = 8;
+/// Every fan the sea can paint at once: each traverse, the spread and the suggested lead.
+/// The sea shader holds as many.
+pub const FANS: usize = 2 * TRAVERSE_SLOTS + 2;
 
-#[derive(Component)]
-pub enum Sector {
-    /// One sector a set of tubes covers, by its place among the sectors of its width:
-    /// a fixed set's narrow one ahead or astern, or one beam of a set amidships.
-    Traverse {
-        slot: usize,
-        fixed: bool,
-    },
-    Spread {
-        ready: bool,
-    },
-    Suggested,
+/// The launch sectors, painted into the water by the sea shader so the swell cannot
+/// swallow them and a hull standing over them still hides them. Painted in order, so
+/// the spread lies over the traverse and the suggested lead over both.
+#[derive(ShaderType, Clone, Debug)]
+pub struct Fans {
+    /// Three for each fan: where it opens, east and south, its bearing and half-arc;
+    /// then where it starts, its reach, the width of its rim and the opacity inside;
+    /// then its linear colour.
+    fans: [Vec4; 3 * FANS],
+    count: u32,
 }
-fn fan(half_angle: f32, reach: f32, opacity: f32) -> Mesh {
-    let mut mesh = Facets::default();
-    let n = 32;
-    let ray = |i| {
-        let p = direction(-half_angle + 2. * half_angle * i as f32 / n as f32);
-        Vec3::new(p.x, 0., p.y)
-    };
-    let ink = |alpha| Color::linear_rgba(1., 1., 1., alpha);
-    for i in 0..n {
-        let a = ray(i);
-        let b = ray(i + 1);
-        for (inner, outer, alpha) in [(3.5, reach - 1.1, opacity), (reach - 1.1, reach, 0.9)] {
-            let col = ink(alpha);
-            mesh.triangle([a * inner, a * outer, b * outer], col);
-            mesh.triangle([a * inner, b * outer, b * inner], col);
+impl Default for Fans {
+    fn default() -> Self {
+        Self {
+            fans: [Vec4::ZERO; 3 * FANS],
+            count: 0,
         }
     }
-    // A fine edge on each bearing stays visible in the glint off the water.
-    for i in [0, n] {
-        let a = ray(i);
-        let across = Vec3::Y.cross(a) * 0.45;
-        mesh.triangle([a * 4., a * reach - across, a * reach + across], ink(0.92));
-    }
-    mesh.finish()
 }
-pub fn setup(
-    mut cmd: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let mut sector = |kind, mesh, color| {
-        cmd.spawn((
-            kind,
-            Mesh3d(meshes.add(mesh)),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: color,
-                alpha_mode: AlphaMode::Blend,
-                unlit: true,
-                cull_mode: None,
-                ..default()
-            })),
-            Visibility::Hidden,
-            Transform::default(),
-            NotShadowCaster,
-        ));
-    };
-    for slot in 0..TRAVERSE_SLOTS {
-        for (fixed, half_arc) in [(false, RACK_HALF_ARC), (true, FIXED_HALF_ARC)] {
-            sector(
-                Sector::Traverse { slot, fixed },
-                fan(half_arc, 134., 0.15),
-                Color::srgb(0.14, 0.89, 0.65),
-            );
+impl Fans {
+    #[cfg(test)]
+    pub fn laid(&self) -> usize {
+        self.count as usize
+    }
+    /// A fan of `reach` metres. Its dead water by the tubes and its rim are those of
+    /// the stock fan, `scale` times over.
+    fn push(&mut self, at: Vec2, bearing: f32, half_arc: f32, (reach, scale): (f32, f32), look: (Color, f32)) {
+        let i = self.count as usize;
+        if i >= FANS {
+            return;
         }
+        let (color, opacity) = look;
+        self.fans[3 * i] = Vec4::new(at.x, at.y, bearing, half_arc);
+        self.fans[3 * i + 1] = Vec4::new(3.5 * scale, reach, 1.1 * scale, opacity);
+        self.fans[3 * i + 2] = color.to_linear().to_vec4();
+        self.count += 1;
     }
-    sector(
-        Sector::Spread { ready: true },
-        fan(SPREAD_HALF_ARC, TORPEDO_RANGE, 0.34),
-        Color::srgb(0.18, 1., 0.52),
-    );
-    sector(
-        Sector::Spread { ready: false },
-        fan(SPREAD_HALF_ARC, TORPEDO_RANGE, 0.11),
-        Color::srgb(0.92, 0.64, 0.22),
-    );
-    sector(
-        Sector::Suggested,
-        fan(0.72_f32.to_radians(), TORPEDO_RANGE, 0.42),
-        Color::srgb(0.91, 0.97, 0.98),
-    );
 }
+
+const TRAVERSE: (Color, f32) = (Color::srgb(0.14, 0.89, 0.65), 0.15);
+const TRAVERSE_REACH: f32 = 134.;
+const SPREAD_READY: (Color, f32) = (Color::srgb(0.18, 1., 0.52), 0.34);
+const SPREAD_LOADING: (Color, f32) = (Color::srgb(0.92, 0.64, 0.22), 0.11);
+const SUGGESTED: (Color, f32) = (Color::srgb(0.91, 0.97, 0.98), 0.42);
+const SUGGESTED_HALF_ARC: f32 = 0.72 * std::f32::consts::PI / 180.;
 
 /// Where she will be when a round fired now at `speed` gets there, holding her course
 /// and speed: the flight is worked out again to the point she will have reached.
@@ -109,70 +72,60 @@ fn lead_point(target: &Raider, player: Vec2, speed: f32) -> Vec3 {
     at.extend(target.class.profile().deck * 0.7).xzy()
 }
 
+/// Lay out the fans of the tubes for the sea to paint while she lays her torpedoes.
 pub fn place_sectors(
     run: Res<Campaign>,
     helm: Res<PlayerHelm>,
     battle: Res<Encounter>,
     guns: Res<Guns>,
     view: Res<ShipView>,
-    sea: Res<crate::seascape::Sea>,
-    mut sectors: Query<(&Sector, &mut Transform, &mut Visibility)>,
+    mut sea: ResMut<crate::seascape::Sea>,
 ) {
     use shipvivor_shipyard::TubeAim;
-    // Every sector her tubes cover, where it opens and which way it faces.
-    let mut arcs: [Vec<(Vec2, f32)>; 2] = [vec![], vec![]];
-    for (i, set) in battle.tube_sets().iter().enumerate() {
-        let fixed = set.mount.aim != TubeAim::Beam;
-        for centre in set.centres(helm.heading) {
-            let at = battle.tube_origin(i, helm.position, helm.heading, centre);
-            arcs[usize::from(fixed)].push((at, centre));
-        }
-    }
-    for (kind, mut pose, mut vis) in &mut sectors {
-        *vis = Visibility::Hidden;
-        if run.screen() != Screen::Sailing || !guns.torpedo_mode {
-            continue;
-        }
-        let (at, bearing, layer) = match kind {
-            Sector::Traverse { slot, fixed } => {
-                let Some(&(at, centre)) = arcs[usize::from(*fixed)].get(*slot) else {
-                    continue;
-                };
-                (at, centre, 0.)
-            }
-            Sector::Spread { ready } => {
-                let Some(set) = battle.tubes_for_aim(helm.heading, view.bearing) else {
-                    continue;
-                };
-                if battle.tube_sets()[set].loaded() != *ready {
+    let mut fans = Fans::default();
+    if run.screen() == Screen::Sailing && guns.torpedo_mode {
+        // Every sector her tubes cover, where it opens and which way it faces: the
+        // sets amidships first, then the fixed ones.
+        for fixed in [false, true] {
+            let half_arc = if fixed { FIXED_HALF_ARC } else { RACK_HALF_ARC };
+            let mut slots = 0;
+            for (i, set) in battle.tube_sets().iter().enumerate() {
+                if (set.mount.aim != TubeAim::Beam) != fixed {
                     continue;
                 }
-                (
-                    battle.tube_origin(set, helm.position, helm.heading, view.bearing),
-                    view.bearing,
-                    0.10,
-                )
-            }
-            Sector::Suggested => {
-                let Some(r) = view.target(&battle) else {
-                    continue;
-                };
-                let mark = lead_point(r, helm.position, TORPEDO_SPEED).xz();
-                if mark.distance(helm.position) > TORPEDO_RANGE {
-                    continue;
+                for centre in set.centres(helm.heading) {
+                    if slots < TRAVERSE_SLOTS {
+                        let at = battle.tube_origin(i, helm.position, helm.heading, centre);
+                        fans.push(at, centre, half_arc, (TRAVERSE_REACH, 1.), TRAVERSE);
+                    }
+                    slots += 1;
                 }
-                let bearing = heading(mark - helm.position);
-                let Some(set) = battle.tubes_for_aim(helm.heading, bearing) else {
-                    continue;
-                };
+            }
+        }
+        // The spread's fans are stretched from the stock run to hers.
+        let range = battle.torpedo_range();
+        let reach = (range, range / TORPEDO_RANGE);
+        if let Some(set) = battle.tubes_for_aim(helm.heading, view.bearing) {
+            let look = if battle.tube_sets()[set].loaded() {
+                SPREAD_READY
+            } else {
+                SPREAD_LOADING
+            };
+            let at = battle.tube_origin(set, helm.position, helm.heading, view.bearing);
+            fans.push(at, view.bearing, SPREAD_HALF_ARC, reach, look);
+        }
+        if let Some(r) = view.target(&battle) {
+            let mark = lead_point(r, helm.position, TORPEDO_SPEED).xz();
+            let bearing = heading(mark - helm.position);
+            if mark.distance(helm.position) <= range
+                && let Some(set) = battle.tubes_for_aim(helm.heading, bearing)
+            {
                 let at = battle.tube_origin(set, helm.position, helm.heading, bearing);
-                (at, heading(mark - at), 0.2)
+                fans.push(at, heading(mark - at), SUGGESTED_HALF_ARC, reach, SUGGESTED);
             }
-        };
-        *pose = Transform::from_xyz(at.x, sea.height(at) + 1.1 + layer, at.y)
-            .with_rotation(Quat::from_rotation_y(-bearing));
-        *vis = Visibility::Visible;
+        }
     }
+    sea.fans = fans;
 }
 
 #[derive(Component)]
@@ -371,7 +324,8 @@ pub fn update_marks(
                     run.fittings.round().speed()
                 };
                 let point = lead_point(r, helm.position, speed);
-                if guns.torpedo_mode && point.xz().distance(helm.position) > TORPEDO_RANGE {
+                if guns.torpedo_mode && point.xz().distance(helm.position) > battle.torpedo_range()
+                {
                     continue;
                 }
                 let (lead, off) = view.project_mark(helm.position, point, size);

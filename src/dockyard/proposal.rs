@@ -170,7 +170,14 @@ fn stat_art(label: &str, card: Card, art: &Insignia) -> Option<Handle<Image>> {
         card,
         Card::MoreAntiAir | Card::HeavyAntiAir | Card::QuickAntiAir
     );
+    let torpedo = shipvivor_campaign::TORPEDO_FITTINGS.contains(&card);
     Some(match label {
+        "Reload" if torpedo => art.tubes.clone(),
+        "Run" => art.fitting(Card::LongRunningTorpedoes),
+        "Crews held" | "Close in" | "Far out" => art.fitting(Card::SuppressingFire),
+        "Scatter far out" | "Beyond" => art.fitting(Card::LongBaseRangefinders),
+        "Plunges beyond" | "Extra damage" | "Extra pierce" => art.fitting(Card::PlungingFire),
+        "Turn" | "Seeker" | "Fans out across" | "Spread" => art.fitting(Card::GuidedTorpedoes),
         "Reload" if flak => art.fitting(Card::QuickAntiAir),
         "Damage" if flak => art.fitting(Card::HeavyAntiAir),
         "Guns" | "Reach" if flak => art.fitting(Card::MoreAntiAir),

@@ -179,16 +179,22 @@ struct Turret {
     capacity: u16,
 }
 
+/// One of her batteries along the deck edge, on one beam: rounds a second, the damage
+/// each does, its bore and its reach.
+#[derive(Clone, Copy, Debug, Default)]
+struct Side {
+    rate: f32,
+    damage: f32,
+    calibre: f32,
+    range: f32,
+}
+
 /// The ship as the estimate sees her.
 #[derive(Clone, Debug)]
 struct Her {
     turrets: Vec<Turret>,
-    /// Rounds a second from the secondaries on one beam, the damage each does, its bore
-    /// and their reach.
-    secondary_rate: f32,
-    secondary_damage: f32,
-    secondary_calibre: f32,
-    secondary_range: f32,
+    /// Her deck guns, then her secondary gunhouses.
+    secondaries: [Side; 2],
     /// Damage a second the AA battery's bursts do.
     anti_air: f32,
     /// Inches of side plate.
@@ -216,15 +222,28 @@ impl Her {
                 }
             })
             .collect();
-        let secondaries = fittings.secondaries();
-        let per_side = secondaries.per_side.min(design.wing_room()) as f32;
+        let houses = fittings.gunhouses();
+        let room = design.gunhouse_room();
+        let gunhouses = houses.per_side.min(room);
+        let deck = fittings.secondaries();
+        let per_side = deck.per_side.min(design.deck_gun_room(gunhouses)) as f32;
         let aa = fittings.anti_air();
         Self {
             turrets,
-            secondary_rate: per_side * secondaries.barrels as f32 / secondaries.reload,
-            secondary_damage: f32::from(secondaries.damage),
-            secondary_calibre: secondaries.bore(),
-            secondary_range: secondaries.range,
+            secondaries: [
+                Side {
+                    rate: per_side * deck.barrels as f32 / deck.reload,
+                    damage: f32::from(deck.damage),
+                    calibre: deck.bore,
+                    range: deck.range,
+                },
+                Side {
+                    rate: gunhouses as f32 * houses.barrels as f32 / houses.reload,
+                    damage: f32::from(houses.damage),
+                    calibre: f32::from(houses.bore),
+                    range: houses.range,
+                },
+            ],
             anti_air: aa.mounts as f32 * f32::from(aa.damage) / aa.reload,
             thickness: fittings.protection(Protection::BREAKWATER).thickness,
             hull: ship.hull(),
@@ -243,15 +262,20 @@ impl Her {
             .sum();
         // The light hulls close in to circle her, inside her secondaries' reach; the
         // heavy ones stand off beyond it.
-        let close = if class == TorpedoBoat || class.profile().stand_off() <= self.secondary_range {
-            1.
-        } else {
-            0.2
-        };
-        let flight = RANGE.min(self.secondary_range) / SECONDARY_SPEED;
-        let round = Round::plain(self.secondary_calibre, flight);
-        let secondary =
-            close * self.secondary_rate / hits_to_sink(class, round, self.secondary_damage);
+        let secondary: f32 = (self.secondaries.iter())
+            .filter(|side| side.rate > 0.)
+            .map(|side| {
+                let stand_off = class.profile().stand_off();
+                let close = if class == TorpedoBoat || stand_off <= side.range {
+                    1.
+                } else {
+                    0.2
+                };
+                let flight = RANGE.min(side.range) / SECONDARY_SPEED;
+                let round = Round::plain(side.calibre, flight);
+                close * side.rate / hits_to_sink(class, round, side.damage)
+            })
+            .sum();
         (main + secondary) * aim(class) * DUTY
     }
 
@@ -641,7 +665,7 @@ impl Need {
             Self::AntiAir => fitted(Card::MoreAntiAir),
             // Another gun a side while her deck has room, or else a second barrel on each.
             Self::Secondaries => {
-                let room = run.fittings.secondaries().per_side < run.ship.design().wing_room();
+                let room = run.fittings.secondaries().per_side < run.wing_room();
                 if room && run.fittings.can_fit(Card::MoreSecondaries) {
                     fitted(Card::MoreSecondaries)
                 } else {
@@ -769,7 +793,7 @@ mod tests {
     #[test]
     fn small_guns_sink_light_hulls_sooner_and_big_guns_battleships() {
         let alone = |her: Her| Her {
-            secondary_rate: 0.,
+            secondaries: [Side::default(); 2],
             ..her
         };
         let small = alone(armed(&[(0, 1.)]));

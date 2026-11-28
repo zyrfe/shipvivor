@@ -9,7 +9,7 @@
 use glam::{Vec2, Vec3, Vec3Swizzles};
 use shipvivor_campaign::{Card, Run};
 use shipvivor_compass::{direction, heading};
-use shipvivor_encounter::{Aim, Battle, EnemyClass, Raider, TORPEDO_RANGE, TORPEDO_SPEED};
+use shipvivor_encounter::{Aim, Battle, EnemyClass, Raider, TORPEDO_SPEED};
 use shipvivor_navigation::Helm;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
@@ -353,7 +353,8 @@ impl Bot {
         self.torpedo_clock -= dt;
         let mut torpedo = None;
         if self.torpedo_clock <= 0.
-            && let Some(r) = quarry.filter(|r| r.body.pos.distance(at) < TORPEDO_RANGE * 0.85)
+            && let Some(r) =
+                quarry.filter(|r| r.body.pos.distance(at) < battle.torpedo_range() * 0.85)
         {
             let bearing = heading(lead(r, at, TORPEDO_SPEED).xz() - at);
             let loaded = battle

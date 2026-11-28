@@ -48,7 +48,7 @@ const WEIGHTS: [Weight; 4] = [
     Weight::Heavy,
     Weight::UltraHeavy,
 ];
-const CARDS: [Card; 24] = [
+const CARDS: [Card; 34] = [
     Card::Loader,
     Card::Shells,
     Card::Turbines,
@@ -73,6 +73,16 @@ const CARDS: [Card; 24] = [
     Card::MorePlanes,
     Card::MoreBombs,
     Card::SecondaryTurrets,
+    Card::GuidedTorpedoes,
+    Card::QuickTubes,
+    Card::LongRunningTorpedoes,
+    Card::Overdrive,
+    Card::BattleshipPlate,
+    Card::SuperchargedShells,
+    Card::AutoLoaders,
+    Card::SuppressingFire,
+    Card::LongBaseRangefinders,
+    Card::PlungingFire,
 ];
 
 /// Every tool, with what it takes, for `tools/list`.
@@ -867,7 +877,9 @@ mod tests {
             | MoreSecondaries | HeavySecondaries | QuickSecondaries | SecondaryRange
             | TwinSecondaries | TrainingGear | Armor | Hardening | MoreAntiAir | HeavyAntiAir
             | QuickAntiAir | Pumps | MoreLaunchers | MoreMissiles | MorePlanes | MoreBombs
-            | SecondaryTurrets => {}
+            | SecondaryTurrets | GuidedTorpedoes | QuickTubes | LongRunningTorpedoes
+            | Overdrive | BattleshipPlate | SuperchargedShells | AutoLoaders | SuppressingFire
+            | LongBaseRangefinders | PlungingFire => {}
         }
     }
 }

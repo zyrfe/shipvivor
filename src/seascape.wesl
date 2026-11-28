@@ -32,6 +32,16 @@ struct Wakes {
     count: u32,
 }
 
+// The tubes' launch sectors. `fire_control::Fans` holds 18.
+const FANS: u32 = 18u;
+struct Fans {
+    // Three for each fan: where it opens, east and south, its bearing and half-arc;
+    // then where it starts, its reach, the width of its rim and the opacity inside;
+    // then its colour.
+    fans: array<vec4f, 54>,
+    count: u32,
+}
+
 struct Waters {
     // Each swell train: its wave vector, amplitude and phase.
     trains: array<vec4f, 8>,
@@ -47,6 +57,7 @@ struct Waters {
     chart: vec4f,
     sky: u32,
     wakes: Wakes,
+    fans: Fans,
 }
 @group(3) @binding(0) var<uniform> waters: Waters;
 @group(3) @binding(1) var wake_texture: texture_2d<f32>;
@@ -411,6 +422,51 @@ fn mirrored_scene(at: vec3f, toward: vec3f, tip: f32) -> vec4f {
 }
 }
 
+// How much of a pixel a band of half-width `half` about `s` = 0 covers, where `px` is
+// how far `s` runs across the pixel. A band is never drawn finer than a pixel and a half.
+fn band(s: f32, half: f32, px: f32) -> f32 {
+    let wide = max(half, 0.75 * px);
+    return (1. - smoothstep(wide, wide + px, abs(s))) * min(1., half / wide + 0.5);
+}
+
+// The launch sectors painted over the water at `q`, in order, onto `sea`. They are part
+// of the water, so the swell never covers them and a hull standing over them hides them.
+// `dx` and `dy` are how far the pixel spans on the water.
+fn paint_fans(sea: vec3f, q: vec2f, dx: vec2f, dy: vec2f) -> vec3f {
+    var color = sea;
+    for (var i = 0u; i < min(waters.fans.count, FANS); i++) {
+        let place = waters.fans.fans[3u * i];
+        let span = waters.fans.fans[3u * i + 1u];
+        let ink = waters.fans.fans[3u * i + 2u].rgb;
+        let off = q - place.xy;
+        let dist = length(off);
+        if dist > span.y + 30. || dist < 0.01 { continue; }
+        let out = off / dist;
+        // Bearings run clockwise from north, which is toward negative south.
+        var rel = atan2(off.x, -off.y) - place.z;
+        rel -= TAU * round(rel / TAU);
+        let half = place.w;
+        // Metres to the nearer edge of the arc, positive inside it.
+        let lateral = dist * sin(clamp(half - abs(rel), -1.5, 1.5));
+        let edge = place.z + sign(rel) * half;
+        let across = vec2f(cos(edge), sin(edge));
+        let px_lateral = abs(dot(across, dx)) + abs(dot(across, dy)) + 1e-4;
+        let px_radial = abs(dot(out, dx)) + abs(dot(out, dy)) + 1e-4;
+        let inside = smoothstep(-0.5 * px_lateral, 0.5 * px_lateral, lateral);
+        let rim_at = span.y - 0.5 * span.z;
+        let within = smoothstep(span.x - px_radial, span.x, dist)
+            * (1. - smoothstep(rim_at - px_radial, rim_at, dist));
+        let body = inside * within * span.w;
+        let rim = inside * band(dist - rim_at, 0.5 * span.z, px_radial) * 0.9;
+        // A fine line on each bearing, from just clear of the tubes out to the rim.
+        let reach = smoothstep(span.x, span.x + px_radial, dist)
+            * (1. - smoothstep(span.y, span.y + px_radial, dist));
+        let lines = band(lateral, 0.22 * span.z / 1.1 + 0.08, px_lateral) * reach * 0.92;
+        color = mix(color, ink, max(body, max(rim, lines)));
+    }
+    return color;
+}
+
 @fragment
 fn fragment(in: SeaVertex) -> @location(0) vec4f {
     let toward = in.world - view.world_position;
@@ -423,6 +479,8 @@ fn fragment(in: SeaVertex) -> @location(0) vec4f {
     let p = in.rest;
     // Filter what a pixel cannot resolve instead of letting it alias toward the horizon.
     let footprint = max(length(dpdx(p)), length(dpdy(p)));
+    let fan_dx = dpdx(in.world.xz);
+    let fan_dy = dpdy(in.world.xz);
     let near = 1. - smoothstep(0.75, 2.5, footprint);
 
     // What ships have left on the water: foam, and the slick where their wash has smoothed the ripples away.
@@ -554,6 +612,8 @@ fn fragment(in: SeaVertex) -> @location(0) vec4f {
         * (mix(0.52, 0.50, overcast) + 0.46 * max(dot(n, SUN), 0.) * (1. - overcast) * lit)
         * (1. + 0.9 * fresnel * theirs);
     sea = mix(sea, white, cover * 0.94);
+
+    sea = paint_fans(sea, in.world.xz, fan_dx, fan_dy);
 
     let haze = 0.88 * (1. - exp(-pow(dist / 2680., 1.6)));
     return vec4f(mix(sea, sky_color(normalize(vec3f(d.x, 0.004, d.z)), 0.), haze), 1.);

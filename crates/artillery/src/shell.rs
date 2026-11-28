@@ -25,9 +25,11 @@ impl MainShell {
     pub fn calibre_inches(self) -> f32 {
         4. + f32::from(self.bore)
     }
+    /// Metres a second at the muzzle. The first rank of velocity adds a quarter to the
+    /// stock round's, and the ranks after less each, toward twice the stock speed.
     pub fn speed(self) -> f32 {
         let rank = f32::from(self.velocity);
-        360. + 220. * rank / (3. + rank)
+        360. + 360. * rank / (3. + rank)
     }
     /// Metres the round carries before it comes down. A faster round carries farther,
     /// in step with its muzzle speed.

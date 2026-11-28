@@ -1,5 +1,7 @@
-//! A career: one captain carried from run to run with the tiers their skills have
-//! reached, and the points runs have paid to raise them. The captain's skills work
+//! Careers: each captain carried from run to run with the tiers their skills have
+//! reached, and the points runs have paid to raise them. Every captain who has sailed
+//! keeps their own career in the [`Roster`]; taking another captain to sea loses
+//! nothing. The captain's skills work
 //! ship-wide on every run they command, through the [`CaptainPerks`] the run carries.
 use crate::crew::{Captain, CareerRules, Skill, Wardroom};
 use crate::{Phase, Run, StartingHull};
@@ -213,8 +215,8 @@ impl Career {
     }
 
     /// The career as the save file keeps it.
-    pub fn code(&self) -> String {
-        let kept = Kept {
+    fn kept(&self) -> Kept {
+        Kept {
             captain: self.captain.clone(),
             name: self.name.clone(),
             points: self.points,
@@ -232,18 +234,13 @@ impl Career {
                 .iter()
                 .map(|&(skill, tier)| (skill.id().to_string(), tier))
                 .collect(),
-        };
-        toml::to_string(&kept).unwrap_or_default()
+        }
     }
 
-    /// A career from its save file, checked against `wardroom`: a captain or a skill the
-    /// crew data no longer has is refused, and a tier past a skill's last is brought
-    /// down to it.
-    ///
-    /// # Errors
-    /// Why the file can't be read as a career.
-    pub fn parse(text: &str, wardroom: &Wardroom) -> Result<Self, String> {
-        let kept: Kept = toml::from_str(text).map_err(|err| err.to_string())?;
+    /// A career as the save file kept it, checked against `wardroom`: a captain or a
+    /// skill the crew data no longer has is refused, and a tier past a skill's last is
+    /// brought down to it.
+    fn from_kept(kept: Kept, wardroom: &Wardroom) -> Result<Self, String> {
         if wardroom.captain(&kept.captain).is_none() {
             return Err(format!(
                 "no captain called {} in the crew data",
@@ -281,6 +278,100 @@ impl Career {
             stars: kept.stars,
         })
     }
+}
+
+/// Every captain's career, and who sailed last.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Roster {
+    careers: Vec<Career>,
+    /// The captain who last took a run to sea, by id.
+    pub last: Option<String>,
+}
+
+impl Roster {
+    pub fn careers(&self) -> &[Career] {
+        &self.careers
+    }
+
+    /// The career of the captain with this id, if they have sailed.
+    pub fn get(&self, captain: &str) -> Option<&Career> {
+        self.careers.iter().find(|c| c.captain == captain)
+    }
+
+    pub fn get_mut(&mut self, captain: &str) -> Option<&mut Career> {
+        self.careers.iter_mut().find(|c| c.captain == captain)
+    }
+
+    /// The career of `captain`, begun now if they have none yet.
+    pub fn enlist(&mut self, captain: &Captain) -> &mut Career {
+        let at = match self.careers.iter().position(|c| c.captain == captain.id) {
+            Some(at) => at,
+            None => {
+                self.careers.push(Career::new(captain));
+                self.careers.len() - 1
+            }
+        };
+        &mut self.careers[at]
+    }
+
+    /// The career of the captain who sailed last.
+    pub fn last_career(&self) -> Option<&Career> {
+        self.get(self.last.as_deref()?)
+    }
+
+    /// The roster as the save file keeps it.
+    pub fn code(&self) -> String {
+        let kept = KeptRoster {
+            last: self.last.clone(),
+            career: self.careers.iter().map(Career::kept).collect(),
+        };
+        toml::to_string(&kept).unwrap_or_default()
+    }
+
+    /// The roster from its save file, checked against `wardroom`. A career whose captain
+    /// the crew data no longer has is left out, and named among the problems returned
+    /// beside the roster. A file from before every captain kept a career of their own,
+    /// holding one career, is read as a roster of one.
+    ///
+    /// # Errors
+    /// Why the file can't be read at all.
+    pub fn parse(text: &str, wardroom: &Wardroom) -> Result<(Self, Vec<String>), String> {
+        let kept: KeptRoster = match toml::from_str(text) {
+            Ok(roster) => roster,
+            Err(err) => match toml::from_str::<Kept>(text) {
+                Ok(one) => KeptRoster {
+                    last: Some(one.captain.clone()),
+                    career: vec![one],
+                },
+                Err(_) => return Err(err.to_string()),
+            },
+        };
+        let mut roster = Self {
+            careers: Vec::new(),
+            last: kept.last,
+        };
+        let mut problems = Vec::new();
+        for one in kept.career {
+            let captain = one.captain.clone();
+            match Career::from_kept(one, wardroom) {
+                Ok(career) if roster.get(&career.captain).is_none() => roster.careers.push(career),
+                Ok(_) => problems.push(format!("{captain}'s career is kept twice")),
+                Err(why) => problems.push(format!("{captain}'s career left out: {why}")),
+            }
+        }
+        if roster.last_career().is_none() {
+            roster.last = None;
+        }
+        Ok((roster, problems))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeptRoster {
+    last: Option<String>,
+    #[serde(default)]
+    career: Vec<Kept>,
 }
 
 /// A career as it is written to its file.
@@ -332,12 +423,41 @@ mod tests {
         assert_eq!(career.next_cost(Skill::Lucky, &wardroom), None);
         assert!(!career.raise(Skill::Lucky, &wardroom));
 
-        let kept = Career::parse(&career.code(), &wardroom).unwrap();
-        assert_eq!(kept, career);
-        // A file naming a captain the data has dropped is refused, not guessed at.
-        let gone = career.code().replace("ashby", "nobody");
-        assert!(Career::parse(&gone, &wardroom).is_err());
-        assert!(Career::parse("captain = 3", &wardroom).is_err());
+        let roster = Roster {
+            careers: vec![career.clone()],
+            last: Some("ashby".into()),
+        };
+        let (kept, problems) = Roster::parse(&roster.code(), &wardroom).unwrap();
+        assert_eq!((kept, problems), (roster.clone(), vec![]));
+        // A career naming a captain the data has dropped is left out, not guessed at.
+        let gone = roster.code().replace("ashby", "nobody");
+        let (kept, problems) = Roster::parse(&gone, &wardroom).unwrap();
+        assert!(kept.careers().is_empty() && kept.last.is_none());
+        assert_eq!(problems.len(), 1);
+        assert!(Roster::parse("last = 3", &wardroom).is_err());
+    }
+
+    #[test]
+    fn every_captain_keeps_their_own_career_and_an_old_save_is_a_roster_of_one() {
+        let wardroom = Wardroom::stock();
+        let mut roster = Roster::default();
+        roster.enlist(wardroom.captain("ashby").unwrap()).points = 9;
+        roster.enlist(wardroom.captain("thorne").unwrap()).points = 4;
+        // Coming back to a captain finds their career as they left it.
+        assert_eq!(roster.enlist(wardroom.captain("ashby").unwrap()).points, 9);
+        assert_eq!(roster.careers().len(), 2);
+        roster.last = Some("thorne".into());
+        let (kept, _) = Roster::parse(&roster.code(), &wardroom).unwrap();
+        assert_eq!(kept.last_career().map(|c| c.points), Some(4));
+        assert_eq!(kept.get("ashby").map(|c| c.points), Some(9));
+
+        // The save from before rosters: one captain's career at the top of the file.
+        let mut one = ashby(&wardroom);
+        one.points = 3;
+        let old = toml::to_string(&one.kept()).unwrap();
+        let (kept, problems) = Roster::parse(&old, &wardroom).unwrap();
+        assert!(problems.is_empty());
+        assert_eq!(kept.last_career(), Some(&one));
     }
 
     #[test]
@@ -372,7 +492,8 @@ mod tests {
             (12, 1, 1, 7)
         );
         // The file keeps what the last run paid, seed and all.
-        assert_eq!(Career::parse(&career.code(), &wardroom).unwrap(), career);
+        let kept = Career::from_kept(career.kept(), &wardroom).unwrap();
+        assert_eq!(kept, career);
         // The next run is a new one.
         run.seed = 3;
         assert_eq!(career.settle(&run, &wardroom.career), Some(12));

@@ -791,7 +791,8 @@ fn proposal_box(run: &Campaign, job: DockJob) -> Option<(Vec3, Vec3)> {
             | Card::QuickSecondaries
             | Card::HeavySecondaries,
         ) if fits => {
-            let stations = design.wing_stations();
+            let houses = run.display_fittings().gunhouses().per_side;
+            let stations = design.wing_layout(houses).deck;
             let index = if job == DockJob::Fitting(Card::MoreSecondaries) {
                 2 * run
                     .display_fittings()
@@ -806,6 +807,17 @@ fn proposal_box(run: &Campaign, job: DockJob) -> Option<(Vec3, Vec3)> {
             (
                 coords(0., 2.05, -fore),
                 coords(x.abs() * 2. + 1.4, 1.45, 3.),
+            )
+        }
+        // The pair of gunhouses the card adds.
+        DockJob::Fitting(Card::SecondaryTurrets) if fits => {
+            let houses = run.display_fittings().gunhouses().per_side;
+            let stations = design.wing_layout(houses + 1).gunhouses;
+            let station = stations.get(2 * houses).or(stations.last())?;
+            let (x, fore) = (station.abeam, station.fore);
+            (
+                coords(0., 2.4, -fore),
+                coords(x.abs() * 2. + 2.4, 2.2, 4.),
             )
         }
         DockJob::Fitting(Card::MoreAntiAir | Card::HeavyAntiAir | Card::QuickAntiAir) if fits => {

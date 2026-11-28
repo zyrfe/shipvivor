@@ -1685,6 +1685,12 @@ fn describe_fittings(run: &Campaign) -> String {
         (f.missiles, "more missiles"),
         (f.planes, "more planes"),
         (f.bombs, "more bombs"),
+        (f.guidance, "guided torpedoes"),
+        (f.quick_tubes, "quick tubes"),
+        (f.long_run, "long-running torpedoes"),
+        (f.suppression, "suppressing fire"),
+        (f.rangefinders, "long-base rangefinders"),
+        (f.plunging, "plunging fire"),
     ] {
         if rank > 0 {
             parts.push(format!("{name} {rank}"));

@@ -44,7 +44,7 @@ const LOUDEST: f32 = 3.5;
 const LOUDENS: f32 = 0.5;
 /// Strength of each tone against the first, in decibels: the mean of three recordings
 /// of big ships' horns, each over several seconds of steady blast.
-const TONES_DB: [f32; 16] = [
+pub(crate) const TONES_DB: [f32; 16] = [
     0., 3., 0., -6., -3., -9., -10., -18., -14., -18., -18., -20., -21., -19., -23., -28.,
 ];
 /// Seconds for the pressure behind the diaphragm to come up when the valve opens, and

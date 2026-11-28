@@ -1,14 +1,14 @@
 //! The title's career page: one screen with a captain and a hull, each picked and
 //! previewed independently and in any order, the captain in command's skills raised in
 //! place with career points, and a button that locks the pair in and launches the run.
-//! Nothing is locked until that button. Launching with a captain other than the one in
-//! command retires the old career; the page says so in place, and the button says so.
+//! Nothing is locked until that button. Every captain keeps a career of their own, so
+//! taking another to sea loses nothing.
 use super::*;
 use crate::career::{CareerBook, Launch};
 use crate::crew_book::CrewBook;
 use crate::state::PlayerHelm;
 use shipvivor_campaign::crew::{Skill, Wardroom};
-use shipvivor_campaign::{Career, CareerStart, StartingHull};
+use shipvivor_campaign::{CareerStart, StartingHull};
 use shipvivor_encounter::MainShell;
 use shipvivor_shipyard::TubeAim;
 
@@ -64,14 +64,13 @@ pub fn choose(
             }
         }
         (Screen::Career, Action::Raise(at)) => {
-            let picked = wardroom.captains.get(book.captain).map(|c| c.id.clone());
-            let Some(career) = book.career.as_mut() else {
+            // The previewed captain spends their own career's points.
+            let Some(picked) = wardroom.captains.get(book.captain).map(|c| c.id.clone()) else {
                 return None;
             };
-            // Only the captain in command, previewed, has points to spend.
-            if picked.as_deref() != Some(career.captain.as_str()) {
+            let Some(career) = book.roster.get_mut(&picked) else {
                 return None;
-            }
+            };
             let Some(&(skill, _)) = career.skills.get(at) else {
                 return None;
             };
@@ -83,18 +82,14 @@ pub fn choose(
             let Some(captain) = wardroom.captains.get(book.captain) else {
                 return None;
             };
-            // A captain not in command starts a career of their own, retiring any other.
-            if book.career.as_ref().is_none_or(|c| c.captain != captain.id) {
-                book.career = Some(Career::new(captain));
-                book.last_banked = None;
-                book.changed();
-            }
-            let Some(career) = &book.career else {
-                return None;
-            };
+            // A captain who has not sailed yet begins their career; one who has takes up
+            // their own where they left it.
+            let aboard = book.roster.enlist(captain).aboard(wardroom);
+            book.roster.last = Some(captain.id.clone());
+            book.changed();
             run.career = Some(CareerStart {
                 hull: book.hull,
-                captain: career.aboard(wardroom),
+                captain: aboard,
             });
             // The game opens on this ship next time, under this captain.
             crate::career::keep_ship(book.hull);
@@ -191,7 +186,7 @@ pub fn draw(
         ))
         .id();
     hull_column(&mut cmd, hulls, face, &book);
-    launch_bar(&mut cmd, root, face, &book, wardroom);
+    launch_bar(&mut cmd, root, face);
 }
 
 fn heading(cmd: &mut Commands, panel: Entity, face: &Handle<Font>, words: &str) {
@@ -325,10 +320,7 @@ fn captain_column(
     let Some(picked) = wardroom.captains.get(book.captain) else {
         return;
     };
-    let in_command = book
-        .career
-        .as_ref()
-        .filter(|career| career.captain == picked.id);
+    let in_command = book.roster.get(&picked.id);
     let preview = card(cmd, panel);
 
     // Portrait and name.
@@ -380,9 +372,11 @@ fn captain_column(
     };
     text(cmd, names, standing, 12., pale());
     if let Some(career) = in_command {
-        let banked = book
-            .last_banked
-            .map_or(String::new(), |points| format!("  (+{points} last run)"));
+        let banked = (book.last_banked.as_ref())
+            .filter(|(id, _)| *id == picked.id)
+            .map_or(String::new(), |(_, points)| {
+                format!("  (+{points} last run)")
+            });
         text(
             cmd,
             names,
@@ -551,15 +545,8 @@ fn hull_column(cmd: &mut Commands, panel: Entity, face: &Handle<Font>, book: &Ca
     }
 }
 
-/// The lock-in button at the foot of the page, centred, with ESC beside it, and a word of
-/// warning over it when launching would retire the captain in command.
-fn launch_bar(
-    cmd: &mut Commands,
-    root: Entity,
-    face: &Handle<Font>,
-    book: &CareerBook,
-    wardroom: &Wardroom,
-) {
+/// The lock-in button at the foot of the page, centred, with ESC beside it.
+fn launch_bar(cmd: &mut Commands, root: Entity, face: &Handle<Font>) {
     let bar = cmd
         .spawn((
             Node {
@@ -573,46 +560,7 @@ fn launch_bar(
             ChildOf(root),
         ))
         .id();
-    let rank = wardroom
-        .ladder
-        .last()
-        .map_or("Capt.", |rank| rank.short.as_str());
-    let picked = wardroom.captains.get(book.captain);
-    let retiring = book
-        .career
-        .as_ref()
-        .filter(|career| picked.is_some_and(|p| p.id != career.captain));
-    let label = match retiring {
-        Some(career) => {
-            let warning = cmd
-                .spawn((
-                    Node {
-                        padding: UiRect::axes(px(12), px(6)),
-                        border: UiRect::all(px(1)),
-                        ..default()
-                    },
-                    BorderColor::all(Color::srgb_u8(255, 124, 102)),
-                    BackgroundColor(Color::srgba_u8(52, 20, 18, 228)),
-                    ChildOf(bar),
-                ))
-                .id();
-            text(
-                cmd,
-                warning,
-                format!(
-                    "Launching retires {rank} {}: their tiers and {} career points are lost.",
-                    career.name, career.points
-                ),
-                13.,
-                ink(),
-            );
-            format!(
-                "Retire {} and launch",
-                career.name.rsplit(' ').next().unwrap_or("")
-            )
-        }
-        None => "Lock in and launch".to_string(),
-    };
+    let label = "Lock in and launch".to_string();
     let row = cmd
         .spawn((
             Node {
@@ -692,13 +640,17 @@ mod tests {
         press(&mut app, Action::Vessel(StartingHull::HeavyDestroyer));
         press(&mut app, Action::PickCaptain(2));
         press(&mut app, Action::PickCaptain(1));
-        assert!(book(&mut app).career.is_none());
+        assert!(book(&mut app).roster.careers().is_empty());
         assert!(app.world().resource::<Campaign>().career.is_none());
 
         // The launch locks both in, sails, and hands over to the chart of anchorages.
         assert_eq!(press(&mut app, Action::Launch), None);
-        let career = book(&mut app).career.clone().unwrap();
-        assert_eq!(career.captain, wardroom.captains[1].id);
+        let roster = book(&mut app).roster.clone();
+        assert!(roster.get(&wardroom.captains[1].id).is_some());
+        assert_eq!(
+            roster.last.as_deref(),
+            Some(wardroom.captains[1].id.as_str())
+        );
         let start = app.world().resource::<Campaign>().career.clone().unwrap();
         assert_eq!(start.hull, StartingHull::HeavyDestroyer);
         assert_eq!(start.captain.id, wardroom.captains[1].id);
@@ -714,27 +666,32 @@ mod tests {
     }
 
     #[test]
-    fn the_captain_in_command_raises_skills_in_place_and_another_retires_them() {
+    fn each_captain_raises_their_own_skills_and_keeps_their_career_when_another_sails() {
         let wardroom = Wardroom::stock();
         let mut app = app();
-        let mut career = Career::new(&wardroom.captains[2]);
-        career.points = 6;
-        book(&mut app).career = Some(career);
+        let (thorne, marrack) = (&wardroom.captains[2], &wardroom.captains[0]);
+        book(&mut app).roster.enlist(thorne).points = 6;
+        book(&mut app).roster.enlist(marrack).points = 6;
+        book(&mut app).roster.last = Some(thorne.id.clone());
         press(&mut app, Action::Career);
-        // The page opens on the captain in command.
+        // The page opens on the captain who sailed last.
         assert_eq!(book(&mut app).captain, 2);
         press(&mut app, Action::Raise(0));
-        let raised = book(&mut app).career.clone().unwrap();
+        let raised = book(&mut app).roster.get(&thorne.id).cloned().unwrap();
         assert_eq!((raised.skills[0].1, raised.points), (2, 0));
-        // Another captain previewed has nothing to raise, and the career stands until
-        // the launch.
+        // Another captain spends their own points, and launching with them takes
+        // nothing from the first.
         press(&mut app, Action::PickCaptain(0));
         press(&mut app, Action::Raise(0));
-        assert_eq!(book(&mut app).career, Some(raised));
+        assert_eq!(book(&mut app).roster.get(&marrack.id).unwrap().points, 0);
         press(&mut app, Action::Launch);
+        let roster = book(&mut app).roster.clone();
+        assert_eq!(roster.get(&thorne.id), Some(&raised));
+        assert_eq!(roster.last.as_deref(), Some(marrack.id.as_str()));
+        let start = app.world().resource::<Campaign>().career.clone().unwrap();
         assert_eq!(
-            book(&mut app).career,
-            Some(Career::new(&wardroom.captains[0]))
+            start.captain.skills,
+            roster.get(&marrack.id).unwrap().skills
         );
     }
 }

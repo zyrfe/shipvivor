@@ -2,6 +2,7 @@ mod alert;
 mod battle_view;
 mod berth;
 mod blueprint;
+mod brass;
 mod camera;
 mod captain;
 mod cards;
@@ -52,7 +53,7 @@ use camera::ShipView;
 use passage::Passage;
 #[cfg(test)]
 use shipvivor_campaign::Objectives;
-use shipvivor_encounter::{Aim, Volley};
+use shipvivor_encounter::Volley;
 #[cfg(test)]
 use shipvivor_encounter::{Hull, MainShell, Orders};
 use state::{
@@ -104,9 +105,11 @@ impl Plugin for GamePlugin {
             .init_resource::<ShipView>()
             .init_resource::<seascape::Sea>()
             .init_resource::<sound::Soundboard>()
+            .init_resource::<sound::Chain>()
             .init_resource::<alert::BaseAlerts>()
             .init_resource::<flares::Flares>()
             .add_plugins(rewind::RewindPlugin)
+            .add_plugins(brass::BrassPlugin)
             .add_observer(seascape::embark)
             .add_observer(sound::hush)
             .add_observer(sound::play_notice)
@@ -154,7 +157,6 @@ impl Plugin for GamePlugin {
                         .run_if(|run: Res<Campaign>| run.mode == Mode::Title),
                     battle_view::setup.after(scene::setup),
                     damage_fx::setup,
-                    fire_control::setup,
                     insignia::setup,
                     minimap::setup,
                     threat_ring::setup,
@@ -232,7 +234,7 @@ impl Plugin for GamePlugin {
                         battle_view::fly_pennant,
                     )
                         .chain(),
-                    fire_control::place_sectors,
+                    fire_control::place_sectors.before(seascape::roll),
                     minimap::update,
                     (
                         threat_ring::update,
@@ -586,10 +588,18 @@ fn aim_guns(
         guns.mouse_captured = true;
     }
     let live = run.screen() == Screen::Sailing && window.focused;
-    // A ship with no tubes aboard has nothing to switch to.
+    // Holding T lays the tubes, and letting it go fires the spread. A ship with no
+    // tubes aboard has nothing to lay. The key is read as held rather than as let go,
+    // so a release between frames still fires.
     let tubes = !battle.tube_sets().is_empty();
-    if live && keys.just_pressed(KeyCode::KeyT) && (tubes || guns.torpedo_mode) {
-        guns.torpedo_mode = !guns.torpedo_mode;
+    if !live {
+        guns.torpedo_mode = false;
+        guns.launch_pending = false;
+    } else if guns.torpedo_mode && !keys.pressed(KeyCode::KeyT) {
+        guns.torpedo_mode = false;
+        guns.launch_pending = true;
+    } else if keys.just_pressed(KeyCode::KeyT) && tubes {
+        guns.torpedo_mode = true;
         guns.launch_pending = false;
     }
     // A digit picks out the turret with that number from the bow, and again lets it go.
@@ -627,13 +637,8 @@ fn aim_guns(
             }
         }
     }
-    if !live || !guns.torpedo_mode {
-        guns.launch_pending = false;
-    } else if mouse.just_pressed(MouseButton::Left) && !guns.mouse_captured {
-        guns.launch_pending = true;
-    }
     guns.firing = live && left && !guns.mouse_captured && !guns.torpedo_mode;
-    guns.nearest = live && keys.pressed(KeyCode::Space);
+    guns.nearest = live && keys.pressed(KeyCode::Space) && !guns.torpedo_mode;
     // A press fires one barrel and a quick second press the rest. Holding walks the battery.
     let pressed = (mouse.just_pressed(MouseButton::Left) && !guns.mouse_captured)
         || keys.just_pressed(KeyCode::Space);
@@ -658,6 +663,7 @@ fn advance_ship(
     mut run: ResMut<Campaign>,
     mut encounter: ResMut<Encounter>,
     sight: (ResMut<Guns>, ResMut<ShipView>),
+    mut chain: ResMut<sound::Chain>,
     mut commands: Commands,
 ) {
     let (mut guns, mut view) = sight;
@@ -675,11 +681,9 @@ fn advance_ship(
         course.set_changed();
     }
     if patrol {
-        let aim = if guns.torpedo_mode {
-            view.tracked_point(&encounter).map_or(Aim::Hold, Aim::Track)
-        } else {
-            view.main_aim(helm.position, &encounter, guns.firing, guns.nearest)
-        };
+        // The turrets keep training where she looks while the tubes are laid, so they
+        // are on her mark again the moment the spread is away.
+        let aim = view.main_aim(helm.position, &encounter, guns.firing, guns.nearest);
         let volley = guns.volley.take();
         encounter.direct(&guns.controls, view.scoped());
         // The trigger offers first the smallest gun that can hurt the ship she aims at.
@@ -691,11 +695,11 @@ fn advance_ship(
         let marked = marked.map(|r| r.body.id);
         encounter.mark(marked);
         let ev = shipvivor_sim::engage(&run, &mut encounter, &mut helm, dt, aim, volley);
+        chain.tally(&ev, &encounter);
         // The scoped sight rides with her contact through the tick.
         view.ride_zero(helm.position, &encounter);
         view.update_contact(helm.position, &encounter);
-        let torpedo =
-            (guns.torpedo_mode && std::mem::take(&mut guns.launch_pending)).then_some(view.bearing);
+        let torpedo = std::mem::take(&mut guns.launch_pending).then_some(view.bearing);
         run.hits += u32::from(ev.hits);
         run.sunk += u32::from(ev.sunk);
         run.watch.observe(dt, &ev);

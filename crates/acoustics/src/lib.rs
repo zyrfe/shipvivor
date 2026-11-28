@@ -162,9 +162,30 @@ pub enum Sound {
     /// The teleprinter's bell, a small gong struck once by its hammer. A message of
     /// high precedence rings it before it prints.
     PrinterBell,
+    /// A spent brass case from her secondaries landing on the deck: the thin brass rings
+    /// high like a small bell, bounces once or twice and rolls a little way.
+    CaseDrop,
+    /// A loose case knocked by another, or tumbling against the deck at a roll: a light
+    /// tink with little ring.
+    CaseKnock,
+    /// A spent case going over the side: a small plunk, and the bubble behind it.
+    CasePlunk,
+    /// Brass for a short chain of kills, two to five: the bridge call carried on up to
+    /// the octave. One kill alone has the bridge call itself, the [`Sound::Trumpet`].
+    Flourish,
+    /// Brass for a good run of kills, six to fourteen: a longer call in three parts, with
+    /// trombones, drums and a cymbal.
+    Rally,
+    /// Brass for fifteen kills and more in a chain: a march in three phrases, with a roll
+    /// of the drums up to a full chord.
+    Triumph,
+    /// A coaster's little reed horn under fire: a few soft quacks.
+    Quack,
+    /// A freighter's air horn under fire: short, deep honks.
+    Honk,
 }
 impl Sound {
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 58] = [
         Self::MainGun,
         Self::SecondaryGun,
         Self::RaiderGun,
@@ -215,6 +236,14 @@ impl Sound {
         Self::Typebar,
         Self::Carriage,
         Self::PrinterBell,
+        Self::CaseDrop,
+        Self::CaseKnock,
+        Self::CasePlunk,
+        Self::Flourish,
+        Self::Rally,
+        Self::Triumph,
+        Self::Quack,
+        Self::Honk,
     ];
 
     /// Level of the detail, body and rumble layers at close range.
@@ -273,9 +302,20 @@ impl Sound {
             Self::PomPom => [0.42, 0.4, 0.1],
             // The radio room is a deck below the bridge: clear over the engines, never
             // over a gun.
-            Self::Typebar => [0.3, 0.26, 0.05],
+            Self::Typebar => [0.24, 0.34, 0.08],
             Self::Carriage => [0.26, 0.3, 0.06],
             Self::PrinterBell => [0.2, 0.32, 0.],
+            // Brass on the deck is heard between her reports, never over them.
+            Self::CaseDrop => [0.26, 0.16, 0.],
+            Self::CaseKnock => [0.16, 0.08, 0.],
+            Self::CasePlunk => [0.14, 0.16, 0.],
+            // The longer the chain, the fuller the band and the louder it plays.
+            Self::Flourish => [0.3, 0.68, 0.26],
+            Self::Rally => [0.25, 0.6, 0.4],
+            Self::Triumph => [0.28, 0.7, 0.5],
+            // A coaster's horn is soft. A freighter's carries.
+            Self::Quack => [0.42, 0.78, 0.1],
+            Self::Honk => [0.3, 0.6, 0.5],
         }
     }
 
@@ -288,6 +328,9 @@ impl Sound {
                 | Self::Kick
                 | Self::Trumpet
                 | Self::Fanfare
+                | Self::Flourish
+                | Self::Rally
+                | Self::Triumph
                 | Self::Creak
                 | Self::Telegraph
                 | Self::Upgrade
@@ -312,6 +355,9 @@ impl Sound {
             self,
             Self::Trumpet
                 | Self::Fanfare
+                | Self::Flourish
+                | Self::Rally
+                | Self::Triumph
                 | Self::Telegraph
                 | Self::Upgrade
                 | Self::Klaxon

@@ -15,6 +15,7 @@ fn fixed_step_navigation_reaches_the_next_gate_in_the_hud() {
         .init_resource::<ShipView>()
         .init_resource::<PlayerHelm>()
         .init_resource::<TrialCourse>()
+        .init_resource::<sound::Chain>()
         .add_systems(FixedUpdate, advance_ship)
         .add_systems(Update, instruments);
 
@@ -749,7 +750,7 @@ fn a_run_reaches_the_regent_through_the_helm_and_keeps_its_refits() {
     }
     let gems: usize = hand
         .iter()
-        .map(|card| cards::Gem::count(card.rarity().unwrap()))
+        .map(|card| cards::Gem::count(before.rarity(*card).unwrap()))
         .sum();
     assert_eq!(w.query::<&cards::Gem>().iter(w).count(), gems);
     let pos = w.resource::<PlayerHelm>().position;
@@ -1235,7 +1236,10 @@ fn helm_mouse_look_drives_render_and_fire_then_releases_to_menus() {
         .unwrap();
     assert!(mount.aim_mark(helm.position, helm.heading).distance(target) < 0.02);
     let trained = shipvivor_compass::direction(helm.heading + mount.deck_bearing());
-    assert!(round.tangent().xz().normalize().abs_diff_eq(trained, 1e-4));
+    // The round leaves along the barrel, give or take the scatter across the line of
+    // fire that her crew lays it with.
+    let across = shipvivor_encounter::gunnery::STOCK_SCATTER.1;
+    assert!(round.tangent().xz().normalize().abs_diff_eq(trained, across + 1e-4));
     let Some(Projection::Perspective(lens)) = w.get::<Projection>(camera) else {
         panic!("expected perspective")
     };
@@ -2294,7 +2298,7 @@ fn the_scope_drops_the_snap_and_rides_with_the_contact_off_the_reticle() {
 }
 
 #[test]
-fn torpedo_mode_click_launches_once_and_a_larger_bore_resizes_the_deck_models() {
+fn holding_t_lays_the_tubes_letting_go_fires_once_and_a_larger_bore_resizes_the_deck_models() {
     let mut app = headless_game();
     let w = app.world_mut();
     start_in_narrows(w);
@@ -2318,29 +2322,40 @@ fn torpedo_mode_click_launches_once_and_a_larger_bore_resizes_the_deck_models() 
         .with_hull(shipvivor_campaign::StartingHull::HeavyDestroyer);
     shipvivor_sim::fit_player(&mut w.resource_mut::<Encounter>(), &run);
     **w.resource_mut::<Campaign>() = run;
-    press(w, KeyCode::KeyT);
+    // Holding T lays the tubes: she looks abeam and the sea paints the sectors.
     let abeam = w.resource::<PlayerHelm>().heading + std::f32::consts::FRAC_PI_2;
     w.resource_mut::<ShipView>().bearing = abeam;
-    w.resource_mut::<ButtonInput<MouseButton>>()
-        .press(MouseButton::Left);
+    w.resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::KeyT);
     w.run_schedule(PreUpdate);
+    w.resource_mut::<ButtonInput<KeyCode>>().clear();
     for _ in 0..12 {
+        w.run_schedule(PreUpdate);
         w.run_schedule(FixedUpdate);
     }
     w.run_schedule(Update);
-    assert_eq!(w.resource::<Encounter>().torpedoes().len(), 3);
+    assert!(w.resource::<Guns>().torpedo_mode);
+    assert!(w.resource::<Encounter>().torpedoes().is_empty());
+    assert!(w.resource::<seascape::Sea>().fans.laid() > 0);
     assert!(
         w.query::<&Text>()
             .iter(w)
             .any(|t| t.contains("Starboard tubes"))
     );
+    // Letting it go fires the spread, once, and she is back on her guns.
+    w.resource_mut::<ButtonInput<KeyCode>>().release(KeyCode::KeyT);
+    w.run_schedule(PreUpdate);
+    assert!(!w.resource::<Guns>().torpedo_mode);
+    for _ in 0..12 {
+        w.run_schedule(FixedUpdate);
+    }
+    w.run_schedule(Update);
+    assert_eq!(w.resource::<Encounter>().torpedoes().len(), 3);
+    assert_eq!(w.resource::<seascape::Sea>().fans.laid(), 0);
     assert!(
         w.query::<&Text>()
             .iter(w)
             .any(|t| t.contains("Ship hits") && t.contains("Sunk"))
     );
-    press(w, KeyCode::KeyT);
-    assert!(!w.resource::<Guns>().torpedo_mode);
 
     // The bore is yard work, turret by turret. A larger one resizes its gunhouse as soon
     // as it is ordered, and the other turret keeps its own.
@@ -2369,10 +2384,8 @@ fn torpedo_mode_click_launches_once_and_a_larger_bore_resizes_the_deck_models() 
     w.run_schedule(Update);
     let fitted = w.resource::<Campaign>().fittings.round();
     assert_eq!(fitted.calibre_inches(), 6.);
-    assert_eq!(
-        scales(w),
-        vec![fitted.mount_scale(), MainShell::STOCK.mount_scale()]
-    );
+    // The heavy destroyer carries the one turret.
+    assert_eq!(scales(w), vec![fitted.mount_scale()]);
 }
 
 #[test]
@@ -3202,13 +3215,16 @@ fn a_click_orders_a_refit_at_once_and_books_its_points() {
     assert!(texts(w).iter().any(|t| t == "  On order"));
     // Hull work is ordered at once the same way, from the hull panel.
     let armor = DockJob::Fitting(Card::Armor);
-    act(w, ui::Action::Draft(armor));
-    assert_eq!(w.resource::<Campaign>().points(), 1);
+    // A rank of armor is half a step of plate, at a point: three spend what is left.
+    for _ in 0..3 {
+        act(w, ui::Action::Draft(armor));
+    }
+    assert_eq!(w.resource::<Campaign>().points(), 0);
     assert_eq!(
         w.resource::<Campaign>().plan().map(|p| p.orders().len()),
-        Some(2)
+        Some(4)
     );
-    // Fittings the last point cannot cover take no click, here or on the section. Merging
+    // Fittings the points cannot cover take no click, here or on the section. Merging
     // the wings back does, for it takes back the split and gives its points back.
     let run = w.resource::<Campaign>();
     let short: Vec<_> = run
@@ -3238,7 +3254,7 @@ fn a_click_orders_a_refit_at_once_and_books_its_points() {
     assert!(actions.contains(&merge));
     // A click on the order under the section takes it back, and its points with it.
     act(w, ui::Action::Undo(0));
-    assert_eq!(w.resource::<Campaign>().points(), 3);
+    assert_eq!(w.resource::<Campaign>().points(), 2);
 }
 
 #[test]
@@ -3904,4 +3920,23 @@ fn the_timeline_takes_the_battle_back_and_sails_on_from_the_moment_picked() {
     let run = w.resource::<Campaign>();
     assert_eq!(run.screen(), Screen::Sailing);
     assert!(run.ship.afloat());
+}
+
+#[test]
+fn a_chain_of_kills_is_cheered_once_with_a_call_as_long_as_the_chain() {
+    use shipvivor_acoustics::Sound;
+    use sound::Chain;
+    let calls: Vec<Sound> = [1, 2, 5, 6, 14, 15, 40].map(Chain::call).into();
+    assert_eq!(
+        calls,
+        [
+            Sound::Trumpet,
+            Sound::Flourish,
+            Sound::Flourish,
+            Sound::Rally,
+            Sound::Rally,
+            Sound::Triumph,
+            Sound::Triumph,
+        ]
+    );
 }

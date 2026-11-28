@@ -6,20 +6,22 @@
 mod battery;
 pub mod crew;
 mod start;
-pub use start::StartingHull;
+pub use start::{CRUISER_GUNNERY, StartingHull};
 pub mod career;
-pub use career::{CaptainAboard, CaptainPerks, Career, CareerStart, Paid};
+pub use career::{CaptainAboard, CaptainPerks, Career, CareerStart, Paid, Roster};
 mod plan;
 mod workshop;
 pub use battery::{CALIBRES, ShipBeam};
 pub use plan::{Order, Plan};
 use shipvivor_artillery::{
-    AntiAir, MainShell, STOCK_TRAVERSE, Secondaries, TurretLayout, training_rate,
+    AntiAir, Gunhouses, MainShell, STOCK_TRAVERSE, Secondaries, TurretLayout, training_rate,
 };
-use shipvivor_shipyard::{Component, Design, Frame, Module, Protection, Ship, StrikeCraft};
+use shipvivor_shipyard::{
+    Component, Design, Frame, Module, Protection, Ship, StrikeCraft, Torpedoes,
+};
 pub use workshop::{
     DeckModule, DockJob, HULL_STEP, MAX_GUN_STATIONS, MAX_LENGTH, MAX_SECTIONS_PER_KIND,
-    MOST_GUN_STATIONS, Refusal, deck_ranks, plane_room,
+    MOST_GUN_STATIONS, Refusal, TORPEDO_FITTINGS, deck_ranks, plane_room,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -658,8 +660,49 @@ pub enum Card {
     /// Every wing gun rebuilt as a gunhouse that fires on its own: four-inch on a
     /// battleship's hull, then six-inch on a heavy battleship's.
     SecondaryTurrets,
+    /// Torpedoes that steer for a ship: harder with the second rank, fanned out across
+    /// ships of their own with the third, and five to a spread with the fourth.
+    GuidedTorpedoes,
+    /// A shorter reload for every set of tubes.
+    QuickTubes,
+    /// Torpedoes that run farther at the same speed.
+    LongRunningTorpedoes,
+    /// The light cruiser's: a main-battery hit holds the struck ship's gun crews off
+    /// their guns for a few seconds, longer the farther out it lands.
+    SuppressingFire,
+    /// The light cruiser's: tighter main-battery scatter beyond half her reach.
+    LongBaseRangefinders,
+    /// The light cruiser's: rounds landing far out come down through the deck, harder
+    /// and deeper.
+    PlungingFire,
+    /// Legendary: three ranks of turbines at once.
+    Overdrive,
+    /// Legendary: four ranks of armor plate at once.
+    BattleshipPlate,
+    /// Legendary: three ranks of muzzle velocity at once.
+    SuperchargedShells,
+    /// Legendary: three ranks of quick loaders at once.
+    AutoLoaders,
 }
 impl Card {
+    /// The legendary cards: each fits several ranks of an ordinary card at once.
+    pub const LEGENDS: [Self; 4] = [
+        Self::Overdrive,
+        Self::BattleshipPlate,
+        Self::SuperchargedShells,
+        Self::AutoLoaders,
+    ];
+    /// For a legendary card, the ordinary card it is made of and how many of its ranks it
+    /// fits at once. As many as she has room for are fitted.
+    pub const fn legend(self) -> Option<(Self, u16)> {
+        match self {
+            Self::Overdrive => Some((Self::Turbines, 3)),
+            Self::BattleshipPlate => Some((Self::Armor, 4)),
+            Self::SuperchargedShells => Some((Self::Velocity, 3)),
+            Self::AutoLoaders => Some((Self::Loader, 3)),
+            _ => None,
+        }
+    }
     /// How often a level-up hand deals this card, or `None` for work only the yard does.
     pub fn rarity(self) -> Option<Rarity> {
         DECK.iter()
@@ -674,15 +717,46 @@ pub enum Rarity {
     Common,
     Uncommon,
     Rare,
+    Epic,
+    Legendary,
 }
 impl Rarity {
-    /// The card's share of each draw: a common card comes up six times as often as a rare.
+    pub const ALL: [Self; 5] = [
+        Self::Common,
+        Self::Uncommon,
+        Self::Rare,
+        Self::Epic,
+        Self::Legendary,
+    ];
+    /// The card's share of each draw: a common card comes up six times as often as a rare
+    /// one, twelve times as often as an epic and twenty-four as often as a legendary.
     pub const fn weight(self) -> u32 {
         match self {
-            Self::Common => 6,
-            Self::Uncommon => 3,
-            Self::Rare => 1,
+            Self::Common => 24,
+            Self::Uncommon => 12,
+            Self::Rare => 4,
+            Self::Epic => 2,
+            Self::Legendary => 1,
         }
+    }
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Common => "Common",
+            Self::Uncommon => "Uncommon",
+            Self::Rare => "Rare",
+            Self::Epic => "Epic",
+            Self::Legendary => "Legendary",
+        }
+    }
+    /// `steps` rarer, but no rarer than epic: legendary is a card's own, never earned.
+    #[must_use]
+    pub fn climb(self, steps: u16) -> Self {
+        let at = Self::ALL.iter().position(|&r| r == self).unwrap_or(0);
+        let epic = Self::ALL.iter().position(|&r| r == Self::Epic).unwrap_or(0);
+        if at >= epic {
+            return self;
+        }
+        Self::ALL[(at + usize::from(steps)).min(epic)]
     }
 }
 
@@ -702,11 +776,21 @@ pub const DECK: &[(Card, Rarity)] = &[
     (Card::MoreAntiAir, Rarity::Common),
     (Card::HeavyAntiAir, Rarity::Common),
     (Card::Pumps, Rarity::Common),
+    (Card::QuickTubes, Rarity::Common),
+    (Card::LongRunningTorpedoes, Rarity::Common),
+    (Card::GuidedTorpedoes, Rarity::Uncommon),
     (Card::Caps, Rarity::Uncommon),
     (Card::Armor, Rarity::Uncommon),
     (Card::Hardening, Rarity::Uncommon),
     (Card::MoreSecondaries, Rarity::Uncommon),
-    (Card::TwinSecondaries, Rarity::Rare),
+    (Card::TwinSecondaries, Rarity::Uncommon),
+    (Card::LongBaseRangefinders, Rarity::Common),
+    (Card::SuppressingFire, Rarity::Uncommon),
+    (Card::PlungingFire, Rarity::Uncommon),
+    (Card::Overdrive, Rarity::Legendary),
+    (Card::BattleshipPlate, Rarity::Legendary),
+    (Card::SuperchargedShells, Rarity::Legendary),
+    (Card::AutoLoaders, Rarity::Legendary),
 ];
 /// Cards in a level-up hand, when that many fit.
 pub const HAND: usize = 3;
@@ -747,39 +831,53 @@ fn draw(mut pool: Vec<(Card, Rarity)>, key: u64) -> Vec<Card> {
 }
 
 /// Metres each rangefinder card adds to the secondaries' reach.
-const WING_RANGE_STEP: f32 = 40.;
-/// A size of gunhouse the wing guns are rebuilt as: its bore in inches, what it adds to
-/// each hit and to their reach in metres, and the share their reload grows by for the
-/// heavier round.
-struct WingHouse {
+const WING_RANGE_STEP: f32 = 65.;
+/// Inches the bore of the deck guns grows by with each rank of heavier deck guns, and
+/// the most it grows to: they stay light guns that whittle a ship down.
+const DECK_BORE_STEP: f32 = 0.5;
+const DECK_BORE_MOST: f32 = 3.;
+/// A size of secondary gunhouse: its bore in inches, the damage a hit does, the seconds
+/// between its rounds and the metres out to which its crew engages. Each is a twin, and
+/// lies between the deck guns and the main battery: a main turret of the same bore does
+/// less a hit and loads more slowly, but reaches far farther.
+struct Gunhouse {
     bore: u16,
     damage: u16,
+    reload: f32,
     reach: f32,
-    load: f32,
 }
-/// The gunhouses the secondaries come in, a rank of [`Card::SecondaryTurrets`] each:
-/// four-inch, like the main battery's first turrets, then six-inch.
-const WING_HOUSES: [WingHouse; limits::WING_TURRETS as usize] = [
-    WingHouse {
+/// The secondary gunhouses, by the class of hull: four-inch on a battleship's, six-inch
+/// on a heavy battleship's and eight-inch on an ultra heavy battleship's.
+const GUNHOUSES: [Gunhouse; 3] = [
+    Gunhouse {
         bore: 4,
-        damage: 2,
-        reach: 100.,
-        load: 1.5,
+        damage: 3,
+        reload: 1.6,
+        reach: 340.,
     },
-    WingHouse {
+    Gunhouse {
         bore: 6,
         damage: 5,
-        reach: 180.,
-        load: 2.25,
+        reload: 2.4,
+        reach: 420.,
+    },
+    Gunhouse {
+        bore: 8,
+        damage: 8,
+        reload: 3.4,
+        reach: 500.,
     },
 ];
-/// The share of a barrel's loading time each rank of loaders takes off, for the main
-/// battery, the secondaries and the AA alike. It comes off what the ranks before left,
-/// so every rank is worth the same to the crew: four ranks take it down to about half.
-pub const LOADER_CUT: f32 = 0.15;
+/// Barrels in each secondary gunhouse.
+const GUNHOUSE_BARRELS: usize = 2;
+/// The share of the stock rate of fire each rank of loaders adds, for the main battery,
+/// the secondaries, the AA and the tubes alike. Every rank adds the same to how often the
+/// guns fire: the first takes about a quarter off the reload, and four take it down to
+/// under half.
+pub const LOADER_GAIN: f32 = 0.32;
 /// The share of the stock loading time a crew drilled with `ranks` of loaders takes.
 pub fn drilled(ranks: u16) -> f32 {
-    (1. - LOADER_CUT).powi(i32::from(ranks))
+    1. / (1. + LOADER_GAIN * f32::from(ranks))
 }
 /// The most ranks of each refit the ship can take.
 pub mod limits {
@@ -812,20 +910,33 @@ pub mod limits {
     pub const MISSILES: u16 = 4;
     pub const PLANES: u16 = 5;
     pub const BOMBS: u16 = 4;
-    /// Sizes of gunhouse for the secondaries: four-inch, then six-inch.
-    pub const WING_TURRETS: u16 = 2;
+    /// Secondary gunhouses a side, as far as any deck has room. Her own deck usually has
+    /// room for fewer: see `Design::gunhouse_room`.
+    pub const WING_TURRETS: u16 = shipvivor_artillery::Gunhouses::MOST_PER_SIDE as u16;
     /// Catapults on one plane section.
     pub const PLANES_A_SECTION: u16 = 3;
+    /// Ranks of torpedo guidance, as the battle's `GUIDANCE_RANKS` counts them: two that
+    /// steer harder, one that fans a spread out and one that fires five.
+    pub const GUIDANCE: u16 = 4;
+    pub const QUICK_TUBES: u16 = 3;
+    pub const LONG_RUN: u16 = 2;
+    /// The light cruiser's gunnery cards.
+    pub const RANGEFINDERS: u16 = shipvivor_artillery::gunnery::MOST_RANGEFINDERS;
+    pub const SUPPRESSION: u16 = shipvivor_artillery::gunnery::MOST_SUPPRESSION;
+    pub const PLUNGING: u16 = shipvivor_artillery::gunnery::MOST_PLUNGING;
 }
+/// The share of the stock run each rank of long-running torpedoes adds.
+pub const LONG_RUN_STEP: f32 = 0.2;
 /// Each rank of pumps adds this share of the stock pumping.
 const PUMP_STEP: f32 = 0.5;
 /// Each rank of armor plate adds this share of stock strength to every panel, and
-/// this many inches to its thickness. On sound plate an escort's four ranks turn
-/// the enemy's secondaries and aircraft guns, then patrol boats and destroyers. A
+/// this many inches to its thickness: small steps, so one rank never erases the gap
+/// between one hull's stock plate and another's. On sound plate an escort's eight ranks
+/// turn the enemy's secondaries and aircraft guns, then patrol boats and destroyers. A
 /// heavy cruiser's hull adds cruisers, then battleships and shore guns, and a
 /// battleship's the Parliament's guns. Nothing turns the Regent's.
-const ARMOR_PLATE: f32 = 0.25;
-const ARMOR_INCHES: f32 = 1.5;
+const ARMOR_PLATE: f32 = 0.125;
+const ARMOR_INCHES: f32 = 0.75;
 /// Each rank of hardening adds this share of stock strength to every deck fitting.
 const HARDENED_FITTINGS: f32 = 0.5;
 
@@ -855,12 +966,24 @@ pub struct Fittings {
     pub missiles: u16,
     pub planes: u16,
     pub bombs: u16,
+    /// Secondary gunhouses a side.
     pub wing_turrets: u16,
+    /// Her deck guns were built one-inch, as the light cruiser's are, not two-inch.
+    pub one_inch_deck_guns: bool,
+    pub guidance: u16,
+    pub quick_tubes: u16,
+    pub long_run: u16,
+    pub suppression: u16,
+    pub rangefinders: u16,
+    pub plunging: u16,
 }
 impl Fittings {
     /// These fittings with one more rank of `card`.
     #[must_use]
     pub fn with(mut self, card: Card) -> Self {
+        if let Some((base, ranks)) = card.legend() {
+            return (0..ranks).fold(self, |fit, _| fit.with(base));
+        }
         if !self.can_fit(card) {
             return self;
         }
@@ -887,8 +1010,19 @@ impl Fittings {
             Card::MorePlanes => &mut self.planes,
             Card::MoreBombs => &mut self.bombs,
             Card::SecondaryTurrets => &mut self.wing_turrets,
-            // Bore and barrels are fitted turret by turret in the yard.
+            Card::GuidedTorpedoes => &mut self.guidance,
+            Card::QuickTubes => &mut self.quick_tubes,
+            Card::LongRunningTorpedoes => &mut self.long_run,
+            Card::SuppressingFire => &mut self.suppression,
+            Card::LongBaseRangefinders => &mut self.rangefinders,
+            Card::PlungingFire => &mut self.plunging,
+            // Bore and barrels are fitted turret by turret in the yard, and a legendary
+            // card was fitted rank by rank above.
             Card::TripleTurrets | Card::QuadTurrets => return self,
+            Card::Overdrive
+            | Card::BattleshipPlate
+            | Card::SuperchargedShells
+            | Card::AutoLoaders => return self,
         };
         *rank = rank.saturating_add(1);
         self
@@ -896,7 +1030,7 @@ impl Fittings {
     /// Seconds for one main battery barrel to reload. A twin mount working both barrels
     /// in turn fires every half of this. A light gun loads in moments and a heavy one
     /// slowly, faster than in step with its calibre: see [`MainShell::load_seconds`].
-    /// Each rank of quick loaders takes [`LOADER_CUT`] off it: see [`drilled`].
+    /// Each rank of quick loaders adds [`LOADER_GAIN`] to its rate: see [`drilled`].
     pub fn reload(&self) -> f32 {
         self.round().load_seconds() * drilled(self.loader)
     }
@@ -951,38 +1085,58 @@ impl Fittings {
             fittings: stock.fittings * (1. + HARDENED_FITTINGS * hardening),
         }
     }
-    /// The close-range battery: the stock guns on the bow and the beam and one more gun a
-    /// beam per mounting card, one more damage a hit per heavier round, quick loaders
-    /// working as they do for the main battery, 40 m more reach per rangefinder and a
-    /// second barrel on every gun once twinned. Rebuilt as gunhouses, four-inch and then
-    /// six-inch, each gun hits harder and reaches farther, and loads more slowly.
+    /// The deck guns: the stock guns on the bow and the beam and one more gun a beam per
+    /// mounting card, one more damage a hit and half an inch more bore per heavier round
+    /// (to three inches), quick loaders working as they do for the main battery, 65 m more
+    /// reach per rangefinder and a second barrel on every gun once twinned.
     pub fn secondaries(&self) -> Secondaries {
-        let stock = Secondaries::STOCK.per_side;
-        let house = usize::from(self.wing_turrets.min(limits::WING_TURRETS))
-            .checked_sub(1)
-            .map(|rank| &WING_HOUSES[rank]);
-        let (damage, reach, load) = house.map_or((0, 0., 1.), |h| (h.damage, h.reach, h.load));
+        let stock = Secondaries::STOCK;
+        let heavy = self.wing_shells.min(limits::WING_SHELLS);
+        let built = if self.one_inch_deck_guns { 1. } else { stock.bore };
         Secondaries {
-            per_side: (stock + usize::from(self.wing_mounts)).min(Secondaries::MOST_PER_SIDE),
-            damage: (Secondaries::STOCK.damage)
-                .saturating_add(self.wing_shells.min(limits::WING_SHELLS))
-                .saturating_add(damage),
-            reload: Secondaries::STOCK.reload
-                * drilled(self.wing_loaders.min(limits::WING_LOADERS))
-                * load,
-            range: Secondaries::STOCK.range
-                + WING_RANGE_STEP * f32::from(self.wing_range.min(limits::WING_RANGE))
-                + reach,
+            per_side: (stock.per_side + usize::from(self.wing_mounts))
+                .min(Secondaries::MOST_PER_SIDE),
+            damage: stock.damage.saturating_add(heavy),
+            reload: stock.reload * drilled(self.wing_loaders.min(limits::WING_LOADERS)),
+            range: stock.range
+                + WING_RANGE_STEP * f32::from(self.wing_range.min(limits::WING_RANGE)),
             barrels: 1 + usize::from(self.wing_twin.min(limits::WING_BARRELS)),
-            gunhouse: house.map(|h| h.bore),
+            bore: (built + DECK_BORE_STEP * f32::from(heavy)).min(DECK_BORE_MOST.max(built)),
         }
     }
-    /// The bore, in inches, of the next size of gunhouse her secondaries could be
-    /// rebuilt as, or `None` once they are the biggest the yard makes.
-    pub fn next_secondary_bore(&self) -> Option<u16> {
-        WING_HOUSES
-            .get(usize::from(self.wing_turrets))
-            .map(|h| h.bore)
+    /// The secondary battery: a twin gunhouse a side for each rank of
+    /// [`Card::SecondaryTurrets`], of the bore her class of hull carries. None on a hull
+    /// too narrow for them.
+    pub fn gunhouses(&self) -> Gunhouses {
+        let Some(house) = self
+            .gunhouse_bore()
+            .and_then(|bore| GUNHOUSES.iter().find(|h| h.bore == bore))
+        else {
+            return Gunhouses::NONE;
+        };
+        Gunhouses {
+            per_side: usize::from(self.wing_turrets.min(limits::WING_TURRETS)),
+            bore: house.bore,
+            barrels: GUNHOUSE_BARRELS,
+            damage: house.damage,
+            reload: house.reload,
+            range: house.reach,
+        }
+    }
+    /// Her torpedoes, in every set of tubes alike: the ranks of guidance, quick tubes
+    /// quickening the reload a rank as loaders do (see [`drilled`]), and
+    /// [`LONG_RUN_STEP`] more run a rank.
+    pub fn torpedoes(&self) -> Torpedoes {
+        Torpedoes {
+            guidance: self.guidance.min(limits::GUIDANCE),
+            reload: drilled(self.quick_tubes.min(limits::QUICK_TUBES)),
+            run: 1. + LONG_RUN_STEP * f32::from(self.long_run.min(limits::LONG_RUN)),
+        }
+    }
+    /// The bore, in inches, of the secondary gunhouses her class of hull carries, or
+    /// `None` on a hull too narrow for them.
+    pub fn gunhouse_bore(&self) -> Option<u16> {
+        self.beam.secondary_bore()
     }
     /// The strike craft: a launcher on each missile rack and another per launcher card,
     /// the stock salvo and another missile per missile card, a plane and another per
@@ -1007,10 +1161,33 @@ impl Fittings {
     pub fn deal_where(&self, key: u64, room: impl Fn(Card) -> bool) -> Vec<Card> {
         let pool = DECK
             .iter()
-            .copied()
-            .filter(|&(card, _)| self.can_fit(card) && room(card))
+            .filter(|&&(card, _)| self.can_fit(card) && room(card))
+            .map(|&(card, base)| (card, self.rarity(card).unwrap_or(base)))
             .collect();
         draw(pool, key)
+    }
+    /// How rare `card` is for a ship with these fittings, or `None` for a card no hand
+    /// deals. The more a card would do, the rarer it is: it climbs from its place in
+    /// [`DECK`] a step for each third of its ranks already fitted, and the secondary
+    /// cards climb as well with each barrel the mounts already carry, since another
+    /// mount or barrel adds more the more there are. It climbs no further than epic.
+    pub fn rarity(&self, card: Card) -> Option<Rarity> {
+        let base = card.rarity()?;
+        let depth = self.ranks(card).map_or(0, |(rank, most)| {
+            if most == 0 {
+                0
+            } else {
+                rank.min(most) * 3 / most
+            }
+        });
+        let potency = match card {
+            Card::MoreSecondaries => self.wing_twin.min(limits::WING_BARRELS),
+            Card::TwinSecondaries => {
+                u16::from(self.wing_mounts.min(limits::WING_MOUNTS) >= limits::WING_MOUNTS / 2)
+            }
+            _ => 0,
+        };
+        Some(base.climb(depth + potency))
     }
     /// Ranks of `card` fitted, out of the most the ship can ever take, for a card that
     /// stacks to a limit. `None` for a card that is fitted once and replaced, or that has
@@ -1039,11 +1216,20 @@ impl Fittings {
             MorePlanes => (self.planes, limits::PLANES),
             MoreBombs => (self.bombs, limits::BOMBS),
             SecondaryTurrets => (self.wing_turrets, limits::WING_TURRETS),
+            GuidedTorpedoes => (self.guidance, limits::GUIDANCE),
+            QuickTubes => (self.quick_tubes, limits::QUICK_TUBES),
+            LongRunningTorpedoes => (self.long_run, limits::LONG_RUN),
+            SuppressingFire => (self.suppression, limits::SUPPRESSION),
+            LongBaseRangefinders => (self.rangefinders, limits::RANGEFINDERS),
+            PlungingFire => (self.plunging, limits::PLUNGING),
             _ => return None,
         })
     }
     pub fn can_fit(&self, card: Card) -> bool {
         use Card::*;
+        if let Some((base, _)) = card.legend() {
+            return self.can_fit(base);
+        }
         match card {
             Caps => self.caps < limits::CAPS,
             Shells => CALIBRES
@@ -1065,11 +1251,16 @@ impl Fittings {
             MoreMissiles => self.missiles < limits::MISSILES,
             MorePlanes => self.planes < limits::PLANES,
             MoreBombs => self.bombs < limits::BOMBS,
-            // A gunhouse at every wing station wants the room of a battleship's deck,
-            // and a six-inch one a heavy battleship's.
-            SecondaryTurrets => self
-                .next_secondary_bore()
-                .is_some_and(|bore| self.beam.secondary_bore() >= Some(bore)),
+            GuidedTorpedoes => self.guidance < limits::GUIDANCE,
+            QuickTubes => self.quick_tubes < limits::QUICK_TUBES,
+            LongRunningTorpedoes => self.long_run < limits::LONG_RUN,
+            SuppressingFire => self.suppression < limits::SUPPRESSION,
+            LongBaseRangefinders => self.rangefinders < limits::RANGEFINDERS,
+            PlungingFire => self.plunging < limits::PLUNGING,
+            // Gunhouses want the room of a battleship's deck at least.
+            SecondaryTurrets => {
+                self.gunhouse_bore().is_some() && self.wing_turrets < limits::WING_TURRETS
+            }
             // The yard rebores and rearms each turret on its own: see `DockJob::Calibre`
             // and `DockJob::Barrels`.
             TripleTurrets | QuadTurrets => false,
@@ -1879,32 +2070,82 @@ mod tests {
         use Rarity::*;
         let stock = Fittings::default();
         let deals = 30_000;
-        let mut first = [0_u32; 3];
+        let mut first = [0_u32; 5];
         for key in 0..deals {
             let hand = stock.deal(key);
             assert_eq!(hand.len(), HAND);
             assert!(hand.iter().all(|&card| stock.can_fit(card)), "{hand:?}");
             assert!(hand[0] != hand[1] && hand[1] != hand[2] && hand[0] != hand[2]);
-            first[hand[0].rarity().unwrap() as usize] += 1;
+            first[stock.rarity(hand[0]).unwrap() as usize] += 1;
         }
-        // The stock ship can take eleven common cards, four uncommon and one rare, so the
-        // first card is common 66 times in 79, uncommon 12 and rare once.
-        let weights = [Common, Uncommon, Rare].map(|rarity| {
+        // Each rarity's share of first cards is its weight times the cards of that rarity
+        // the stock ship can take: commons by far the most, each legendary least. Her
+        // torpedo cards are among them: only a run without tubes keeps them out of her
+        // hands (see `Run::has_room`).
+        let weights = Rarity::ALL.map(|rarity| {
             DECK.iter()
-                .filter(|&&(card, of)| of == rarity && stock.can_fit(card))
+                .filter(|&&(card, _)| stock.can_fit(card) && stock.rarity(card) == Some(rarity))
                 .map(|_| rarity.weight())
                 .sum::<u32>()
         });
-        assert_eq!(weights, [66, 12, 1]);
+        assert!(weights[0] > weights[1] && weights[1] > 0);
+        assert_eq!(weights[4], Card::LEGENDS.len() as u32);
+        let total: u32 = weights.iter().sum();
         for (seen, weight) in first.into_iter().zip(weights) {
             let share = f64::from(seen) / deals as f64;
-            let expected = f64::from(weight) / 79.;
+            let expected = f64::from(weight) / f64::from(total);
             assert!((share - expected).abs() < 0.01, "{first:?}");
         }
         // Fewer are dealt when fewer fit.
         let pair = vec![(Card::Loader, Common), (Card::TwinSecondaries, Rare)];
         assert_eq!(draw(pair, 3).len(), 2);
         assert!(draw(Vec::new(), 3).is_empty());
+    }
+
+    #[test]
+    fn a_legendary_card_fits_several_ranks_at_once_as_far_as_she_has_room() {
+        let stock = Fittings::default();
+        assert_eq!(stock.with(Card::Overdrive).turbines, 3);
+        assert_eq!(stock.with(Card::AutoLoaders).loader, 3);
+        assert_eq!(stock.with(Card::SuperchargedShells).velocity, 3);
+        assert_eq!(stock.with(Card::BattleshipPlate).armor, 4);
+        // Six ranks of plate on an escort's beam leave room for two more, not four.
+        let plated = Fittings {
+            armor: 6,
+            ..stock
+        };
+        assert_eq!(plated.with(Card::BattleshipPlate).armor, 8);
+        let full = plated.with(Card::BattleshipPlate);
+        assert!(!full.can_fit(Card::BattleshipPlate));
+        // Always legendary, however much is already fitted, and dealt by level-up hands.
+        for card in Card::LEGENDS {
+            assert_eq!(stock.rarity(card), Some(Rarity::Legendary));
+            assert!(DECK.iter().any(|&(c, _)| c == card));
+        }
+    }
+
+    #[test]
+    fn the_more_a_card_would_do_the_rarer_it_is() {
+        use Rarity::*;
+        let mut fit = Fittings::default();
+        // Another mount on single guns is uncommon; on twin mounts rare, on triples epic.
+        assert_eq!(fit.rarity(Card::MoreSecondaries), Some(Uncommon));
+        fit.wing_twin = 1;
+        assert_eq!(fit.rarity(Card::MoreSecondaries), Some(Rare));
+        fit.wing_twin = 2;
+        assert_eq!(fit.rarity(Card::MoreSecondaries), Some(Epic));
+        // A third barrel is rarer than a second, and a fourth rarer still.
+        assert_eq!(fit.rarity(Card::TwinSecondaries), Some(Epic));
+        // Deep ranks of a stacking card climb, but never past epic: legendary is a card's
+        // own rarity, never earned.
+        let mut plated = Fittings::default();
+        assert_eq!(plated.rarity(Card::Armor), Some(Uncommon));
+        plated.armor = limits::ARMOR - 1;
+        assert_eq!(plated.rarity(Card::Armor), Some(Epic));
+        assert_eq!(Rare.climb(9), Epic);
+        assert_eq!(Legendary.climb(1), Legendary);
+        // A card no hand deals has no rarity.
+        assert_eq!(fit.rarity(Card::QuadTurrets), None);
     }
 
     #[test]
@@ -1974,7 +2215,7 @@ mod tests {
         };
         assert!((5.5..6.5).contains(&eight.reload()), "{}", eight.reload());
         assert!(eight.with(Card::Loader).reload() < eight.reload());
-        // Every rank takes the same share off, and four come to about half.
+        // Every rank adds the same to the rate of fire, and four take the reload under half.
         for rank in 0..6 {
             let (now, next) = (
                 Fittings {
@@ -1986,10 +2227,14 @@ mod tests {
                     ..eight
                 },
             );
-            assert!((next.reload() / now.reload() - (1. - LOADER_CUT)).abs() < 1e-4);
+            let gain = eight.reload() / next.reload() - eight.reload() / now.reload();
+            assert!((gain - LOADER_GAIN).abs() < 1e-4);
         }
+        // The first rank takes about a quarter off, where it used to take 15%.
+        let first = Fittings { loader: 1, ..eight };
+        assert!((0.75..0.77).contains(&(first.reload() / eight.reload())));
         let refit = Fittings { loader: 4, ..eight };
-        assert!((0.5..0.55).contains(&(refit.reload() / eight.reload())));
+        assert!((0.43..0.45).contains(&(refit.reload() / eight.reload())));
         // Each bore aboard loads at its own pace under the same drill.
         assert!((refit.reload_for(8) - refit.reload()).abs() < 1e-4);
         assert!(refit.reload_for(4) < refit.reload_for(6));
@@ -2024,10 +2269,11 @@ mod tests {
         // The two she was built with a side and two more, five more damage a hit, and
         // four barrels on every mount.
         assert_eq!((fit.per_side, fit.damage, fit.barrels), (4, 6, 4));
-        assert!((fit.range - 360.).abs() < 1e-5);
-        // Six ranks of loaders, each taking the same share off.
+        // Five rangefinders at 65 m each over the stock 160 m.
+        assert!((fit.range - 485.).abs() < 1e-5);
+        // Six ranks of loaders, each adding the same to the rate of fire.
         assert!((fit.reload - Secondaries::STOCK.reload * drilled(6)).abs() < 1e-5);
-        assert!((drilled(3) - 0.85_f32.powi(3)).abs() < 1e-6);
+        assert!((drilled(3) - 1. / 1.96).abs() < 1e-6);
         // Only her deck room stops another pair, and a longer hull has more: see
         // `a_full_deck_waits_for_a_longer_hull_before_mounting_more_secondaries`.
         assert!(
@@ -2332,8 +2578,8 @@ mod tests {
             (fit.armor, fit.protection(Protection::BREAKWATER).thickness)
         };
         // Twice the ranks of half the plate each: the same thickness at each beam.
-        assert_eq!(most(ShipBeam::Escort), (4, 7.));
-        assert_eq!(most(ShipBeam::HeavyCruiser), (8, 13.));
+        assert_eq!(most(ShipBeam::Escort), (8, 7.));
+        assert_eq!(most(ShipBeam::HeavyCruiser), (16, 13.));
         assert_eq!(most(ShipBeam::Battleship), (limits::ARMOR, 19.));
         // On her stock beam she can turn a destroyer's round, but not a cruiser's.
         let mut run = Run::default();

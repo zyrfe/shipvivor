@@ -10,7 +10,7 @@
 use crate::crew_book::CrewBook;
 use crate::state::{Campaign, PlayerHelm, Screen};
 use bevy::prelude::*;
-use shipvivor_campaign::{Career, StartingHull};
+use shipvivor_campaign::{Roster, StartingHull};
 use std::path::{Path, PathBuf};
 
 /// Seconds the ship sails before the chart of anchorages takes the screen.
@@ -42,14 +42,15 @@ impl Plugin for CareerPlugin {
 /// The career, if there is one, and the career page's picks.
 #[derive(Resource)]
 pub struct CareerBook {
-    pub career: Option<Career>,
+    /// Every captain's career, and who sailed last.
+    pub roster: Roster,
     /// The captain previewed on the career page, by place in the crew data. Nothing is
     /// locked in until the launch.
     pub captain: usize,
     /// The hull previewed on the career page.
     pub hull: StartingHull,
     /// Career points the last run banked, to show on the career page.
-    pub last_banked: Option<u32>,
+    pub last_banked: Option<(String, u32)>,
     /// Counts every change, so the career page knows to redraw.
     pub revision: u32,
     /// The launch under way, if one is.
@@ -91,7 +92,7 @@ impl CareerBook {
     /// No career.
     fn empty() -> Self {
         Self {
-            career: None,
+            roster: Roster::default(),
             captain: 0,
             hull: StartingHull::LightCruiser,
             last_banked: None,
@@ -113,29 +114,30 @@ impl CareerBook {
         let Ok(text) = std::fs::read_to_string(&path) else {
             return book;
         };
-        match Career::parse(&text, &crew.wardroom) {
-            Ok(career) => book.career = Some(career),
+        match Roster::parse(&text, &crew.wardroom) {
+            Ok((roster, problems)) => {
+                for problem in problems {
+                    warn!("{}: {problem}", path.display());
+                }
+                book.roster = roster;
+            }
             Err(problem) => warn!(
-                "{} not taken, starting without a career: {problem}",
+                "{} not taken, starting without careers: {problem}",
                 path.display()
             ),
         }
         book
     }
 
-    /// Open the career page on the captain in command, or the first, and whatever hull
-    /// was last previewed.
+    /// Open the career page on the captain who sailed last, or the first, and whatever
+    /// hull was last previewed.
     pub fn open_page(&mut self, crew: &CrewBook) {
         let wardroom = &crew.wardroom;
         self.captain = self
-            .career
+            .roster
+            .last
             .as_ref()
-            .and_then(|career| {
-                wardroom
-                    .captains
-                    .iter()
-                    .position(|c| c.id == career.captain)
-            })
+            .and_then(|last| wardroom.captains.iter().position(|c| &c.id == last))
             .unwrap_or(0)
             .min(wardroom.captains.len().saturating_sub(1));
         self.launch = None;
@@ -153,7 +155,7 @@ impl CareerBook {
     /// Note a change, and keep the career for the next launch.
     pub fn changed(&mut self) {
         self.revision = self.revision.wrapping_add(1);
-        keep(self.career.as_ref());
+        keep(&self.roster);
     }
 }
 
@@ -175,17 +177,18 @@ fn shelf() -> Option<PathBuf> {
     crate::ensign::settings_folder().map(|folder| folder.join("career.toml"))
 }
 
-fn keep_at(path: &Path, career: Option<&Career>) -> std::io::Result<()> {
-    match career {
-        Some(career) => {
-            if let Some(folder) = path.parent() {
-                std::fs::create_dir_all(folder)?;
-            }
-            std::fs::write(path, career.code())
-        }
-        None if path.exists() => std::fs::remove_file(path),
-        None => Ok(()),
+fn keep_at(path: &Path, roster: &Roster) -> std::io::Result<()> {
+    if roster.careers().is_empty() {
+        return if path.exists() {
+            std::fs::remove_file(path)
+        } else {
+            Ok(())
+        };
     }
+    if let Some(folder) = path.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
+    std::fs::write(path, roster.code())
 }
 
 /// Where the hull last launched is kept: the file `SHIPVIVOR_LAST_SHIP_FILE` names, or
@@ -231,7 +234,7 @@ fn dress_title(mut run: ResMut<Campaign>, book: Res<CareerBook>) {
 }
 
 /// Keep the career, or with none, clear the file. Tests keep nothing.
-fn keep(career: Option<&Career>) {
+fn keep(roster: &Roster) {
     if cfg!(test) {
         return;
     }
@@ -239,7 +242,7 @@ fn keep(career: Option<&Career>) {
         warn!("Nowhere to keep the career: no settings folder");
         return;
     };
-    if let Err(err) = keep_at(&path, career) {
+    if let Err(err) = keep_at(&path, roster) {
         warn!("Could not keep the career in {}: {err}", path.display());
     }
 }
@@ -249,12 +252,15 @@ fn settle(run: Res<Campaign>, mut book: ResMut<CareerBook>, crew: Res<CrewBook>)
     if !matches!(run.screen(), Screen::Won(_) | Screen::Lost) || run.captain.is_none() {
         return;
     }
-    let Some(career) = book.career.as_mut() else {
+    let Some(id) = run.captain.as_ref().map(|c| c.id.clone()) else {
+        return;
+    };
+    let Some(career) = book.roster.get_mut(&id) else {
         return;
     };
     if let Some(points) = career.settle(&run, &crew.wardroom.career) {
         info!("{} banks {points} career points", career.name);
-        book.last_banked = Some(points);
+        book.last_banked = Some((id, points));
         book.changed();
     }
 }
@@ -360,18 +366,21 @@ mod tests {
     }
 
     #[test]
-    fn a_career_is_kept_in_its_file_and_cleared_when_given_up() {
+    fn every_career_is_kept_in_its_file_and_an_empty_roster_clears_it() {
         let folder = std::env::temp_dir().join(format!("shipvivor-career-{}", std::process::id()));
         let path = folder.join("deeper").join("career.toml");
         let wardroom = Wardroom::stock();
-        let mut career = Career::new(&wardroom.captains[0]);
-        career.points = 9;
-        keep_at(&path, Some(&career)).unwrap();
-        let kept = Career::parse(&std::fs::read_to_string(&path).unwrap(), &wardroom).unwrap();
-        assert_eq!(kept, career);
-        keep_at(&path, None).unwrap();
+        let mut roster = Roster::default();
+        roster.enlist(&wardroom.captains[0]).points = 9;
+        roster.enlist(&wardroom.captains[1]).points = 2;
+        roster.last = Some(wardroom.captains[1].id.clone());
+        keep_at(&path, &roster).unwrap();
+        let (kept, problems) =
+            Roster::parse(&std::fs::read_to_string(&path).unwrap(), &wardroom).unwrap();
+        assert_eq!((kept, problems), (roster, vec![]));
+        keep_at(&path, &Roster::default()).unwrap();
         assert!(!path.exists());
-        keep_at(&path, None).unwrap();
+        keep_at(&path, &Roster::default()).unwrap();
         std::fs::remove_dir_all(&folder).unwrap();
     }
 }

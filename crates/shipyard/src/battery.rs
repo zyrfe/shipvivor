@@ -156,7 +156,28 @@ impl Design {
     }
 }
 
-/// Where one of her secondaries stands, and the arc it covers.
+/// What a gun along her side stands in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Emplacement {
+    /// A deck gun on a shielded mount at the deck edge.
+    #[default]
+    Deck,
+    /// A deck gun in a casemate low in her side, on a battleship's hull and up.
+    Casemate,
+    /// A gunhouse of the secondary battery, where two deck guns would stand.
+    Gunhouse,
+}
+
+/// Her guns along the deck edge, as [`Design::wing_layout`] stands them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WingLayout {
+    /// The deck guns, on deck and in casemates, in the order they are fitted.
+    pub deck: Vec<WingStation>,
+    /// The secondary gunhouses, in the order they are fitted.
+    pub gunhouses: Vec<WingStation>,
+}
+
+/// Where one of her guns along her side stands, and the arc it covers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WingStation {
     /// Metres to starboard, negative on the port side.
@@ -168,6 +189,7 @@ pub struct WingStation {
     /// How far from `home` the gun trains, anticlockwise and clockwise seen from above:
     /// the first is never above zero, nor the second below it.
     pub arc: (f32, f32),
+    pub emplacement: Emplacement,
 }
 
 /// Something standing on deck that a secondary must not fire through: metres to
@@ -234,6 +256,14 @@ const WING_MARGIN: f32 = 0.5;
 const WING_ABEAM: f32 = 2.18;
 /// Nowhere narrower than this either side of the centreline takes a gun.
 const WING_NARROWEST: f32 = 1.2;
+/// Hulls this many times her stock beam carry deck guns in casemates in their side: a
+/// battleship's hull and broader.
+pub const CASEMATE_BEAM: f32 = 1.6;
+/// A casemate covers its own beam this far either way: the port in her side allows no
+/// more.
+const CASEMATE_ARC: (f32, f32) = (90_f32.to_radians(), 58_f32.to_radians());
+/// Metres more a secondary gunhouse keeps from a main turret than a deck gun's mount.
+const GUNHOUSE_ROOM: f32 = 0.7;
 
 /// Where one of her light AA mounts stands.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -253,6 +283,24 @@ const AA_ABEAM: f32 = 1.2;
 const AA_MARGIN: f32 = 0.75;
 /// No two AA tubs on one side stand closer than this, fore and aft.
 const AA_CLEARANCE: f32 = 1.5;
+
+/// Metres of clear deck a secondary wants from a main turret's centre: this much for
+/// each six-inch of gunhouse (a six-inch gunhouse reaches about two metres to its
+/// corners), this much more for each barrel past the first, and this much for the
+/// secondary's own mount. A stock four-inch single leaves the forecastle pair where she
+/// was built with it; a big gunhouse pushes it toward the stem.
+const TURRET_ROOM: (f32, f32, f32) = (1.8, 0.18, 0.85);
+/// Metres short of her stem that a secondary pushed forward may stand, and the step it
+/// is moved by while it looks for room.
+const STEM_ROOM: (f32, f32) = (2., 0.25);
+
+/// The clear deck a secondary wants round a main turret of this build.
+fn turret_room(house: crate::Gunhouse) -> f32 {
+    let inches = f32::from(house.bore);
+    let scale = (inches.min(6.) + (inches - 6.).max(0.) * 0.25) / 6.;
+    let (per_scale, per_barrel, mount) = TURRET_ROOM;
+    per_scale * scale + per_barrel * (house.barrels.count() as f32 - 1.) + mount
+}
 
 /// A pair of secondaries she was built with: metres out from the centreline and forward
 /// of her datum on the stock hull, the middle of the starboard gun's arc and how far
@@ -287,14 +335,26 @@ const BUILT: [Builder; 3] = [
 ];
 
 impl Design {
-    /// Where her secondaries stand, in the order they are fitted, a port gun before its
-    /// starboard mate. The pairs she was built with come first: abaft the bridge, on the
-    /// forecastle and beside the bridge, the bridge's going where the yard moves it. Then
-    /// two a side on each open section of deck, nearest the bridge first: a turret's
-    /// bay, an engine room or an empty bay. The bridge and the machinery are crowded
-    /// already, and a gallery of turrets abreast, a catapult or a missile rack wants its
-    /// deck edge. A longer hull has room for more. Only the player's hull carries them.
+    /// Where her deck guns stand, in the order they are fitted, a port gun before its
+    /// starboard mate, with no secondary gunhouses aboard: see [`Design::wing_layout`].
     pub fn wing_stations(&self) -> Vec<WingStation> {
+        self.wing_layout(0).deck
+    }
+
+    /// Where her guns along the deck edge stand with `houses` secondary gunhouses a side.
+    ///
+    /// The gunhouses stand one a side on each open section of deck, nearest the bridge
+    /// first: a turret's bay, an engine room or an empty bay. The bridge and the
+    /// machinery are crowded already, and a gallery of turrets abreast, a catapult or a
+    /// missile rack wants its deck edge.
+    ///
+    /// The deck guns follow, in the order they are fitted. The pairs she was built with
+    /// come first: abaft the bridge, on the forecastle and beside the bridge, the
+    /// bridge's going where the yard moves it. On a hull broad enough, a casemate in her
+    /// side under each open section comes next, which takes no deck. Then two a side
+    /// along the deck edge of each open section no gunhouse stands on, nearest the bridge
+    /// first. A longer hull has room for more. Only the player's hull carries them.
+    pub fn wing_layout(&self, houses: usize) -> WingLayout {
         let moved = self
             .modules()
             .iter()
@@ -302,16 +362,89 @@ impl Design {
             .map_or(0., |at| {
                 self.span(at).0 - 2. * Frame::Straight.spec().length
             });
-        // Starboard guns: metres out at the stock beam, forward of the datum, and arc.
-        let mut guns: Vec<(f32, f32, (f32, f32))> = BUILT
+        let beam = self.beam_factor();
+        // Each main turret, and the deck it wants clear round it, measured at the stock
+        // beam so a broader hull carries the same layout further out. A secondary stands
+        // on both beams, so it is measured to the turret on its own side.
+        let turrets: Vec<(f32, f32, f32)> = self
+            .gun_stations()
             .iter()
-            .map(|b| (b.abeam, b.fore - if b.bridge { moved } else { 0. }, b.arc))
+            .map(|g| (g.abeam.abs() / beam, g.fore, turret_room(g.gunhouse)))
             .collect();
-        let bridge = guns[2].1;
+        let clear = |abeam: f32, fore: f32| {
+            turrets
+                .iter()
+                .all(|&(at, tf, room)| (abeam - at).hypot(fore - tf) >= room)
+        };
+        // Starboard guns: metres out at the stock beam, forward of the datum, and arc.
+        // A pair she was built with that a turret crowds is pushed toward the stem if it
+        // stands forward of the bridge, and otherwise given up for open deck.
+        let bridge = BUILT[2].fore - moved;
+        let mut guns: Vec<(f32, f32, (f32, f32))> = Vec::new();
+        for b in &BUILT {
+            let fore = b.fore - if b.bridge { moved } else { 0. };
+            if clear(b.abeam, fore) {
+                guns.push((b.abeam, fore, b.arc));
+                continue;
+            }
+            if b.bridge {
+                continue;
+            }
+            let (short, step) = STEM_ROOM;
+            let room = (1..)
+                .map(|k| fore + step * k as f32)
+                .take_while(|&f| f <= DATUM - short)
+                .map(|f| (b.abeam.min(self.deck_edge(f) - WING_MARGIN), f))
+                .take_while(|&(abeam, _)| abeam >= WING_NARROWEST)
+                .find(|&(abeam, f)| clear(abeam, f));
+            if let Some((abeam, f)) = room {
+                guns.push((abeam, f, b.arc));
+            }
+        }
         let last = self.modules().len().saturating_sub(1);
-        let mut open: Vec<(f32, f32)> = (1..last)
-            .filter(|&at| self.open_deck(at))
-            .flat_map(|at| {
+        let mut sections: Vec<usize> = (1..last).filter(|&at| self.open_deck(at)).collect();
+        let middle = |at: usize| {
+            let (start, end) = self.span(at);
+            DATUM - 0.5 * (start + end)
+        };
+        sections.sort_by(|&a, &b| {
+            (middle(a) - bridge)
+                .abs()
+                .total_cmp(&(middle(b) - bridge).abs())
+        });
+        // A gunhouse wants more room from a turret than a deck gun's mount, measured
+        // in metres on her own beam: a broad hull leaves room beside a turret's bay.
+        let house_clear = |abeam: f32, fore: f32| {
+            turrets.iter().all(|&(at, tf, room)| {
+                (beam * (abeam - at)).hypot(fore - tf) >= room + GUNHOUSE_ROOM
+            })
+        };
+        let gunhouses: Vec<(usize, f32, f32)> = sections
+            .iter()
+            .map(|&at| {
+                let fore = middle(at);
+                (at, WING_ABEAM.min(self.deck_edge(fore) - WING_MARGIN), fore)
+            })
+            .filter(|&(_, abeam, fore)| abeam >= WING_NARROWEST && house_clear(abeam, fore))
+            .take(houses.min(shipvivor_artillery::Gunhouses::MOST_PER_SIDE))
+            .collect();
+        let housed = |at: usize| gunhouses.iter().any(|&(h, ..)| h == at);
+        let mut deck: Vec<(f32, f32, (f32, f32), Emplacement)> = guns
+            .into_iter()
+            .map(|(abeam, fore, arc)| (abeam, fore, arc, Emplacement::Deck))
+            .collect();
+        // Casemates low in her side, which neither the deck guns nor the gunhouses above
+        // stand in the way of.
+        if beam >= CASEMATE_BEAM {
+            deck.extend(sections.iter().map(|&at| {
+                let fore = middle(at);
+                (self.deck_edge(fore), fore, CASEMATE_ARC, Emplacement::Casemate)
+            }));
+        }
+        let mut open: Vec<(f32, f32)> = sections
+            .iter()
+            .filter(|&&at| !housed(at))
+            .flat_map(|&at| {
                 let (start, end) = self.span(at);
                 let count = ((end - start) / WING_PITCH).round().max(1.) as usize;
                 (0..count)
@@ -319,32 +452,52 @@ impl Design {
             })
             .filter_map(|fore| {
                 let abeam = WING_ABEAM.min(self.deck_edge(fore) - WING_MARGIN);
-                (abeam >= WING_NARROWEST).then_some((abeam, fore))
+                (abeam >= WING_NARROWEST && clear(abeam, fore)).then_some((abeam, fore))
             })
             .collect();
         open.sort_by(|a, b| (a.1 - bridge).abs().total_cmp(&(b.1 - bridge).abs()));
         for (abeam, fore) in open {
-            if guns.iter().all(|g| (g.1 - fore).abs() >= WING_CLEARANCE) {
-                guns.push((abeam, fore, BEAM_ARC));
+            let room = deck
+                .iter()
+                .filter(|g| g.3 == Emplacement::Deck)
+                .all(|g| (g.1 - fore).abs() >= WING_CLEARANCE);
+            if room {
+                deck.push((abeam, fore, BEAM_ARC, Emplacement::Deck));
             }
         }
-        guns.truncate(shipvivor_artillery::Secondaries::MOST_PER_SIDE);
-        let beam = self.beam_factor();
-        guns.into_iter()
-            .flat_map(|(abeam, fore, (home, half_arc))| {
-                [-1., 1.].map(|side| WingStation {
-                    abeam: side * abeam * beam,
-                    fore,
-                    home: side * home,
-                    arc: (-half_arc, half_arc),
-                })
+        deck.truncate(shipvivor_artillery::Secondaries::MOST_PER_SIDE);
+        let pairs = |(abeam, fore, (home, half_arc), emplacement): (f32, f32, (f32, f32), Emplacement)| {
+            [-1., 1.].map(|side| WingStation {
+                abeam: side * abeam * beam,
+                fore,
+                home: side * home,
+                arc: (-half_arc, half_arc),
+                emplacement,
             })
-            .collect()
+        };
+        WingLayout {
+            deck: deck.into_iter().flat_map(pairs).collect(),
+            gunhouses: gunhouses
+                .into_iter()
+                .map(|(_, abeam, fore)| (abeam, fore, BEAM_ARC, Emplacement::Gunhouse))
+                .flat_map(pairs)
+                .collect(),
+        }
     }
 
-    /// Secondaries a side her deck has room for.
+    /// Deck guns a side her deck has room for, with no secondary gunhouses aboard.
     pub fn wing_room(&self) -> usize {
         self.wing_stations().len() / 2
+    }
+
+    /// Deck guns a side her deck has room for with `houses` secondary gunhouses a side.
+    pub fn deck_gun_room(&self, houses: usize) -> usize {
+        self.wing_layout(houses).deck.len() / 2
+    }
+
+    /// Secondary gunhouses a side her deck has room for: one on each open section.
+    pub fn gunhouse_room(&self) -> usize {
+        self.wing_layout(usize::MAX).gunhouses.len() / 2
     }
 
     /// Where her light AA mounts stand, in the order they are fitted, a port mount
@@ -443,7 +596,7 @@ impl Design {
 
 #[cfg(test)]
 mod wing_tests {
-    use crate::{Component::*, Design, Frame, Module};
+    use crate::{Component::*, Design, Emplacement, Frame, Module};
 
     /// Her secondaries a side, each as metres out and forward of her datum.
     fn starboard(design: &Design) -> Vec<(f32, f32)> {
@@ -464,7 +617,8 @@ mod wing_tests {
     #[test]
     fn a_longer_hull_has_deck_room_for_more_secondaries() {
         let stock = Design::breakwater();
-        assert_eq!(stock.wing_room(), 6);
+        // Five a side: the forward turret keeps its beams clear.
+        assert_eq!(stock.wing_room(), 5);
         // The pairs she was built with come first, where they always stood.
         assert_eq!(
             starboard(&stock)[..3],
@@ -476,7 +630,7 @@ mod wing_tests {
             long.insert(at, Module::new(Frame::Straight, [])).unwrap();
         }
         // Two a side on each empty bay.
-        assert_eq!(long.wing_room(), 6 + 2 * 6);
+        assert_eq!(long.wing_room(), 5 + 2 * 6);
         let guns = starboard(&long);
         for (i, &(abeam, fore)) in guns.iter().enumerate() {
             assert!(
@@ -589,15 +743,93 @@ mod wing_tests {
     }
 
     #[test]
+    fn a_bigger_forward_turret_pushes_the_forecastle_pair_toward_the_stem() {
+        let stock = Design::breakwater();
+        let forecastle = |design: &Design| starboard(design)[1];
+        assert_eq!(forecastle(&stock), (1.35, 10.6));
+        let mut big = stock.clone();
+        let at = big.gun_stations()[0].berth.module;
+        let house = big.modules()[at].gunhouse;
+        big.rearm(
+            at,
+            crate::Gunhouse {
+                bore: 14,
+                barrels: shipvivor_artillery::TurretLayout::Triple,
+                ..house
+            },
+        )
+        .unwrap();
+        let turret = big.gun_stations()[0];
+        let (abeam, fore) = forecastle(&big);
+        assert!(fore > 10.6, "pushed forward: {fore}");
+        // Nothing stands beside the turret on its beams.
+        for (abeam, fore) in starboard(&big) {
+            assert!(
+                (abeam - turret.abeam).hypot(fore - turret.fore)
+                    >= super::turret_room(turret.gunhouse),
+                "{abeam} at {fore}"
+            );
+        }
+    }
+
+    #[test]
     fn a_broader_beam_carries_its_secondaries_out_to_the_deck_edge() {
         let stock = Design::breakwater();
         let mut broad = stock.clone();
         broad.widen(9.5);
         let factor = broad.beam_factor();
         assert!(factor > 1.5);
-        for (narrow, wide) in stock.wing_stations().iter().zip(broad.wing_stations()) {
+        // Her casemates aside, which only a broad hull carries.
+        let on_deck = |d: &Design| {
+            (d.wing_stations().into_iter())
+                .filter(|s| s.emplacement == Emplacement::Deck)
+                .collect::<Vec<_>>()
+        };
+        for (narrow, wide) in on_deck(&stock).iter().zip(on_deck(&broad)) {
             assert!((narrow.abeam * factor - wide.abeam).abs() < 1e-4);
             assert_eq!(narrow.fore, wide.fore);
         }
+    }
+
+    #[test]
+    fn a_battleship_has_casemates_under_her_open_deck_and_gunhouses_take_its_edge() {
+        let mut long = Design::breakwater();
+        for _ in 0..2 {
+            long.insert(4, Module::new(Frame::Straight, [])).unwrap();
+        }
+        let casemates = |d: &Design, houses: usize| {
+            (d.wing_layout(houses).deck.iter())
+                .filter(|s| s.emplacement == Emplacement::Casemate)
+                .count()
+        };
+        // A narrow hull has no casemates.
+        assert_eq!(casemates(&long, 0), 0);
+        let mut broad = long.clone();
+        broad.widen(9.5);
+        let last = broad.modules().len() - 1;
+        let open = (1..last).filter(|&at| broad.open_deck(at)).count();
+        // One a side under each open section, gunhouses or none.
+        assert_eq!(casemates(&broad, 0), 2 * open);
+        assert!(broad.gunhouse_room() >= 2);
+        assert_eq!(casemates(&broad, 2), 2 * open);
+        // Each gunhouse takes the deck edge from the deck guns, where a turret has not
+        // already kept them off it.
+        let most = broad.gunhouse_room();
+        for houses in 0..most {
+            assert!(broad.deck_gun_room(houses + 1) <= broad.deck_gun_room(houses));
+        }
+        assert!(broad.deck_gun_room(most) < broad.deck_gun_room(0));
+        let layout = broad.wing_layout(2);
+        assert_eq!(layout.gunhouses.len(), 4);
+        assert!(
+            (layout.gunhouses.iter()).all(|s| s.emplacement == Emplacement::Gunhouse)
+        );
+        // A casemate is cut in her side, at her deck edge, and covers its own beam.
+        let casemate = (layout.deck.iter())
+            .find(|s| s.emplacement == Emplacement::Casemate)
+            .unwrap();
+        let edge = broad.deck_edge(casemate.fore) * broad.beam_factor();
+        assert!((casemate.abeam.abs() - edge).abs() < 1e-4);
+        assert!(casemate.arc.1 < 1.1);
     }
 }

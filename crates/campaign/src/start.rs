@@ -1,6 +1,14 @@
 //! The ship a run starts in, picked before her first patrol.
-use crate::{Fittings, Run};
+use crate::{Card, Fittings, Run};
+use shipvivor_artillery::FireControl;
 use shipvivor_shipyard::{Design, Protection, Ship};
+
+/// The light cruiser's long-range gunnery: cards dealt and fitted only on her line.
+pub const CRUISER_GUNNERY: [Card; 3] = [
+    Card::SuppressingFire,
+    Card::LongBaseRangefinders,
+    Card::PlungingFire,
+];
 
 /// The hulls a run can start in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -8,8 +16,9 @@ pub enum StartingHull {
     /// Long-barrelled guns that outreach a destroyer's, under thin plate, and no tubes.
     #[default]
     LightCruiser,
-    /// Tubes in the bow, amidships and in the stern, a second engine for speed, and
-    /// heavier plate, with shorter-reaching guns.
+    /// Built like a tank: a third again the hull, half again the plate and a second
+    /// engine, with one main gun to the cruiser's two and tubes in the bow, amidships and
+    /// the stern.
     HeavyDestroyer,
 }
 
@@ -39,7 +48,7 @@ impl StartingHull {
     pub fn summary(self) -> &'static str {
         match self {
             Self::LightCruiser => "Long-reaching guns, thin plate, no tubes",
-            Self::HeavyDestroyer => "Tubes fore, aft and amidships; fast and well plated",
+            Self::HeavyDestroyer => "Heavy plate, a tough hull, one gun and three sets of tubes",
         }
     }
 
@@ -54,7 +63,7 @@ impl StartingHull {
     pub fn protection(self) -> Protection {
         match self {
             Self::LightCruiser => Protection::LIGHT_CRUISER,
-            Self::HeavyDestroyer => Protection::BREAKWATER,
+            Self::HeavyDestroyer => Protection::HEAVY_DESTROYER,
         }
     }
 
@@ -62,12 +71,31 @@ impl StartingHull {
     /// of muzzle velocity.
     pub fn fittings(self) -> Fittings {
         match self {
+            // The cruiser's deck guns are one-inch: she fights with her main battery,
+            // and the destroyer's two-inch guns make up for her single turret.
             Self::LightCruiser => Fittings {
                 velocity: 1,
+                one_inch_deck_guns: true,
                 ..Fittings::default()
             },
             Self::HeavyDestroyer => Fittings::default(),
         }
+    }
+
+    /// Her main battery's scatter, as a multiple of the stock crew's: the cruiser lays
+    /// her guns from a steadier platform, and the destroyer's are sloppy off her lively
+    /// deck.
+    pub fn dispersion(self) -> f32 {
+        match self {
+            Self::LightCruiser => 0.8,
+            Self::HeavyDestroyer => 1.25,
+        }
+    }
+
+    /// A ship of her line can be fitted with `card`. The cruiser's long-range gunnery
+    /// is hers alone.
+    pub fn takes(self, card: Card) -> bool {
+        self == Self::LightCruiser || !CRUISER_GUNNERY.contains(&card)
     }
 }
 
@@ -80,6 +108,18 @@ impl Run {
         self.fittings = hull.fittings();
         self.refit_protection();
         self
+    }
+
+    /// Her main battery's fire control: her hull's scatter, and the cruiser's gunnery
+    /// cards.
+    pub fn fire_control(&self) -> FireControl {
+        let fit = &self.fittings;
+        FireControl {
+            dispersion: self.hull.dispersion(),
+            rangefinders: fit.rangefinders,
+            suppression: fit.suppression,
+            plunging: fit.plunging,
+        }
     }
 }
 
@@ -104,5 +144,10 @@ mod tests {
         assert!(design.top_speed() > cruiser.ship.design().top_speed());
         assert!(design.protection().thickness > cruiser.ship.design().protection().thickness);
         assert_eq!(destroyer.fittings.velocity, 0);
+        // Fewer guns, more hull: one main turret to the cruiser's two, and a third again
+        // the structure.
+        assert_eq!(design.gun_stations().len(), 1);
+        assert_eq!(cruiser.ship.design().gun_stations().len(), 2);
+        assert!(design.structure() > 1.25 * cruiser.ship.design().structure());
     }
 }

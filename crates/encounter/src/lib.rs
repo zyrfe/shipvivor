@@ -72,13 +72,18 @@ pub use projectile::{SIGHT_LIMIT, Shot, Sighting, Trajectory};
 use projectile::{fire, footprint};
 pub use ram::Hull;
 pub use ranging::{HEAVY_CALIBRE, HEAVY_DAMAGE, HEAVY_RANGE, HEAVY_RELOAD, Ranging};
+/// The main battery's scatter and the cruiser's gunnery rules, for the cards to show.
+pub use shipvivor_artillery::gunnery;
 pub use shipvivor_artillery::{
-    AntiAir, ArmorGrade, Impact, MainShell, Round, Secondaries, TurretLayout,
+    AntiAir, ArmorGrade, FireControl, Gunhouses, Impact, MainShell, Round, Secondaries,
+    TurretLayout,
 };
 use shipvivor_compass::heading as bearing;
+pub use shipvivor_shipyard::Emplacement;
 pub use torpedo::{
-    FIXED_HALF_ARC, RACK_HALF_ARC, Rack, SPREAD_HALF_ARC, TORPEDO_RANGE, TORPEDO_SPEED, TUBE_RELOAD,
-    Torpedo, TubeSet, intercept,
+    FIXED_HALF_ARC, FULL_SPREAD, GUIDANCE_RANKS, GUIDANCE_TURN, Guidance, RACK_HALF_ARC, Rack,
+    SEEKER_HALF_CONE, SPREAD, SPREAD_HALF_ARC, TORPEDO_RANGE, TORPEDO_SPEED, TUBE_RELOAD, Torpedo,
+    TubeSet, WIDE_SEEKER_HALF_CONE, intercept,
 };
 pub use torpedo_boat::{
     AIM_ERROR, FIRING_RANGE, FIRST_RUN, HARRYING_RANGE, MOORED_PAIR, MOST_OUT, RELOAD, REPLACEMENT,
@@ -507,6 +512,8 @@ pub struct Battle {
     torpedoes: Vec<Torpedo>,
     /// Her sets of torpedo tubes, from the bow aft.
     tubes: Vec<TubeSet>,
+    /// How her torpedoes are fitted out: their guidance, reload and run.
+    torpedo_fit: shipvivor_shipyard::Torpedoes,
     floatplanes: Vec<Floatplane>,
     bombs: Vec<Bomb>,
     launchers: Vec<Launcher>,
@@ -532,16 +539,22 @@ pub struct Battle {
     /// The captain is looking through the scope, so turrets on scope control are hers
     /// wherever they bear on the sight.
     scope_up: bool,
+    /// Her deck guns, in the order they are fitted, then her secondary gunhouses.
     wing_guns: Vec<WingGun>,
-    /// Where her secondaries stand on the hull she has now, in the order they are fitted.
-    wing_stations: Vec<shipvivor_shipyard::WingStation>,
+    /// Where her deck guns and gunhouses stand on the hull she has now, with each number
+    /// of gunhouses a side her deck has room for. Shared, so a rewind's copy is cheap.
+    wing_layouts: std::sync::Arc<[shipvivor_shipyard::WingLayout]>,
     /// Where her AA mounts stand on the hull she has now, in the order they are fitted.
     aa_stations: Vec<shipvivor_shipyard::AaStation>,
     secondaries: Secondaries,
+    gunhouses: Gunhouses,
     aa_mounts: Vec<AaMount>,
     anti_air: AntiAir,
     /// Ranks of training gear on every main gunhouse.
     training_gear: u16,
+    /// How her main battery lays its rounds: her hull's scatter and the cruiser's
+    /// gunnery cards.
+    fire_control: FireControl,
     last_strike: Option<(Impact, f32)>,
     /// The player's heading and hull this tick, for placing hits along her length.
     keel: (Vec2, Hull),
@@ -659,6 +672,7 @@ impl Battle {
             shots: vec![],
             torpedoes: vec![],
             tubes: vec![],
+            torpedo_fit: shipvivor_shipyard::Torpedoes::STOCK,
             floatplanes: vec![],
             bombs: vec![],
             launchers: vec![],
@@ -680,9 +694,9 @@ impl Battle {
             marked: None,
             scope_up: false,
             wing_guns: mounts::wing_berths(
-                &shipvivor_shipyard::Design::breakwater().wing_stations(),
-                2 * Secondaries::STOCK.per_side,
+                &shipvivor_shipyard::Design::breakwater().wing_layout(0),
                 Secondaries::STOCK,
+                Gunhouses::NONE,
                 &shipvivor_shipyard::Design::breakwater()
                     .gun_stations()
                     .into_iter()
@@ -692,8 +706,9 @@ impl Battle {
             .into_iter()
             .map(WingGun::new)
             .collect(),
-            wing_stations: shipvivor_shipyard::Design::breakwater().wing_stations(),
+            wing_layouts: mounts::wing_layouts(&shipvivor_shipyard::Design::breakwater()),
             secondaries: Secondaries::STOCK,
+            gunhouses: Gunhouses::NONE,
             aa_mounts: shipvivor_shipyard::Design::breakwater()
                 .aa_stations()
                 .into_iter()
@@ -703,6 +718,7 @@ impl Battle {
             aa_stations: shipvivor_shipyard::Design::breakwater().aa_stations(),
             anti_air: AntiAir::STOCK,
             training_gear: 0,
+            fire_control: FireControl::STOCK,
             last_strike: None,
             keel: (Vec2::NEG_Y, Hull::CRUISER),
             next_wave: wave_interval,
@@ -1325,17 +1341,40 @@ impl Battle {
     pub fn wing_guns(&self) -> &[WingGun] {
         &self.wing_guns
     }
+    /// Her deck guns as fitted.
     pub fn secondaries(&self) -> Secondaries {
         self.secondaries
     }
-    /// Mount, arm and drill the secondaries as fitted. Guns already aboard keep their state.
+    /// Her secondary gunhouses as fitted.
+    pub fn gunhouses(&self) -> Gunhouses {
+        self.gunhouses
+    }
+    /// Mount, arm and drill the deck guns as fitted. Guns already aboard keep their state.
     /// Guns past the room her deck has wait ashore until a longer hull makes room. Each
     /// trains only as far as its fire clears the guns beside it and the main turrets.
     pub fn fit_secondaries(&mut self, fit: Secondaries) {
+        self.secondaries = fit;
+        self.stand_wing_guns();
+    }
+    /// Mount the secondary gunhouses as fitted, each where two deck guns would stand.
+    pub fn fit_gunhouses(&mut self, houses: Gunhouses) {
+        self.gunhouses = houses;
+        self.stand_wing_guns();
+    }
+    /// Stand the deck guns and gunhouses fitted where her hull has room for them.
+    fn stand_wing_guns(&mut self) {
+        let houses = self
+            .gunhouses
+            .per_side
+            .min(self.wing_layouts.len().saturating_sub(1));
+        let Some(layout) = self.wing_layouts.get(houses) else {
+            self.wing_guns.clear();
+            return;
+        };
         let stations = mounts::wing_berths(
-            &self.wing_stations,
-            2 * fit.per_side,
-            fit,
+            layout,
+            self.secondaries,
+            self.gunhouses,
             &self.main_mounts,
         );
         self.wing_guns.truncate(stations.len());
@@ -1345,7 +1384,6 @@ impl Battle {
         let aboard = self.wing_guns.len();
         self.wing_guns
             .extend(stations[aboard..].iter().copied().map(WingGun::new));
-        self.secondaries = fit;
     }
     pub fn main_mount(&self, station: Station) -> &MainMount {
         &self.main_mounts[station.index()]
@@ -1378,9 +1416,10 @@ impl Battle {
             self.main_mounts[i].gear = self.training_gear;
             self.main_mounts[i].fit(layout);
         }
-        // The secondaries stand where this hull has room for them, clear of her turrets.
-        self.wing_stations = design.wing_stations();
-        self.fit_secondaries(self.secondaries);
+        // The deck guns and gunhouses stand where this hull has room for them, clear of
+        // her turrets.
+        self.wing_layouts = mounts::wing_layouts(design);
+        self.stand_wing_guns();
         self.fit_strike_craft(design);
         self.fit_tubes(design);
     }
@@ -1401,6 +1440,14 @@ impl Battle {
     }
     pub fn training_gear(&self) -> u16 {
         self.training_gear
+    }
+    /// Her main battery's fire control: how widely it lays, and the cruiser's
+    /// suppressing fire, rangefinders and plunging fire.
+    pub fn fit_fire_control(&mut self, fire_control: FireControl) {
+        self.fire_control = fire_control;
+    }
+    pub fn fire_control(&self) -> FireControl {
+        self.fire_control
     }
     pub fn fit_turrets(&mut self, layout: TurretLayout) {
         for mount in &mut self.main_mounts {
@@ -1479,6 +1526,9 @@ impl Battle {
         let Some(path) = mount.fire(reload) else {
             return false;
         };
+        // Each round falls a little off its mark, the farther out the wider, as her hull
+        // and her rangefinders lay it.
+        let path = path.laid_off(self.fire_control, self.serial);
         path.launch(
             &mut self.shots,
             &mut self.effects,
@@ -1794,6 +1844,15 @@ impl Battle {
         }
         for (index, gun) in self.wing_guns.iter_mut().enumerate() {
             gun.reload = (gun.reload - dt).max(0.);
+            // A gunhouse fires its own bore's round, farther and slower than a deck gun.
+            let fit = if gun.emplacement() == Emplacement::Gunhouse {
+                let h = self.gunhouses;
+                (h.range, h.reload, h.barrels, f32::from(h.bore), h.damage)
+            } else {
+                let d = self.secondaries;
+                (d.range, d.reload, d.barrels, d.bore, d.damage)
+            };
+            let (range, reload, barrels, bore, damage) = fit;
             let target = self
                 .raiders
                 .iter()
@@ -1805,7 +1864,7 @@ impl Battle {
                     projectile::lead(from, r.body.pos, r.way, Battery::Secondary)
                 })
                 .filter(|&p| {
-                    p.distance_squared(orders.player) <= self.secondaries.range.powi(2)
+                    p.distance_squared(orders.player) <= range.powi(2)
                         && gun.covers(orders.player, orders.heading, p)
                         && coast::open_water(orders.player, p, &self.ports, &self.landmarks)
                 })
@@ -1817,18 +1876,19 @@ impl Battle {
                 .or_else(|| {
                     gun.shore_target(
                         orders,
-                        self.secondaries.range,
+                        range,
                         &self.raiders,
                         &self.ports,
                         &self.landmarks,
                         &self.floe.icebergs,
                     )
                 });
+            gun.engaged = target.is_some();
             let Some(target) = target else {
                 // With nothing in its arc the crew stands easy, and takes a moment of its
                 // own to open fire when something comes into it.
                 if gun.reload == 0. {
-                    gun.reload = self.secondaries.reload
+                    gun.reload = reload
                         * mounts::STAND_EASY
                         * projectile::luck(self.serial, index as u64);
                 }
@@ -1844,7 +1904,6 @@ impl Battle {
                 && gun.reload == 0.
             {
                 // A twin mount fires both barrels together, side by side.
-                let barrels = self.secondaries.barrels;
                 for barrel in 0..barrels {
                     // No two rounds fall in quite the same place.
                     let fall = projectile::strewn(pivot, target, self.serial);
@@ -1854,18 +1913,19 @@ impl Battle {
                         continue;
                     };
                     path.offset_muzzle((barrel as f32 - (barrels - 1) as f32 * 0.5) * 0.36);
-                    path.rebore(self.secondaries.bore());
+                    path.rebore(bore);
                     path.launch(
                         &mut self.shots,
                         &mut self.effects,
                         &mut self.serial,
                         Battery::Secondary,
-                        self.secondaries.damage,
+                        damage,
                     );
                 }
                 // Each round is loaded a little quicker or slower than the last.
                 let ragged = 2. * projectile::luck(self.serial, index as u64) - 1.;
-                gun.reload = self.secondaries.reload * (1. + mounts::RAGGED * ragged);
+                gun.reload = reload * (1. + mounts::RAGGED * ragged);
+                gun.count_round();
             }
         }
         self.fire_anti_air(dt, orders);

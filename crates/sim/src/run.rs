@@ -295,6 +295,12 @@ fn want(run: &Run, job: DockJob) -> Option<u32> {
             MoreSecondaries | TwinSecondaries | HeavySecondaries | QuickSecondaries
             | SecondaryRange => 30,
             MoreAntiAir | HeavyAntiAir | QuickAntiAir => 25,
+            // Her tubes are a destroyer's weapon, and guidance makes them hers.
+            GuidedTorpedoes => 50,
+            QuickTubes | LongRunningTorpedoes => 30,
+            // The cruiser's long-range gunnery, for a captain who keeps her guns' reach.
+            SuppressingFire | PlungingFire => 45,
+            LongBaseRangefinders => 40,
             _ => return None,
         },
         DockJob::Insert {

@@ -6,8 +6,8 @@ use bevy::{
     ui::{RelativeCursorPosition, UiGlobalTransform},
     window::{CursorGrabMode, CursorOptions},
 };
-use shipvivor_campaign::{CALIBRES, Card, Fittings, LOADER_CUT, Rarity, Run, limits};
-use shipvivor_encounter::ArmorGrade;
+use shipvivor_campaign::{CALIBRES, Card, Fittings, LOADER_GAIN, Rarity, Run, limits};
+use shipvivor_encounter::{ArmorGrade, FireControl, Guidance, TORPEDO_RANGE, TUBE_RELOAD, gunnery};
 use shipvivor_navigation::Helm;
 use shipvivor_shipyard::{
     BOMB_DAMAGE, Component, Design, INFLOW, MISSILE_DAMAGE, PUMP, Protection,
@@ -31,9 +31,11 @@ enum Kind {
     Gunnery,
     Machinery,
     Protection,
+    DeckGuns,
     Secondaries,
     AntiAir,
     StrikeCraft,
+    Torpedoes,
 }
 impl Kind {
     fn label(self) -> &'static str {
@@ -42,9 +44,11 @@ impl Kind {
             Self::Gunnery => "MAIN BATTERY",
             Self::Machinery => "MACHINERY",
             Self::Protection => "PROTECTION",
+            Self::DeckGuns => "DECK GUNS",
             Self::Secondaries => "SECONDARIES",
             Self::AntiAir => "ANTI-AIRCRAFT",
             Self::StrikeCraft => "STRIKE CRAFT",
+            Self::Torpedoes => "TORPEDOES",
         }
     }
     fn color(self) -> Color {
@@ -53,9 +57,11 @@ impl Kind {
             Self::Gunnery => Color::srgb_u8(240, 104, 88),
             Self::Machinery => Color::srgb_u8(88, 204, 214),
             Self::Protection => Color::srgb_u8(200, 208, 218),
-            Self::Secondaries => Color::srgb_u8(132, 224, 120),
+            Self::DeckGuns => Color::srgb_u8(132, 224, 120),
+            Self::Secondaries => Color::srgb_u8(92, 200, 170),
             Self::AntiAir => Color::srgb_u8(150, 158, 255),
             Self::StrikeCraft => Color::srgb_u8(236, 150, 226),
+            Self::Torpedoes => Color::srgb_u8(234, 222, 96),
         }
     }
 }
@@ -98,13 +104,13 @@ fn stat(
         change,
     }
 }
-/// A loader card's figures: the share it takes off every reload, then each gun it drills
-/// as its time now and after, labelled.
+/// A loader card's figures: what it adds to the rate of fire, then each gun it drills as
+/// its time now and after, labelled.
 fn quicker(guns: impl IntoIterator<Item = (Cow<'static, str>, f32, f32)>) -> Vec<Stat> {
     let cut = stat(
-        "Reload",
+        "Fire rate",
         "",
-        format!("-{:.0}%", 100. * LOADER_CUT),
+        format!("+{:.0}%", 100. * LOADER_GAIN),
         Change::Gain,
     );
     let each = (guns.into_iter())
@@ -137,9 +143,28 @@ impl Face {
                 card,
                 Card::TwinSecondaries
                     | Card::SecondaryTurrets
+                    | Card::GuidedTorpedoes
                     | Card::TripleTurrets
                     | Card::QuadTurrets
             )
+    }
+}
+
+/// The most secondary gunhouses a side her deck has room for while her deck guns keep
+/// theirs.
+fn room_for_houses(card: Card, design: &Design, now: &Fittings) -> Option<u16> {
+    Some(
+        shipvivor_campaign::deck_ranks(card, design, now)
+            .map_or(limits::WING_TURRETS, |room| room.min(limits::WING_TURRETS)),
+    )
+}
+
+/// A deck gun's bore: in whole inches, or to the half inch.
+fn bore_inches(bore: f32) -> String {
+    if bore.fract() == 0. {
+        format!("{bore:.0} in")
+    } else {
+        format!("{bore:.1} in")
     }
 }
 
@@ -179,6 +204,55 @@ fn knots(f: Fittings) -> String {
         Helm::FULL_AHEAD * f.speed_factor() * KNOTS_PER_MPS
     )
 }
+/// How her torpedoes steer with these fittings.
+fn guidance(f: Fittings) -> Guidance {
+    Guidance::for_rank(f.torpedoes().guidance)
+}
+/// How hard a torpedo turns toward a ship, or that it runs straight.
+fn steering(g: Guidance) -> String {
+    if g.guided() {
+        format!("{:.0} deg/s", g.turn.to_degrees())
+    } else {
+        "Straight".into()
+    }
+}
+/// How far out a torpedo's seeker sees a ship, and how wide.
+fn seeker(g: Guidance) -> String {
+    if g.guided() {
+        format!("{:.0} m, {:.0} deg", g.reach, 2. * g.cone.to_degrees())
+    } else {
+        "None".into()
+    }
+}
+/// How many ships a spread is laid across.
+fn targets(g: Guidance) -> String {
+    match (g.fan, g.spread) {
+        (false, _) => "1 ship".into(),
+        (true, n) => format!("{n} ships"),
+    }
+}
+/// The torpedo card's figures: the turn and the seeker always, then how many ships a
+/// spread fans out across and how many torpedoes go in it, once those come into it.
+fn guidance_stats(now: Fittings, next: Fittings) -> Vec<Stat> {
+    let (g, after) = (guidance(now), guidance(next));
+    let mut stats = vec![
+        stat("Turn", steering(g), steering(after), Change::Gain),
+        stat("Seeker", seeker(g), seeker(after), Change::Gain),
+    ];
+    if after.fan {
+        stats.push(stat(
+            "Fans out across",
+            targets(g),
+            targets(after),
+            Change::Gain,
+        ));
+    }
+    if after.spread != g.spread {
+        stats.push(stat("Spread", g.spread, after.spread, Change::Gain));
+    }
+    stats
+}
+
 /// Metres out at which a card reckons what the main battery's round pierces.
 const PIERCING_RANGE: f32 = 400.;
 /// Inches of plate the main battery's round goes through, [`PIERCING_RANGE`] out.
@@ -211,17 +285,57 @@ fn piercing_stats(now: Fittings, next: Fittings) -> Vec<Stat> {
 }
 
 pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
+    // A legendary card shows its ordinary card's figures for all the ranks it fits at
+    // once, under its own name.
+    if let Some((base, ranks)) = card.legend() {
+        let (name, flavour) = match card {
+            Card::Overdrive => (
+                "Overdrive",
+                "Every valve screwed down, every governor wired open. The chief engineer has stopped asking questions.",
+            ),
+            Card::BattleshipPlate => (
+                "Battleship Plate",
+                "Somebody's battleship is missing her belt. Nobody here knows anything about it.",
+            ),
+            Card::SuperchargedShells => (
+                "Supercharged Shells",
+                "Double charges, polished bores, a prayer for the breech blocks. Reach out and touch the horizon.",
+            ),
+            _ => (
+                "Auto-Loaders",
+                "A contraption of chains and rams that loads faster than the crew can say \"is that safe\".",
+            ),
+        };
+        let mut face = face_to(base, now, now.with(card), design);
+        face.name = name;
+        face.flavour = flavour;
+        let at_once = stat("Ranks at once", "", format!("x{ranks}"), Change::Gain);
+        face.stats.insert(0, at_once);
+        return face;
+    }
+    face_to(card, now, now.with(card), design)
+}
+
+/// The face of an ordinary card, going from `now` to `next`.
+fn face_to(card: Card, now: Fittings, next: Fittings, design: &Design) -> Face {
     use Change::*;
-    let next = now.with(card);
     let (wing, wing_next) = (now.secondaries(), next.secondaries());
     let (flak, flak_next) = (now.anti_air(), next.anti_air());
     let (craft, craft_next) = (now.strike_craft(), next.strike_craft());
     // The most ranks of a card that wants room which her deck or her plane sections
     // have room for.
     let room = |most: u16| {
-        Some(shipvivor_campaign::deck_ranks(card, design).map_or(most, |room| most.min(room)))
+        Some(
+            shipvivor_campaign::deck_ranks(card, design, &now)
+                .map_or(most, |room| most.min(room)),
+        )
     };
     match card {
+        // [`face`] dresses a legendary card as its ordinary one.
+        Card::Overdrive | Card::BattleshipPlate | Card::SuperchargedShells | Card::AutoLoaders => {
+            let base = card.legend().map_or(Card::Turbines, |(base, _)| base);
+            face_to(base, now, next, design)
+        }
         // Turrets of different bores load at their own pace, so each bore aboard has
         // its own line.
         Card::Loader => Face {
@@ -329,28 +443,34 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
             flavour: "Wider gunhouses, more barrels in every salvo.",
         },
         Card::MoreSecondaries => Face {
-            kind: Kind::Secondaries,
-            name: "More Secondaries",
+            kind: Kind::DeckGuns,
+            name: "More Deck Guns",
             rank: (now.wing_mounts, room(limits::WING_MOUNTS)),
             stats: vec![stat("Guns a side", wing.per_side, wing_next.per_side, Gain)],
-            flavour: "Another gun each beam, out along the deck edge from the bridge. A longer hull has room for more.",
+            flavour: "Another gun each beam, out along the deck edge from the bridge, or in a casemate in a big hull's side. A longer hull has room for more.",
         },
         Card::HeavySecondaries => Face {
-            kind: Kind::Secondaries,
-            name: "Heavier Secondaries",
+            kind: Kind::DeckGuns,
+            name: "Heavier Deck Guns",
             rank: (now.wing_shells, Some(limits::WING_SHELLS)),
-            stats: vec![stat("Damage", wing.damage, wing_next.damage, Gain)],
-            flavour: "A heavier round for the close-range guns.",
+            stats: {
+                let mut stats = vec![stat("Damage", wing.damage, wing_next.damage, Gain)];
+                if wing_next.bore > wing.bore {
+                    stats.push(stat("Bore", bore_inches(wing.bore), bore_inches(wing_next.bore), Gain));
+                }
+                stats
+            },
+            flavour: "A heavier gun and round on every deck gun, up to three inches. They whittle a ship down; they never wreck her.",
         },
         Card::QuickSecondaries => Face {
-            kind: Kind::Secondaries,
-            name: "Secondary Loaders",
+            kind: Kind::DeckGuns,
+            name: "Deck Gun Loaders",
             rank: (now.wing_loaders, Some(limits::WING_LOADERS)),
             stats: quicker([("Each gun".into(), wing.reload, wing_next.reload)]),
             flavour: "Ready-use lockers beside every gun.",
         },
         Card::SecondaryRange => Face {
-            kind: Kind::Secondaries,
+            kind: Kind::DeckGuns,
             name: "Rangefinders",
             rank: (now.wing_range, Some(limits::WING_RANGE)),
             stats: vec![stat(
@@ -362,15 +482,15 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
             flavour: "The crew opens fire on boats farther out.",
         },
         Card::TwinSecondaries => Face {
-            kind: Kind::Secondaries,
+            kind: Kind::DeckGuns,
             name: match wing_next.barrels {
-                ..=2 => "Twin Secondaries",
-                3 => "Triple Secondaries",
-                _ => "Quad Secondaries",
+                ..=2 => "Twin Deck Guns",
+                3 => "Triple Deck Guns",
+                _ => "Quad Deck Guns",
             },
             rank: (now.wing_twin, Some(limits::WING_BARRELS)),
             stats: vec![stat("Barrels", wing.barrels, wing_next.barrels, Gain)],
-            flavour: "Another barrel on every wing gun. They all fire together.",
+            flavour: "Another barrel on every deck gun. They all fire together.",
         },
         Card::TrainingGear => Face {
             kind: Kind::Gunnery,
@@ -446,26 +566,37 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
             stats: quicker([("Each mount".into(), flak.reload, flak_next.reload)]),
             flavour: "Clips passed up hand to hand keep the guns firing.",
         },
-        Card::SecondaryTurrets => Face {
-            kind: Kind::Secondaries,
-            // Named for the size the next rank builds, or the one fitted once it is the last.
-            name: match now.next_secondary_bore() {
-                Some(..=4) => "4-inch Secondary Turrets",
-                _ => "6-inch Secondary Turrets",
-            },
-            rank: (now.wing_turrets, Some(limits::WING_TURRETS)),
-            stats: vec![
-                stat("Damage", wing.damage, wing_next.damage, Gain),
-                stat("Reach", metres(wing.range), metres(wing_next.range), Gain),
-                stat(
-                    "Reload",
-                    seconds(wing.reload),
-                    seconds(wing_next.reload),
-                    Cost,
-                ),
-            ],
-            flavour: "Every wing gun rebuilt as a gunhouse that the crew lays and fires itself: four-inch on a battleship's hull, six-inch on a heavy battleship's. Twin mounts go in either.",
-        },
+        Card::SecondaryTurrets => {
+            let (houses, houses_next) = (now.gunhouses(), next.gunhouses());
+            let room = |h: &shipvivor_encounter::Gunhouses| design.deck_gun_room(h.per_side);
+            Face {
+                kind: Kind::Secondaries,
+                // Named for the bore her class of hull carries.
+                name: match now.gunhouse_bore() {
+                    Some(..=4) | None => "4-inch Secondary Gunhouses",
+                    Some(5..=6) => "6-inch Secondary Gunhouses",
+                    Some(_) => "8-inch Secondary Gunhouses",
+                },
+                rank: (now.wing_turrets, room_for_houses(card, design, &now)),
+                stats: vec![
+                    stat(
+                        "Gunhouses a side",
+                        houses.per_side,
+                        houses_next.per_side,
+                        Gain,
+                    ),
+                    stat("Damage", "", houses_next.damage, Gain),
+                    stat("Reach", "", metres(houses_next.range), Gain),
+                    stat(
+                        "Deck gun room",
+                        room(&houses),
+                        room(&houses_next),
+                        Cost,
+                    ),
+                ],
+                flavour: "A twin gunhouse each beam, laid and fired by its own crew: four-inch on a battleship's hull, six-inch on a heavy battleship's, eight-inch on an ultra heavy battleship's. Each takes the deck edge two deck guns would.",
+            }
+        }
         Card::MoreLaunchers => Face {
             kind: Kind::StrikeCraft,
             name: "More Launchers",
@@ -518,6 +649,110 @@ pub(crate) fn face(card: Card, now: Fittings, design: &Design) -> Face {
             ],
             flavour: "Every plane drops a stick across its mark instead of a single bomb.",
         },
+        Card::GuidedTorpedoes => Face {
+            kind: Kind::Torpedoes,
+            name: "Guided Torpedoes",
+            rank: (now.guidance, Some(limits::GUIDANCE)),
+            stats: guidance_stats(now, next),
+            flavour: match next.guidance {
+                ..=1 => {
+                    "A seeker in every warhead turns it onto the ship ahead late in its run. A ship that turns hard away from a long shot can still slip it."
+                }
+                2 => {
+                    "A quicker rudder on every torpedo, so it comes round after a ship that turns."
+                }
+                3 => {
+                    "Fire control lays each torpedo of a spread on a ship of its own, the one aimed at first. Spread the love."
+                }
+                _ => "Five to a spread, and a seeker that sees wider and farther.",
+            },
+        },
+        Card::QuickTubes => Face {
+            kind: Kind::Torpedoes,
+            name: "Tube Drill",
+            rank: (now.quick_tubes, Some(limits::QUICK_TUBES)),
+            stats: quicker([(
+                "Each set".into(),
+                TUBE_RELOAD * now.torpedoes().reload,
+                TUBE_RELOAD * next.torpedoes().reload,
+            )]),
+            flavour: "Spare torpedoes on trolleys beside the tubes, and a crew drilled to reload them.",
+        },
+        Card::LongRunningTorpedoes => Face {
+            kind: Kind::Torpedoes,
+            name: "Long-Running Torpedoes",
+            rank: (now.long_run, Some(limits::LONG_RUN)),
+            stats: vec![stat(
+                "Run",
+                metres(TORPEDO_RANGE * now.torpedoes().run),
+                metres(TORPEDO_RANGE * next.torpedoes().run),
+                Gain,
+            )],
+            flavour: "A bigger air flask carries every torpedo farther, as fast as ever.",
+        },
+        Card::SuppressingFire => {
+            let held = |f: Fittings, at: f32| gunnery_of(f).suppression(at);
+            let line =
+                |label, at| stat(label, seconds(held(now, at)), seconds(held(next, at)), Gain);
+            let at = gunnery::SUPPRESSION_AT;
+            Face {
+                kind: Kind::Gunnery,
+                name: "Suppressing Fire",
+                rank: (now.suppression, Some(limits::SUPPRESSION)),
+                stats: vec![
+                    line("Crews held", at),
+                    line("Close in", 0.5 * at),
+                    line("Far out", 1.5 * at),
+                ],
+                flavour: "Every hit sends her gun crews diving for cover. They hold fire, and load nothing, until they pick themselves up. Farther out, where the fall of shot is hard to read, they keep their heads down longer.",
+            }
+        }
+        Card::LongBaseRangefinders => {
+            // What is left of her scatter well out, as a share of what it was.
+            let left = |f: Fittings| 1. - gunnery::RANGEFINDER_CUT * f32::from(f.rangefinders);
+            Face {
+                kind: Kind::Gunnery,
+                name: "Long-Base Rangefinders",
+                rank: (now.rangefinders, Some(limits::RANGEFINDERS)),
+                stats: vec![
+                    stat("Scatter far out", share(left(now)), share(left(next)), Gain),
+                    stat("Beyond", "", metres(0.5 * next.round().reach()), New),
+                ],
+                flavour: "A rangefinder as wide as her beam reads the far fall of shot to the yard, and her salvos close up at long range.",
+            }
+        }
+        Card::PlungingFire => {
+            let far = gunnery::PLUNGE_RANGE + 1.;
+            let (harder, deeper) = gunnery_of(now).plunge(far);
+            let (harder_next, deeper_next) = gunnery_of(next).plunge(far);
+            let pierce = |deeper: f32| format!("+{:.0}%", 100. * (deeper - 1.));
+            Face {
+                kind: Kind::Gunnery,
+                name: "Plunging Fire",
+                rank: (now.plunging, Some(limits::PLUNGING)),
+                stats: vec![
+                    stat("Plunges beyond", "", metres(gunnery::PLUNGE_RANGE), New),
+                    stat(
+                        "Extra damage",
+                        format!("+{harder}"),
+                        format!("+{harder_next}"),
+                        Gain,
+                    ),
+                    stat("Extra pierce", pierce(deeper), pierce(deeper_next), Gain),
+                ],
+                flavour: "Laid high, her far rounds come down steep through the deck, where the plate is thinnest.",
+            }
+        }
+    }
+}
+
+/// The cruiser's gunnery cards as `f` fits them, on a stock crew's scatter.
+fn gunnery_of(f: Fittings) -> FireControl {
+    FireControl {
+        rangefinders: f.rangefinders,
+        suppression: f.suppression,
+        plunging: f.plunging,
+        ..FireControl::STOCK
     }
 }
 
@@ -578,23 +813,21 @@ fn text(
     .id()
 }
 
-/// The gems in a card's corner: one for a common card, two for an uncommon one and three,
-/// in gold, for a rare one.
+/// The gems in a card's corner: one for a common card up to five for a legendary one, in
+/// the colours games have long used for them: grey-white, green, blue, purple, orange.
 #[derive(Component)]
 pub struct Gem;
 impl Gem {
     pub(crate) fn count(rarity: Rarity) -> usize {
-        match rarity {
-            Rarity::Common => 1,
-            Rarity::Uncommon => 2,
-            Rarity::Rare => 3,
-        }
+        1 + Rarity::ALL.iter().position(|&r| r == rarity).unwrap_or(0)
     }
-    fn color(rarity: Rarity) -> Color {
+    pub(crate) fn color(rarity: Rarity) -> Color {
         match rarity {
-            Rarity::Common => Color::srgb_u8(150, 168, 172),
-            Rarity::Uncommon => Color::srgb_u8(222, 234, 240),
-            Rarity::Rare => Color::srgb_u8(255, 200, 84),
+            Rarity::Common => Color::srgb_u8(196, 204, 208),
+            Rarity::Uncommon => Color::srgb_u8(64, 214, 92),
+            Rarity::Rare => Color::srgb_u8(64, 148, 255),
+            Rarity::Epic => Color::srgb_u8(184, 96, 255),
+            Rarity::Legendary => Color::srgb_u8(255, 140, 26),
         }
     }
 }
@@ -616,7 +849,8 @@ pub fn hand(cmd: &mut Commands, parent: Entity, run: &Run, art: &Insignia) {
         ))
         .id();
     for (slot, card) in run.offers().into_iter().enumerate() {
-        spawn_card(cmd, row, slot, face(card, now, design), card, art);
+        let rarity = now.rarity(card);
+        spawn_card(cmd, row, slot, face(card, now, design), card, rarity, art);
     }
 }
 
@@ -626,16 +860,21 @@ fn spawn_card(
     slot: usize,
     face: Face,
     card: Card,
+    rarity: Option<Rarity>,
     art: &Insignia,
 ) {
     let tint = face.kind.color();
+    // An epic or legendary card wears its rarity's colour round its edge and in its glow.
+    let edge = rarity
+        .filter(|&r| r >= Rarity::Epic)
+        .map_or(tint, Gem::color);
     let root = cmd
         .spawn((
             Action::Card(card),
             RelativeCursorPosition::default(),
             Dealt {
                 slot,
-                color: tint,
+                color: edge,
                 age: 0.,
                 lift: 0.,
             },
@@ -653,8 +892,8 @@ fn spawn_card(
                 ColorStop::percent(navy(), 46),
                 ColorStop::auto(Color::srgb_u8(8, 18, 26)),
             ])),
-            BorderColor::all(tint),
-            BoxShadow::new(tint.with_alpha(0.25), px(0), px(6), px(0), px(16)),
+            BorderColor::all(edge),
+            BoxShadow::new(edge.with_alpha(0.25), px(0), px(6), px(0), px(16)),
             UiTransform::from_translation(Val2::px(0., 90.)),
             Visibility::Hidden,
             ChildOf(row),
@@ -749,7 +988,7 @@ fn spawn_card(
             .id();
         text(cmd, ribbon, "NEW", 11., Color::srgb_u8(30, 24, 8));
     }
-    if let Some(rarity) = card.rarity() {
+    if let Some(rarity) = rarity {
         rarity_gems(cmd, window, rarity);
     }
 
@@ -894,7 +1133,8 @@ fn spawn_card(
     ));
 }
 
-/// How rare the card is, as gems in the art window's top left corner.
+/// How rare the card is, as gems in the art window's top left corner with the rarity
+/// named beside them.
 fn rarity_gems(cmd: &mut Commands, window: Entity, rarity: Rarity) {
     let row = cmd
         .spawn((
@@ -903,6 +1143,7 @@ fn rarity_gems(cmd: &mut Commands, window: Entity, rarity: Rarity) {
                 top: px(9),
                 left: px(9),
                 column_gap: px(4),
+                align_items: AlignItems::Center,
                 ..default()
             },
             ChildOf(window),
@@ -923,10 +1164,15 @@ fn rarity_gems(cmd: &mut Commands, window: Entity, rarity: Rarity) {
             BorderColor::all(mix(color, navy(), 0.55)),
             ChildOf(row),
         ));
-        if rarity == Rarity::Rare {
+        if rarity >= Rarity::Rare {
             gem.insert(BoxShadow::new(color, px(0), px(0), px(1), px(5)));
         }
     }
+    let label = text(cmd, row, rarity.name().to_uppercase(), 10., color);
+    cmd.entity(label).insert(Node {
+        margin: UiRect::left(px(3)),
+        ..default()
+    });
 }
 
 /// Deal the hand in one card after another, then lift and brighten whichever is pointed at.
@@ -1031,7 +1277,7 @@ mod tests {
         assert_eq!(
             figures(Card::Loader),
             [
-                ("Reload".into(), String::new(), "-15%".into()),
+                ("Fire rate".into(), String::new(), "+32%".into()),
                 row(4),
                 row(6),
             ]
@@ -1040,11 +1286,61 @@ mod tests {
         assert!(now.reload_for(6) > now.reload_for(4));
         for inches in [4, 6] {
             let share = next.reload_for(inches) / now.reload_for(inches);
-            assert!((share - 0.85).abs() < 1e-4);
+            let expected = shipvivor_campaign::drilled(2) / shipvivor_campaign::drilled(1);
+            assert!((share - expected).abs() < 1e-4);
         }
         // The close-range loaders read the same way, for their one gun.
         let wing = figures(Card::QuickSecondaries);
-        assert_eq!(wing[0].2, "-15%");
+        assert_eq!(wing[0].2, "+32%");
         assert_eq!(wing[1].0, "Each gun");
+    }
+
+    #[test]
+    fn torpedo_cards_show_what_each_rank_brings() {
+        let design = Design::heavy_destroyer();
+        let figures = |card, now: Fittings| {
+            face(card, now, &design)
+                .stats
+                .iter()
+                .map(|s| (s.label.to_string(), s.before.clone(), s.after.clone()))
+                .collect::<Vec<_>>()
+        };
+        let row = |label: &str, before: &str, after: &str| {
+            (label.to_string(), before.to_string(), after.to_string())
+        };
+        let mut now = Fittings::default();
+        let guided = |now| figures(Card::GuidedTorpedoes, now);
+        assert_eq!(
+            guided(now),
+            [
+                row("Turn", "Straight", "6 deg/s"),
+                row("Seeker", "None", "120 m, 50 deg"),
+            ]
+        );
+        now.guidance = 1;
+        assert_eq!(guided(now)[0], row("Turn", "6 deg/s", "14 deg/s"));
+        now.guidance = 2;
+        assert_eq!(guided(now)[2], row("Fans out across", "1 ship", "3 ships"));
+        now.guidance = 3;
+        assert_eq!(
+            guided(now)[1..],
+            [
+                row("Seeker", "120 m, 50 deg", "170 m, 80 deg"),
+                row("Fans out across", "3 ships", "5 ships"),
+                row("Spread", "3", "5"),
+            ]
+        );
+        let now = Fittings::default();
+        assert_eq!(
+            figures(Card::QuickTubes, now),
+            [
+                row("Fire rate", "", "+32%"),
+                row("Each set", "14.00 s", "10.61 s")
+            ]
+        );
+        assert_eq!(
+            figures(Card::LongRunningTorpedoes, now),
+            [row("Run", "420 m", "504 m")]
+        );
     }
 }

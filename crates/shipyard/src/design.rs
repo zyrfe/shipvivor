@@ -164,6 +164,29 @@ impl Default for StrikeCraft {
     }
 }
 
+/// How the ship's torpedoes are fitted out, in every set of tubes alike: the ranks of
+/// guidance that steer them onto a ship, and the share of the stock reload and of the
+/// stock run each set has.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Torpedoes {
+    pub guidance: u16,
+    pub reload: f32,
+    pub run: f32,
+}
+impl Torpedoes {
+    /// Straight-running torpedoes, loaded and run as built.
+    pub const STOCK: Self = Self {
+        guidance: 0,
+        reload: 1.,
+        run: 1.,
+    };
+}
+impl Default for Torpedoes {
+    fn default() -> Self {
+        Self::STOCK
+    }
+}
+
 impl Component {
     pub fn slot(self) -> Slot {
         match self {

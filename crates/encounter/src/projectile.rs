@@ -3,7 +3,7 @@ use super::{
     Raider, Vec2, WingGun, bearing, body, harrier::MOORED_TOP,
 };
 use glam::{Vec3, Vec3Swizzles};
-use shipvivor_artillery::{Impact, Round, ShellArc};
+use shipvivor_artillery::{FireControl, Impact, Round, ShellArc};
 use shipvivor_shipyard::Reach;
 
 pub const SIGHT_LIMIT: f32 = 1400.;
@@ -298,6 +298,29 @@ impl FlightPath {
 
     pub fn offset_muzzle(&mut self, lateral: f32) {
         self.muzzle += shipvivor_compass::direction(self.heading).perp() * lateral;
+    }
+
+    /// This main-battery round laid off its mark as `fire` scatters it: over or short
+    /// along the line of fire and to either side across it, by draws `seed` fixes, so a
+    /// seed sails the same waters.
+    pub(super) fn laid_off(self, fire: FireControl, seed: u64) -> Self {
+        let start = self.muzzle.extend(self.arc.height(0.)).xzy();
+        let end = self.trajectory().end();
+        let flat = end.xz() - start.xz();
+        let Some(dir) = flat.try_normalize() else {
+            return self;
+        };
+        let (along, across) = fire.scatter(flat.length(), self.shell.reach());
+        let draw = |n| super::ranging::spread(seed, 0, n);
+        let mark = end.xz() + dir * along * draw(0) + dir.perp() * across * draw(1);
+        Self::solve(
+            start,
+            mark.extend(end.y).xzy(),
+            Battery::Main,
+            0.,
+            self.shell,
+        )
+        .unwrap_or(self)
     }
 
     pub fn launch(
@@ -816,6 +839,7 @@ impl Battle {
         let vertices = hull.outline().map(Vec2::from);
         let local =
             |p: Vec2| Vec2::new((p - player).dot(forward.perp()), -(p - player).dot(forward));
+        let fire = self.fire_control;
         let mut bursts = Vec::new();
         // Rounds that skipped off a ship, flying off on arcs of their own.
         let mut ricochets = Vec::new();
@@ -930,11 +954,20 @@ impl Battle {
                 let travel = Vec3::new(shot.velocity.x, shot.arc.slope(time), shot.velocity.y)
                     .normalize_or_zero();
                 let mut heading = shot.body.heading;
-                let round = shot.round_at(time);
+                let mut round = shot.round_at(time);
                 let lucky = luck(shot.body.id, u64::from(shot.keep.to_bits()));
                 // The damage it carries onto a ship, and onto anything else.
-                let carried = f32::from(shot.damage) * shot.heft;
-                let damage = shot.damage_now();
+                let mut carried = f32::from(shot.damage) * shot.heft;
+                let mut damage = shot.damage_now();
+                // With plunging fire, her rounds landing far out come down through the
+                // deck: harder, and deeper. A ricochet's arc starts where it skipped, so
+                // it is never one.
+                if shot.battery == Battery::Main {
+                    let (harder, deeper) = fire.plunge(shot.origin.distance(p.xz()));
+                    round.penetration *= deeper;
+                    carried += f32::from(harder);
+                    damage = damage.saturating_add(harder);
+                }
                 let mut fly_on = None;
                 let mut armor_effect = |outcome: Impact, normal: Vec3| {
                     let out = if outcome == Impact::Bounced {
@@ -951,8 +984,13 @@ impl Battle {
                         battery: shot.battery,
                     }
                 };
-                if matches!(object, Contact::Raider(..)) {
+                if let Contact::Raider(i, _) = object {
                     events.hits += 1;
+                    // With suppressing fire, her main battery's hits throw the ship's gun
+                    // crews off their guns, the longer the farther out.
+                    if shot.battery == Battery::Main {
+                        self.raiders[i].suppress(fire.suppression(p.xz().distance(player)));
+                    }
                 }
                 // A base under Breakwater's fire is roused, whatever its stage.
                 if let Contact::Port(i, _) = object

@@ -233,3 +233,35 @@ fn rounds_five_and_six_end_at_an_industrial_yard_with_open_water() {
         }
     }
 }
+
+/// Her torpedo cards reach the battle with the rest of her fittings: guidance, the
+/// reload of every set of tubes and the run of every torpedo.
+#[test]
+fn torpedo_cards_reach_the_battle_she_fights() {
+    use crate::{Sector, fit_player};
+    use shipvivor_campaign::{Card, Run, StartingHull};
+    use shipvivor_encounter::{FULL_SPREAD, TORPEDO_RANGE, TUBE_RELOAD};
+    let mut run = Run::default().with_hull(StartingHull::HeavyDestroyer);
+    let sector = Sector::of(Stage::IronNarrows, Grade::Moderate);
+    let mut battle = sector.battle(&sector.charted(40).chart);
+    fit_player(&mut battle, &run);
+    assert_eq!(battle.torpedo_fit(), run.fittings.torpedoes());
+    assert!(!battle.guidance().guided());
+    for card in [
+        Card::GuidedTorpedoes,
+        Card::GuidedTorpedoes,
+        Card::GuidedTorpedoes,
+        Card::GuidedTorpedoes,
+        Card::QuickTubes,
+        Card::LongRunningTorpedoes,
+        Card::LongRunningTorpedoes,
+    ] {
+        run.fittings = run.fittings.with(card);
+    }
+    fit_player(&mut battle, &run);
+    assert_eq!(battle.torpedo_fit(), run.fittings.torpedoes());
+    assert!(battle.guidance().guided() && battle.guidance().fan);
+    assert_eq!(battle.guidance().spread, FULL_SPREAD);
+    assert!((battle.tube_reload() - TUBE_RELOAD * shipvivor_campaign::drilled(1)).abs() < 1e-4);
+    assert!((battle.torpedo_range() - TORPEDO_RANGE * 1.4).abs() < 1e-3);
+}

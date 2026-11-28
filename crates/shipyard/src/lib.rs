@@ -16,13 +16,13 @@ mod ship;
 mod stock;
 
 pub use battery::{
-    AaStation, BARBETTE, GunStation, HULL_OUTLINE, HULL_SPLICE, Mounting, Obstruction, WingStation,
-    clear_arcs,
+    AaStation, BARBETTE, CASEMATE_BEAM, Emplacement, GunStation, HULL_OUTLINE, HULL_SPLICE,
+    Mounting, Obstruction, WingLayout, WingStation, clear_arcs,
 };
 pub use design::{
     BOMB_DAMAGE, Berth, Component, Design, FLOATPLANE_REACH, Fault, Fitting, Frame, FrameSpec,
     Gunhouse, MISSILE_DAMAGE, MISSILE_RANGE, MISSILE_RELOAD, MISSILE_SALVO, MOST_TIER, Module,
-    Protection, SORTIE_SECONDS, Sheet, Slot, StrikeCraft, TubeAim, TubeMount,
+    Protection, SORTIE_SECONDS, Sheet, Slot, StrikeCraft, Torpedoes, TubeAim, TubeMount,
 };
 pub use repair::{DRAINED, Mend, PARTY_PUMP, PUMP, Task};
 pub use ship::{BREACH, Compartment, INFLOW, Loss, Panel, Reach, Ship, Side, State, Struck};

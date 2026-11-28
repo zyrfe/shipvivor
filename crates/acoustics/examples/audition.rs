@@ -28,9 +28,18 @@
 //! punch to a heavy round through bare plate, and sections lost:
 //! `cargo run -p shipvivor-acoustics --example audition -- hits.wav hits`
 //!
+//! With `brass` only her secondaries' spent cases are rendered, under way at half ahead:
+//! a case landing, knocked and going over the side, two twin gunhouses and their brass,
+//! and heavy fire with the deck full of it:
+//! `cargo run -p shipvivor-acoustics --example audition -- brass.wav brass`
+//!
 //! With `aa` only her secondaries and her pom-poms are rendered, under way at half
 //! ahead: the secondaries alone, the pom-poms alone at an aeroplane passing, and both:
 //! `cargo run -p shipvivor-acoustics --example audition -- aa.wav aa`
+//!
+//! With `calls` only the calls for a chain of kills are rendered, one, a flourish, a
+//! rally and a triumph, then a coaster's and a freighter's horn under fire at 120 m:
+//! `cargo run -p shipvivor-acoustics --example audition -- calls.wav calls`
 use glam::Vec3;
 use shipvivor_acoustics::{
     Air, Alert, Ambience, Bank, Cue, Cues, Harm, Haunt, Hit, Mixer, Place, Rotor, SAMPLE_RATE,
@@ -612,6 +621,95 @@ fn hits(stage: &mut Stage) {
 
 /// Her secondaries and her light AA, each alone and then together, so that the two
 /// can be told apart by ear.
+/// Her secondaries' gunhouses throwing out their spent brass, under way at half ahead:
+/// each case alone, a pair of twin gunhouses firing with their cases landing a moment
+/// after, then a heavy fire with the deck carpeted and the loose brass knocking about.
+fn brass(stage: &mut Stage) {
+    stage.play(
+        "half ahead rung, and she settles",
+        6.,
+        true,
+        &[(0., Event::Order(0.5))],
+    );
+    let deck = |x: f32, z: f32| Vec3::new(x, 1.8, z);
+    let alone: Vec<(f32, Event)> = (0..4)
+        .flat_map(|n| {
+            let at = 0.5 + 1.6 * n as f32;
+            [
+                (at, Event::Sound(Sound::CaseDrop, deck(4., -6.))),
+                (at + 0.8, Event::Sound(Sound::CaseKnock, deck(3., -5.))),
+            ]
+        })
+        .chain([(7.2, Event::Sound(Sound::CasePlunk, Vec3::new(7., 0., -4.)))])
+        .collect();
+    stage.play(
+        "a case landing, a case knocked, one over the side",
+        8.5,
+        true,
+        &alone,
+    );
+    let gun = |side: f32| Vec3::new(5. * side, 3., -8.);
+    let pair: Vec<(f32, Event)> = (0..4)
+        .flat_map(|n| {
+            let at = 0.5 + 2.4 * n as f32;
+            [
+                (at, Event::Sound(Sound::SecondaryGun, gun(1.))),
+                (at + 0.55, Event::Sound(Sound::CaseDrop, deck(3.6, -6.5))),
+                (at + 0.62, Event::Sound(Sound::CaseDrop, deck(3.2, -6.1))),
+                (
+                    at + 1.1,
+                    Event::Sound(Sound::SecondaryGun, gun(1.) + Vec3::Z * 6.),
+                ),
+                (at + 1.6, Event::Sound(Sound::CaseDrop, deck(3.5, -0.4))),
+                (at + 1.68, Event::Sound(Sound::CaseDrop, deck(3.1, -0.1))),
+                (at + 1.9, Event::Sound(Sound::CaseKnock, deck(2.6, -3.))),
+            ]
+        })
+        .collect();
+    stage.play("two twin gunhouses and their brass", 10.5, true, &pair);
+    // Heavy fire: six quad gunhouses on a ragged beat, and the brass about the deck.
+    let mut heavy = Vec::new();
+    let mut luck = 0x2545_F491_u32;
+    let mut roll = move || {
+        luck ^= luck << 13;
+        luck ^= luck >> 17;
+        luck ^= luck << 5;
+        (luck >> 8) as f32 / (1 << 24) as f32
+    };
+    for n in 0..30 {
+        let at = 0.3 + 0.4 * n as f32 + 0.2 * roll();
+        let z = -12. + 4. * (n % 6) as f32;
+        heavy.push((
+            at,
+            Event::Sound(Sound::SecondaryGun, gun(1.) + Vec3::Z * (z + 8.)),
+        ));
+        for b in 0..4 {
+            let land = at + 0.5 + 0.07 * b as f32 + 0.15 * roll();
+            heavy.push((land, Event::Sound(Sound::CaseDrop, deck(3. + roll(), z))));
+        }
+        for _ in 0..3 {
+            let knock = at + 0.4 * roll() + 0.6;
+            heavy.push((
+                knock,
+                Event::Sound(Sound::CaseKnock, deck(2. * roll(), z + 3. * roll())),
+            ));
+        }
+        if roll() < 0.35 {
+            heavy.push((
+                at + 1.,
+                Event::Sound(Sound::CasePlunk, Vec3::new(7., 0., z)),
+            ));
+        }
+    }
+    heavy.sort_by(|a, b| a.0.total_cmp(&b.0));
+    stage.play(
+        "heavy fire, six quad gunhouses, and the deck full of brass",
+        15.,
+        true,
+        &heavy,
+    );
+}
+
 fn anti_air(stage: &mut Stage) {
     stage.play(
         "half ahead rung, and she settles",
@@ -705,6 +803,32 @@ fn teletype(stage: &mut Stage) {
     }
 }
 
+/// The calls for a chain of kills, shortest first, then the merchants' horns.
+fn calls(stage: &mut Stage) {
+    for (name, sound, secs) in [
+        ("one kill: the bridge call", Sound::Trumpet, 3.),
+        ("two to five: a flourish", Sound::Flourish, 4.),
+        ("six to fourteen: a rally", Sound::Rally, 5.),
+        ("fifteen and more: a triumph", Sound::Triumph, 8.5),
+    ] {
+        stage.play(name, secs, false, &[(0.5, Event::Sound(sound, BRIDGE))]);
+    }
+    let off = Vec3::new(70., 0., -100.);
+    for (name, sound, secs) in [
+        ("a coaster under fire, 120 m off", Sound::Quack, 4.),
+        ("another", Sound::Quack, 4.),
+        ("a freighter under fire, 120 m off", Sound::Honk, 9.),
+        ("another", Sound::Honk, 9.),
+    ] {
+        stage.play(
+            name,
+            secs,
+            false,
+            &[(0.5, Event::Sound(sound, off + Vec3::Y * 6.))],
+        );
+    }
+}
+
 fn main() -> io::Result<()> {
     let path = env::args().nth(1).unwrap_or_else(|| "audition.wav".into());
     let mut stage = Stage::new();
@@ -759,8 +883,20 @@ fn main() -> io::Result<()> {
         println!("wrote {path}");
         return Ok(());
     }
+    if env::args().nth(2).as_deref() == Some("calls") {
+        calls(&mut stage);
+        fs::write(&path, wav(&stage.frames))?;
+        println!("wrote {path}");
+        return Ok(());
+    }
     if env::args().nth(2).as_deref() == Some("aa") {
         anti_air(&mut stage);
+        fs::write(&path, wav(&stage.frames))?;
+        println!("wrote {path}");
+        return Ok(());
+    }
+    if env::args().nth(2).as_deref() == Some("brass") {
+        brass(&mut stage);
         fs::write(&path, wav(&stage.frames))?;
         println!("wrote {path}");
         return Ok(());

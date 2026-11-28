@@ -266,7 +266,7 @@ impl Hand {
         match rarity {
             Rarity::Common => weight * (1. - lean).max(0.),
             Rarity::Uncommon => weight,
-            Rarity::Rare => weight * (1. + lean.max(0.)),
+            Rarity::Rare | Rarity::Epic | Rarity::Legendary => weight * (1. + lean.max(0.)),
         }
     }
 }

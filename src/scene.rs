@@ -87,6 +87,16 @@ pub fn refit_hull(
         &mut Visibility,
         Has<Unscaled>,
     )>,
+    // The bridge model's wheelhouse and glass: everything on the bridge but its tower
+    // and masthead.
+    mut wheelhouse: Query<
+        (&DeckFitting, &mut Visibility),
+        (
+            Without<SectionModel>,
+            Without<RangeTower>,
+            Without<Masthead>,
+        ),
+    >,
     mut previous: Local<(
         Option<std::sync::Arc<shipvivor_shipyard::Design>>,
         Option<u32>,
@@ -113,6 +123,17 @@ pub fn refit_hull(
     let look = Look::of_run(&run);
     if previous.3.as_ref() != Some(&look) {
         **upperworks = Mesh3d(meshes.add(look.mesh()));
+    }
+    // An armoured hull has a low pilot house of her own in place of the open bridge.
+    let open = if look.open_bridge() {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for (fitting, mut shown) in &mut wheelhouse {
+        if matches!(fitting.anchor, Anchor::Bridge) {
+            shown.set_if_neq(open);
+        }
     }
     *previous = (
         Some(installed.clone()),
@@ -174,6 +195,10 @@ impl Turret {
 /// The barbette a raised turret stands on.
 #[derive(Component)]
 pub struct Barbette(Station);
+/// The heavier plate an armoured hull's turrets carry: a collar round the ring and a
+/// sloped glacis under the guns.
+#[derive(Component)]
+pub struct TurretArmour;
 
 /// Most torpedo mounts drawn on deck: a pair for every set amidships, one for a set in
 /// the bow or the stern.
@@ -262,12 +287,24 @@ pub struct WingBarrel {
     barrels: usize,
     turret: bool,
 }
-/// The shielded mount of a wing gun, or the gunhouse it is rebuilt as, which is drawn
-/// to the size of its bore.
+/// The shielded mount of a deck gun, or a secondary gunhouse, which is drawn to the size
+/// of its bore, by the gun's place in the pool.
 #[derive(Component)]
 pub struct WingHouse {
+    gun: usize,
     turret: bool,
 }
+/// A deck gun's casemate in her side, by the gun's place in the pool: the port, and what
+/// moves in it.
+#[derive(Component)]
+pub struct WingCasemate(usize);
+/// The gun in a casemate, which trains in its port and runs in behind its shutter.
+#[derive(Component)]
+pub struct CasemateGun(usize);
+/// A casemate's shutter, hinged along the top of its port: down over the port while the
+/// gun has nothing to fire at, swung up and out while it has.
+#[derive(Component)]
+pub struct CasemateShutter(usize);
 /// What a wing gun stands on, by the gun's place in the pool: the sponson built out
 /// from her side for a shielded mount on a broad hull, or the barbette under a gunhouse.
 #[derive(Component)]
@@ -279,27 +316,40 @@ pub struct WingFooting {
 /// The size the wing guns' gunhouses are drawn at, against a main turret's at the same
 /// bore, and the radius of a gunhouse's ring at that size.
 const WING_TURRET_SCALE: f32 = 0.75;
-const WING_HOUSE_RING: f32 = 1.35;
+pub(crate) const WING_HOUSE_RING: f32 = 1.35;
 /// Height above her deck of a gunhouse's ring, raised on a short barbette so that the
 /// gunhouse and its barrels clear the top of her deck rail.
-const WING_HOUSE_LIFT: f32 = 0.74;
-/// Hulls this many times her stock beam carry their shielded secondaries in sponsons
+pub(crate) const WING_HOUSE_LIFT: f32 = 0.74;
+/// Hulls this many times her stock beam carry their shielded deck guns in sponsons
 /// built out from her side: a battleship hull and broader.
 const SPONSON_BEAM: f32 = 1.6;
+/// Metres below her deck at its edge that a casemate's port is cut, in the strake of her
+/// side between the boot topping and the deck, and how far out her side stands there
+/// against her deck edge, for the side leans in below the deck.
+const CASEMATE_DROP: f32 = 0.55;
+const CASEMATE_SIDE: f32 = 0.955;
+/// Metres a casemate gun runs in when its port is shut, and the radians its shutter
+/// swings up and out when open.
+const CASEMATE_RUN: f32 = 1.45;
+const SHUTTER_SWING: f32 = 1.35;
+/// Seconds a casemate's crew takes to open its port, or to shut it.
+const CASEMATE_TIME: f32 = 0.7;
 /// Metres from her centreline to her deck rail at the stock beam, `fore` metres forward
 /// of her datum: the waist rail, or the rail that follows her deck edge in towards the
 /// bow and the stern.
 fn rail_abeam(design: &shipvivor_shipyard::Design, fore: f32) -> f32 {
     (0.97 * design.deck_edge(fore)).min(2.55)
 }
-/// The size a wing gun's gunhouse of this bore, in inches, is drawn at: half a six-inch
-/// main turret's at four inches, and three quarters of it at six.
-fn wing_house_scale(bore: u16) -> f32 {
-    let round = shipvivor_encounter::MainShell {
-        bore: bore.saturating_sub(4),
-        ..shipvivor_encounter::MainShell::STOCK
-    };
-    round.mount_scale() * WING_TURRET_SCALE
+/// The size a secondary gunhouse of this bore, in inches, is drawn at, against the main
+/// battery's first turret: three quarters of it at four inches, and broader with each
+/// inch more.
+pub(crate) fn wing_house_scale(bore: u16) -> f32 {
+    WING_TURRET_SCALE * (1. + 0.11 * f32::from(bore.saturating_sub(4)))
+}
+/// The size a deck gun's shielded mount of this bore, in inches, is drawn at: as built
+/// for a gun of about two and three quarter inches, smaller for a lighter gun.
+fn deck_mount_scale(bore: f32) -> f32 {
+    0.72 + 0.1 * bore
 }
 
 /// The rangefinder tower raised on the bridge roof: a tier for each rangefinder
@@ -390,12 +440,22 @@ pub struct GunTubes {
     tube: usize,
 }
 
+#[allow(clippy::type_complexity)]
 pub fn place_turrets(
     battle: Res<Encounter>,
     run: Res<Campaign>,
     mut mounts: Query<(&Turret, &mut Transform, &mut Visibility), Without<Barbette>>,
     mut barbettes: Query<(&Barbette, &mut Transform, &mut Visibility), Without<Turret>>,
+    mut armour: Query<&mut Visibility, (With<TurretArmour>, Without<Turret>, Without<Barbette>)>,
 ) {
+    let armoured = run.hull == shipvivor_campaign::StartingHull::HeavyDestroyer;
+    for mut shown in &mut armour {
+        shown.set_if_neq(if armoured {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
+    }
     let yard = matches!(run.screen(), crate::state::Screen::Drydock(_));
     let preview = yard.then(|| run.display_design().gun_stations());
     let fittings = run.display_fittings();
@@ -443,19 +503,25 @@ pub fn place_turrets(
 /// Height of the deck a main turret's ring stands on.
 const TURRET_DECK: f32 = 1.72;
 
-/// Every wing gun station has a model. Only the guns fitted are shown. Each stands far
-/// enough inboard that its shield or gunhouse ring clears her deck rail, and its
-/// barrels are carried over the rail. A broad hull carries shielded mounts out over
-/// her side in sponsons instead.
-#[allow(clippy::type_complexity)]
+/// Every station along her side has a model. Only the guns fitted are shown: deck guns
+/// on shielded mounts at the deck edge, or in casemates in a big hull's side, and the
+/// secondary gunhouses. Each on deck stands far enough inboard that its shield or
+/// gunhouse ring clears her deck rail, and its barrels are carried over the rail. A
+/// broad hull carries shielded mounts out over her side in sponsons instead. A casemate
+/// opens its port and runs its gun out only while it has something to fire at.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn place_wing_guns(
+    time: Res<Time>,
     run: Res<Campaign>,
     battle: Res<Encounter>,
     mut guns: Query<(&WingPosition, &mut Transform, &mut Visibility)>,
-    mut barrels: Query<(&WingBarrel, &mut Visibility), (Without<WingPosition>, Without<WingHouse>)>,
+    mut barrels: Query<
+        (&WingBarrel, &mut Visibility),
+        (Without<WingPosition>, Without<WingHouse>, Without<WingCasemate>),
+    >,
     mut houses: Query<
         (&WingHouse, &mut Transform, &mut Visibility),
-        (Without<WingPosition>, Without<WingBarrel>),
+        (Without<WingPosition>, Without<WingBarrel>, Without<WingCasemate>),
     >,
     mut footings: Query<
         (&WingFooting, &mut Transform, &mut Visibility),
@@ -463,105 +529,191 @@ pub fn place_wing_guns(
             Without<WingPosition>,
             Without<WingBarrel>,
             Without<WingHouse>,
+            Without<WingCasemate>,
         ),
     >,
+    mut casemates: Query<
+        (&WingCasemate, &mut Visibility),
+        (Without<WingPosition>, Without<WingBarrel>, Without<WingHouse>),
+    >,
+    mut casemate_guns: Query<
+        (&CasemateGun, &mut Transform),
+        (
+            Without<WingPosition>,
+            Without<WingHouse>,
+            Without<WingFooting>,
+            Without<CasemateShutter>,
+        ),
+    >,
+    mut shutters: Query<
+        (&CasemateShutter, &mut Transform),
+        (
+            Without<WingPosition>,
+            Without<WingHouse>,
+            Without<WingFooting>,
+            Without<CasemateGun>,
+        ),
+    >,
+    mut open: Local<Vec<f32>>,
 ) {
+    use shipvivor_encounter::Emplacement;
     let yard = matches!(run.screen(), crate::state::Screen::Drydock(_));
-    let secondaries = run.display_fittings().secondaries();
     let design = run.display_design();
-    let stations = yard.then(|| design.wing_stations());
-    let fitted = if yard {
-        secondaries
+    let (deck, gunhouses) = if yard {
+        (run.display_fittings().secondaries(), run.display_fittings().gunhouses())
     } else {
-        battle.secondaries()
+        (battle.secondaries(), battle.gunhouses())
     };
-    let gunhouses = fitted.gunhouse.is_some();
+    // Each gun shown: where it stands, where it is trained, what it stands in, and
+    // whether it has something to fire at.
+    let mut slots: Vec<Option<(f32, f32, f32, Emplacement, bool)>> = Vec::new();
+    if yard {
+        let layout = design.wing_layout(gunhouses.per_side);
+        let deck_guns = &layout.deck[..(2 * deck.per_side).min(layout.deck.len())];
+        let houses =
+            &layout.gunhouses[..(2 * gunhouses.per_side).min(layout.gunhouses.len())];
+        slots.extend(
+            deck_guns
+                .iter()
+                .chain(houses)
+                .map(|s| Some((s.fore, s.abeam, s.home, s.emplacement, true))),
+        );
+    } else {
+        slots.extend(battle.wing_guns().iter().map(|g| {
+            Some((
+                g.deck_fore(),
+                g.deck_x(),
+                g.deck_bearing(),
+                g.emplacement(),
+                g.engaged(),
+            ))
+        }));
+    }
+    let slot = |gun: usize| slots.get(gun).copied().flatten();
+    let kind = |gun: usize| slot(gun).map(|s| s.3);
+
     for (house, mut pose, mut shown) in &mut houses {
-        shown.set_if_neq(if house.turret == gunhouses {
+        let wanted = if house.turret {
+            Emplacement::Gunhouse
+        } else {
+            Emplacement::Deck
+        };
+        shown.set_if_neq(if kind(house.gun) == Some(wanted) {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         });
-        // A six-inch gunhouse is the four-inch one drawn half as big again.
-        if let Some(bore) = fitted.gunhouse.filter(|_| house.turret) {
-            let scale = Vec3::splat(wing_house_scale(bore));
-            if pose.scale != scale {
-                pose.scale = scale;
-            }
+        // A gunhouse is drawn to its bore, and a deck gun's mount to its own.
+        let scale = Vec3::splat(if house.turret {
+            wing_house_scale(gunhouses.bore)
+        } else {
+            deck_mount_scale(deck.bore)
+        });
+        if pose.scale != scale {
+            pose.scale = scale;
         }
+    }
+    for (barrel, mut shown) in &mut barrels {
+        let fitted = if barrel.turret {
+            gunhouses.barrels
+        } else {
+            deck.barrels
+        };
+        shown.set_if_neq(if barrel.barrels == fitted {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
     }
     // How far a mount reaches from its pivot below the top of the rail: the shield, or
     // a gunhouse's ring. Only the barrels, carried higher, cross the rail.
     let beam = design.beam_factor();
-    let sponsons = !gunhouses && beam >= SPONSON_BEAM;
-    let reach = 0.04
-        + match fitted.gunhouse {
-            Some(bore) => WING_HOUSE_RING * wing_house_scale(bore),
-            None => fittings::shield_reach(fitted.barrels),
-        };
-    // Drawn inboard of the gun's station far enough to keep inside the rail, or on a
-    // broad hull out on a sponson far enough to keep outside it.
-    let pivot = |fore: f32, x: f32| {
-        let rail = rail_abeam(&design, fore) * beam;
-        let out = if sponsons {
-            (rail + reach).max(design.deck_edge(fore) * beam + 0.2)
-        } else {
-            x.abs().min(rail - reach)
-        };
-        x.signum() * out
+    let sponsons = beam >= SPONSON_BEAM;
+    let house_ring = WING_HOUSE_RING * wing_house_scale(gunhouses.bore);
+    let reach = |emplacement: Emplacement| {
+        0.04 + match emplacement {
+            Emplacement::Gunhouse => house_ring,
+            _ => fittings::shield_reach(deck.barrels) * deck_mount_scale(deck.bore),
+        }
     };
-    // Which side each gun shown stands on, and where it is trained.
-    let mut placed = [None; shipvivor_encounter::Secondaries::MOST_PER_SIDE * 2];
-    // On the deck, which rises towards the stem.
     let look = Look::of_run(&run);
-    let mut stand = |gun: usize, pose: &mut Transform, fore: f32, x: f32, bearing: f32| {
-        let x = pivot(fore, x);
-        pose.translation = Vec3::new(x, look.floor(x, -fore), -fore);
-        pose.rotation = Quat::from_rotation_y(-bearing);
-        if let Some(slot) = placed.get_mut(gun) {
-            *slot = Some((x.signum(), bearing));
-        }
+    // Where each gun's pivot is drawn: a deck gun inboard of the rail far enough to keep
+    // inside it, or on a broad hull out on a sponson far enough to keep outside it; a
+    // gunhouse inside the rail; a casemate in her side, below the deck edge.
+    let stand = |fore: f32, x: f32, emplacement: Emplacement| -> Vec3 {
+        let z = -fore;
+        let rail = rail_abeam(&design, fore) * beam;
+        let edge = design.deck_edge(fore) * beam;
+        let out = match emplacement {
+            Emplacement::Casemate => {
+                return Vec3::new(
+                    x.signum() * CASEMATE_SIDE * edge,
+                    deck_height(z) - CASEMATE_DROP,
+                    z,
+                );
+            }
+            Emplacement::Deck if sponsons => (rail + reach(emplacement)).max(edge + 0.2),
+            _ => x.abs().min(rail - reach(emplacement)),
+        };
+        let x = x.signum() * out;
+        Vec3::new(x, look.floor(x, z), z)
     };
-    for (gun, mut pose, mut shown) in &mut guns {
-        if let Some(stations) = &stations {
-            // Guns past her deck room wait ashore for a longer hull.
-            let station = stations
-                .get(gun.0)
-                .filter(|_| gun.0 < secondaries.per_side * 2);
-            let Some(station) = station else {
-                shown.set_if_neq(Visibility::Hidden);
-                continue;
-            };
-            shown.set_if_neq(Visibility::Inherited);
-            stand(gun.0, &mut pose, station.fore, station.abeam, station.home);
-            continue;
+    let ease = 1. - (-time.delta_secs() / (0.3 * CASEMATE_TIME)).exp();
+    let pool = slots.len().max(open.len());
+    open.resize(pool, 0.);
+    for (gun, &slot) in slots.iter().enumerate() {
+        if let Some((.., Emplacement::Casemate, engaged)) = slot {
+            let target = if engaged { 1. } else { 0. };
+            open[gun] += (target - open[gun]) * ease;
         }
-        let Some(mount) = battle.wing_guns().get(gun.0) else {
+    }
+    for (gun, mut pose, mut shown) in &mut guns {
+        let Some((fore, x, bearing, emplacement, _)) = slot(gun.0) else {
             shown.set_if_neq(Visibility::Hidden);
             continue;
         };
         shown.set_if_neq(Visibility::Inherited);
-        stand(
-            gun.0,
-            &mut pose,
-            mount.deck_fore(),
-            mount.deck_x(),
-            mount.deck_bearing(),
-        );
+        pose.translation = stand(fore, x, emplacement);
+        // A casemate faces square out of her side, and its gun trains inside it.
+        pose.rotation = if emplacement == Emplacement::Casemate {
+            Quat::from_rotation_y(-x.signum() * std::f32::consts::FRAC_PI_2)
+        } else {
+            Quat::from_rotation_y(-bearing)
+        };
     }
-    for (barrel, mut shown) in &mut barrels {
-        shown.set_if_neq(
-            if barrel.barrels == fitted.barrels && barrel.turret == gunhouses {
-                Visibility::Inherited
-            } else {
-                Visibility::Hidden
-            },
-        );
+    for (casemate, mut shown) in &mut casemates {
+        shown.set_if_neq(if kind(casemate.0) == Some(Emplacement::Casemate) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
+    }
+    for (gun, mut pose) in &mut casemate_guns {
+        let Some((_, x, bearing, ..)) = slot(gun.0) else {
+            continue;
+        };
+        let open = open.get(gun.0).copied().unwrap_or(0.);
+        let train = bearing - x.signum() * std::f32::consts::FRAC_PI_2;
+        let wanted = Transform::from_xyz(0., 0., CASEMATE_RUN * (1. - open))
+            .with_rotation(Quat::from_rotation_y(-train * open));
+        if *pose != wanted {
+            *pose = wanted;
+        }
+    }
+    for (shutter, mut pose) in &mut shutters {
+        let open = open.get(shutter.0).copied().unwrap_or(0.);
+        let wanted = Quat::from_rotation_x(SHUTTER_SWING * open);
+        if pose.rotation != wanted {
+            pose.rotation = wanted;
+        }
     }
     for (footing, mut pose, mut shown) in &mut footings {
-        let wanted = if footing.sponson { sponsons } else { gunhouses };
-        let Some(Some((side, bearing))) = placed.get(footing.gun).copied().filter(|_| wanted)
-        else {
+        let wanted = match kind(footing.gun) {
+            Some(Emplacement::Deck) => footing.sponson && sponsons,
+            Some(Emplacement::Gunhouse) => !footing.sponson,
+            _ => false,
+        };
+        let Some((_, x, bearing, ..)) = slot(footing.gun).filter(|_| wanted) else {
             shown.set_if_neq(Visibility::Hidden);
             continue;
         };
@@ -569,13 +721,13 @@ pub fn place_wing_guns(
         let wanted = if footing.sponson {
             // Square to her side however the gun above it is trained, round to the
             // reach of its shield.
-            let outboard = if side < 0. { std::f32::consts::PI } else { 0. };
-            let radius = reach + 0.05;
+            let outboard = if x < 0. { std::f32::consts::PI } else { 0. };
+            let radius = reach(Emplacement::Deck) + 0.05;
             Transform::from_rotation(Quat::from_rotation_y(bearing + outboard))
                 .with_scale(Vec3::new(radius, 1., radius))
         } else {
             // Within the flats of the gunhouse's eight-sided ring.
-            let radius = 0.9 * WING_HOUSE_RING * fitted.gunhouse.map_or(1., wing_house_scale);
+            let radius = 0.9 * house_ring;
             Transform::from_xyz(0., 0.5 * WING_HOUSE_LIFT, 0.).with_scale(Vec3::new(
                 2. * radius,
                 WING_HOUSE_LIFT,
@@ -1191,6 +1343,31 @@ pub fn setup(
                 ChildOf(ship),
             ))
             .id();
+        for (mesh, at, size, tilt) in [
+            (
+                &drum,
+                Vec3::new(0., 0.12, 0.),
+                Vec3::new(3.05, 0.5, 3.05),
+                0.,
+            ),
+            (
+                &cube,
+                Vec3::new(0., 0.42, -1.34),
+                Vec3::new(2.3, 0.62, 0.34),
+                -0.55,
+            ),
+        ] {
+            commands.spawn((
+                TurretArmour,
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(iron.clone()),
+                Transform::from_translation(at)
+                    .with_rotation(Quat::from_rotation_x(tilt))
+                    .with_scale(size),
+                Visibility::Hidden,
+                ChildOf(mount),
+            ));
+        }
         for (mesh, paint, position, scale) in [
             (&drum, &iron, Vec3::ZERO, Vec3::new(2.7, 0.42, 2.7)),
             (&house, &gunmetal, Vec3::ZERO, Vec3::ONE),
@@ -1235,7 +1412,11 @@ pub fn setup(
     // A model for every station any hull has room for, placed by `place_wing_guns`.
     let shielded = [1, 2, 3, 4].map(|barrels| meshes.add(fittings::shielded_mount(barrels)));
     let sponson = meshes.add(fittings::sponson());
-    for i in 0..shipvivor_encounter::Secondaries::MOST_PER_SIDE * 2 {
+    // Her side's own grey, for a casemate's collar and shutter.
+    let side = materials.add(Color::srgb_u8(85, 112, 133));
+    let pool = shipvivor_encounter::Secondaries::MOST_PER_SIDE
+        + shipvivor_encounter::Gunhouses::MOST_PER_SIDE;
+    for i in 0..pool * 2 {
         let wing = commands
             .spawn((
                 WingPosition(i),
@@ -1248,7 +1429,10 @@ pub fn setup(
         // broader shield as more are fitted.
         let shield = commands
             .spawn((
-                WingHouse { turret: false },
+                WingHouse {
+                    gun: i,
+                    turret: false,
+                },
                 Transform::default(),
                 Visibility::Inherited,
                 ChildOf(wing),
@@ -1271,6 +1455,71 @@ pub fn setup(
                 ChildOf(shield),
             ));
         }
+        // A deck gun in a casemate: an armoured collar round a dark port in her side, the
+        // gun that runs out of it, and the shutter hinged over it. Its frame faces out
+        // of her side, so the port looks down -Z.
+        let casemate = commands
+            .spawn((
+                WingCasemate(i),
+                Transform::default(),
+                Visibility::Hidden,
+                ChildOf(wing),
+            ))
+            .id();
+        for (paint, position, size) in [
+            (&side, Vec3::new(0., 0., 0.08), Vec3::new(1.0, 0.64, 0.4)),
+            (&iron, Vec3::new(0., 0., -0.1), Vec3::new(0.72, 0.44, 0.06)),
+        ] {
+            commands.spawn((
+                Mesh3d(cube.clone()),
+                MeshMaterial3d(paint.clone()),
+                Transform::from_translation(position).with_scale(size),
+                ChildOf(casemate),
+            ));
+        }
+        let piece = commands
+            .spawn((
+                CasemateGun(i),
+                Transform::default(),
+                Visibility::Inherited,
+                ChildOf(casemate),
+            ))
+            .id();
+        for (mesh, paint, transform) in [
+            (
+                &drum,
+                &gunmetal,
+                Transform::from_xyz(0., 0., -0.55)
+                    .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
+                    .with_scale(Vec3::new(0.13, 1.6, 0.13)),
+            ),
+            (
+                &cube,
+                &gunmetal,
+                Transform::from_xyz(0., 0., 0.12).with_scale(Vec3::new(0.36, 0.3, 0.34)),
+            ),
+        ] {
+            commands.spawn((
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(paint.clone()),
+                transform,
+                ChildOf(piece),
+            ));
+        }
+        let hinge = commands
+            .spawn((
+                CasemateShutter(i),
+                Transform::from_xyz(0., 0.24, -0.15),
+                Visibility::Inherited,
+                ChildOf(casemate),
+            ))
+            .id();
+        commands.spawn((
+            Mesh3d(cube.clone()),
+            MeshMaterial3d(side.clone()),
+            Transform::from_xyz(0., -0.24, 0.).with_scale(Vec3::new(0.8, 0.5, 0.05)),
+            ChildOf(hinge),
+        ));
         // On a broad hull it stands in a sponson out over her side. A gunhouse stands on
         // a barbette that raises it clear of her rail.
         for (sponson, mesh, paint) in [(true, &sponson, &plating), (false, &ring, &steel)] {
@@ -1289,7 +1538,10 @@ pub fn setup(
         let scale = wing_house_scale(4);
         let gunhouse = commands
             .spawn((
-                WingHouse { turret: true },
+                WingHouse {
+                    gun: i,
+                    turret: true,
+                },
                 Transform::from_xyz(0., WING_HOUSE_LIFT, 0.).with_scale(Vec3::splat(scale)),
                 Visibility::Hidden,
                 ChildOf(wing),

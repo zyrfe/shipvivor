@@ -34,6 +34,16 @@ impl Protection {
         fittings: 1.,
     };
 
+    /// The heavy destroyer's plate: half again the reference cruiser's thickness, a
+    /// quarter again as strong, and deck fittings a fifth tougher. She is built to take
+    /// punishment rather than hand it out.
+    pub const HEAVY_DESTROYER: Self = Self {
+        plating: 1.25,
+        thickness: 1.5,
+        engine: 2. / 3.,
+        fittings: 1.2,
+    };
+
     /// The light cruiser's plate: thinner than [`Protection::BREAKWATER`], and weaker.
     /// She trades it for the reach of her guns.
     pub const LIGHT_CRUISER: Self = Self {
@@ -73,23 +83,30 @@ impl Design {
         )
     }
 
-    /// The player's heavy destroyer: the light cruiser's 30 metres and sections, with a
-    /// second engine under the fore turret and tubes in the bow, amidships over the
-    /// engine and in the stern, under [`Protection::BREAKWATER`] plate.
+    /// The player's heavy destroyer, built like a tank: the light cruiser's 30 metres
+    /// and sections, but one main gun forward with an empty bay aft where the cruiser
+    /// mounts her second, tubes in the bow, amidships and the stern, and a second engine
+    /// under the fore turret so one hit cannot stop her. Her hull is a third again as
+    /// strong ([`Design::DESTROYER_TOUGHNESS`]) under [`Protection::HEAVY_DESTROYER`].
     pub fn heavy_destroyer() -> Self {
-        Self::player(
+        let mut ship = Self::player(
             "Breakwater",
             vec![
                 Module::new(Bow, [TorpedoRack]),
                 Module::new(Straight, [MainGun, Engine]),
                 Module::new(Sponsons, [Director, CloseGun, CloseGun]),
                 Module::new(Sponsons, [Engine, TorpedoRack]),
-                Module::new(Straight, [MainGun]),
+                Module::new(Straight, []),
                 Module::new(Stern, [TorpedoRack]),
             ],
-            Protection::BREAKWATER,
-        )
+            Protection::HEAVY_DESTROYER,
+        );
+        ship.toughness = Self::DESTROYER_TOUGHNESS;
+        ship
     }
+
+    /// The heavy destroyer's structure against the light cruiser's.
+    pub const DESTROYER_TOUGHNESS: f32 = 1.3;
 
     /// A hull for the player: she founders once two thirds of her vital length is
     /// wrecked, mends at [`Design::BREAKWATER_REPAIR`] pace, leaks, and drives on her

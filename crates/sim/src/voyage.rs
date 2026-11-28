@@ -26,8 +26,11 @@ pub fn fit_player(battle: &mut Battle, run: &Run) {
         (local.round(), local.turrets)
     });
     battle.fit_secondaries(run.fittings.secondaries());
+    battle.fit_gunhouses(run.fittings.gunhouses());
     battle.fit_anti_air(run.fittings.anti_air());
     battle.fit_training(run.fittings.training_gear);
+    battle.fit_fire_control(run.fire_control());
+    battle.fit_torpedoes(run.fittings.torpedoes());
 }
 
 /// The battle for a leg sailed on `chart`, with her mounts fitted. A patrol through

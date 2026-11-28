@@ -27,7 +27,7 @@ use shipvivor_acoustics::{
 };
 use shipvivor_compass::direction;
 use shipvivor_encounter::{
-    Battery, EffectKind, Hull, ISLAND_RADIUS, Impact, LandmarkKind, YardState,
+    Battery, EffectKind, EnemyClass, Events, Hull, ISLAND_RADIUS, Impact, LandmarkKind, YardState,
 };
 use shipvivor_navigation::Helm;
 use shipvivor_shipyard::{Component, Loss, State, Struck, Task};
@@ -103,6 +103,77 @@ struct Klaxon {
     again: f32,
 }
 
+/// Seconds with nothing more destroyed after which a chain of kills is over and its call
+/// is played: soon after one kill, and longer the longer the chain has run, up to the
+/// most, so a hard fight can keep a chain going. A base's fanfare holds the next call off
+/// until it has played out.
+const CHAIN_GAP: (f32, f32, f32) = (3., 0.3, 7.);
+const FANFARE_HOLD: f32 = 4.5;
+/// Kills in a chain at which the call grows: a flourish, a rally and a triumph. Fewer
+/// than the first is the bridge call alone.
+const CHAIN_CALLS: [(u32, Sound); 3] = [
+    (15, Sound::Triumph),
+    (6, Sound::Rally),
+    (2, Sound::Flourish),
+];
+
+/// What the enemy has lost one after another, for the call played when the run of it
+/// is over: ships, turrets, harbour guns, yard buildings, airfield works and vehicles,
+/// but not aircraft. One call for a whole chain keeps a hard fight from being one
+/// trumpet over another.
+#[derive(Resource, Default)]
+pub struct Chain {
+    /// Destroyed since the report last looked, and in the chain so far.
+    fresh: u32,
+    count: u32,
+    /// When the last of the chain was destroyed, and the voyage's seconds before which
+    /// no call is played.
+    last: f32,
+    held: f32,
+}
+impl Chain {
+    /// Count what the battle's last tick destroyed of the enemy's.
+    pub fn tally(&mut self, ev: &Events, battle: &Encounter) {
+        let works = (battle.effects().iter())
+            .filter(|fx| fx.age == 0.)
+            .filter(|fx| {
+                matches!(
+                    fx.kind,
+                    EffectKind::Wreck(_)
+                        | EffectKind::MountLost(_)
+                        | EffectKind::Demolition { .. }
+                        | EffectKind::Felled(_)
+                        | EffectKind::FuelBlast { depot: true }
+                )
+            })
+            .count() as u32;
+        // A truck's blast looks like a parked aircraft's, so trucks are counted from
+        // the battle's own tally, as are harbour guns, which fall with no effect.
+        self.fresh += works + u32::from(ev.guns_silenced) + u32::from(ev.vehicles);
+    }
+
+    /// Seconds of quiet that end a chain this long.
+    fn gap(count: u32) -> f32 {
+        (CHAIN_GAP.0 + CHAIN_GAP.1 * count.saturating_sub(1) as f32).min(CHAIN_GAP.2)
+    }
+
+    /// The call for a chain this long.
+    pub fn call(count: u32) -> Sound {
+        (CHAIN_CALLS.iter())
+            .find(|(least, _)| count >= *least)
+            .map_or(Sound::Trumpet, |&(_, call)| call)
+    }
+}
+
+/// Metres beyond her own length within which a round landing or striking puts a
+/// merchant under fire, the seconds she then waits before she sounds her horn again,
+/// least and most, and the seconds between one merchant's horn and the next's.
+const ALARM_REACH: f32 = 35.;
+const ALARM_AGAIN: (f32, f32) = (12., 18.);
+const ALARM_APART: f32 = 1.5;
+/// Height above the water of a merchant's horn, as a share of her length.
+const ALARM_HEIGHT: f32 = 0.3;
+
 /// Seconds left on the leg's clock when the bridge clock starts to be heard.
 const LAST_MINUTE: f32 = 60.;
 /// Seconds the ticking takes to swell in, and to fade out once a base puts time back.
@@ -155,6 +226,10 @@ pub struct Surroundings {
     alarmed: Vec<u64>,
     /// The boss whose horn has sounded this voyage.
     boss: Option<u64>,
+    /// Each merchant that has sounded her horn under fire, and when she may again, and
+    /// when any merchant may next sound hers.
+    hooted: Vec<(u64, f32)>,
+    next_hoot: f32,
     /// The state each engine was last heard in.
     engines: Vec<State>,
     /// When the repair party next takes up a tool, and how many it has taken up.
@@ -284,6 +359,7 @@ pub fn report(
     mut aloft: Local<Vec<(u64, Vec3)>>,
     alerts: Res<BaseAlerts>,
     mut around: Local<Surroundings>,
+    mut chain: ResMut<Chain>,
 ) {
     // What each blow into her side did, read from her log as it is heard.
     let mut struck = run.ship.take_struck();
@@ -320,6 +396,9 @@ pub fn report(
         around.torpedoes.clear();
         around.alarmed.clear();
         around.boss = None;
+        around.hooted.clear();
+        around.next_hoot = 0.;
+        *chain = Chain::default();
         around.engines.clear();
         around.mending = 0.;
     }
@@ -525,15 +604,73 @@ pub fn report(
         let felt = match fx.kind {
             EffectKind::Muzzle(Battery::Main) => Sound::Recoil,
             EffectKind::Muzzle(Battery::Secondary) => Sound::Kick,
-            EffectKind::Wreck(_) => Sound::Trumpet,
-            // A base destroyed is cheered at once. Its fall is heard when it arrives.
-            EffectKind::Demolition { dock: true } => Sound::Fanfare,
+            // A base destroyed is cheered at once, and the chain's call waits for the
+            // fanfare. Its fall is heard when it arrives.
+            EffectKind::Demolition { dock: true } => {
+                chain.held = voyage + FANFARE_HOLD;
+                Sound::Fanfare
+            }
             _ => continue,
         };
         board.cues.send(Cue::Emit {
             sound: felt,
             position: Vec3::new(helm.position.x, BRIDGE, helm.position.y),
             serial: fx.body.id,
+        });
+    }
+    // Whatever the enemy lost is cheered once the run of it is over, with a call as
+    // long as the run.
+    let fresh = std::mem::take(&mut chain.fresh);
+    if fresh > 0 {
+        (chain.count, chain.last) = (chain.count + fresh, voyage);
+    }
+    let over = (chain.last + Chain::gap(chain.count)).max(chain.held);
+    if chain.count > 0 && voyage >= over {
+        board.cues.send(Cue::Emit {
+            sound: Chain::call(chain.count),
+            position: bridge,
+            serial: u64::from(chain.count),
+        });
+        chain.count = 0;
+    }
+    // A merchant with rounds falling about her sounds the danger signal on her horn: a
+    // coaster's little reed horn quacks, a freighter's air horn honks. She waits a while
+    // before she sounds it again, and no two merchants sound theirs at once.
+    let falling = (battle.effects().iter())
+        .filter(|fx| fx.age == 0.)
+        .filter(|fx| {
+            matches!(
+                fx.kind,
+                EffectKind::Splash
+                    | EffectKind::Column
+                    | EffectKind::Burst
+                    | EffectKind::Armor { .. }
+            )
+        })
+        .map(|fx| fx.body.pos);
+    let falling: Vec<Vec2> = falling.collect();
+    around.hooted.retain(|&(_, again)| again > voyage);
+    for ship in battle.raiders().iter().filter(|r| r.class.is_merchant()) {
+        let hull = ship.class.profile().hull;
+        let length = hull.bow + hull.stern;
+        let reach = ALARM_REACH + length;
+        let under_fire = (falling.iter()).any(|at| at.distance(ship.body.pos) <= reach);
+        let id = ship.body.id;
+        if !under_fire || voyage < around.next_hoot || around.hooted.iter().any(|h| h.0 == id) {
+            continue;
+        }
+        let (least, most) = ALARM_AGAIN;
+        let again = voyage + least + (most - least) * chance(id ^ voyage.to_bits() as u64);
+        around.hooted.push((id, again));
+        around.next_hoot = voyage + ALARM_APART;
+        board.cues.send(Cue::Emit {
+            sound: if ship.class == EnemyClass::Coaster {
+                Sound::Quack
+            } else {
+                Sound::Honk
+            },
+            position: Vec3::new(ship.body.pos.x, ALARM_HEIGHT * length, ship.body.pos.y),
+            serial: id,
         });
     }
     // An enemy torpedo is heard leaving its tube, from where it was fired, and the
@@ -834,6 +971,14 @@ impl Soundboard {
     /// Stop every sound in the air, as when the battle jumps in time.
     pub fn silence(&self) {
         self.cues.send(Cue::Hush);
+    }
+    /// A sound made once at a point in the world, as the battle makes them.
+    pub fn emit(&self, sound: Sound, position: Vec3, serial: u64) {
+        self.cues.send(Cue::Emit {
+            sound,
+            position,
+            serial,
+        });
     }
     /// The game speaking, at a strength of its own from 0 to 1: see [`Cue::Notice`].
     pub fn notice(&self, sound: Sound, level: f32, serial: u64) {

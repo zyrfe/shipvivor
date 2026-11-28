@@ -82,7 +82,7 @@ pub fn shown(
         return (crew.wardroom.captains.get(book.captain)).map(|c| c.id.clone());
     }
     (run.captain.as_ref().map(|c| c.id.clone()))
-        .or_else(|| book.and_then(|b| b.career.as_ref()).map(|c| c.captain.clone()))
+        .or_else(|| book.and_then(|b| b.roster.last.clone()))
 }
 
 pub fn setup(

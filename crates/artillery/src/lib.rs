@@ -9,6 +9,8 @@ mod shell;
 pub use shell::MainShell;
 mod flight;
 pub use flight::ShellArc;
+pub mod gunnery;
+pub use gunnery::FireControl;
 
 /// The player's main turret fitting. Its muzzle offsets are in unscaled model units.
 /// The player's turrets are built single and take more barrels one at a time in the
@@ -63,11 +65,14 @@ pub fn training_rate(calibre_inches: f32, gear: u16) -> f32 {
     (4. / calibre_inches.max(1.)).sqrt() * (1. + 0.25 * f32::from(gear.min(MOST_TRAINING_GEAR)))
 }
 
-/// The crew-worked close-range battery as fitted.
+/// The deck guns as fitted: light guns along her deck edge, and on a battleship's hull
+/// and up in casemates in her side too, worked by their crews at close range. They
+/// whittle a ship down rather than wreck her. The game's text calls them deck guns. The
+/// secondary battery proper is [`Gunhouses`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Secondaries {
-    /// Guns on each side: the stock pair on the bow and the beam, then more along the
-    /// deck edge, as many as the hull has room for.
+    /// Guns on each side: the stock pair on the bow and the beam, then more in her
+    /// casemates and along the deck edge, as many as the hull has room for.
     pub per_side: usize,
     /// Damage a hit does.
     pub damage: u16,
@@ -77,30 +82,54 @@ pub struct Secondaries {
     pub range: f32,
     /// Barrels on each gun. A twin mount fires both together.
     pub barrels: usize,
-    /// Inches across the bore of the gunhouse each gun is rebuilt as, like the main
-    /// battery's first turrets: four or six. `None` is the shielded mount she is built
-    /// with.
-    pub gunhouse: Option<u16>,
+    /// Inches across the bore.
+    pub bore: f32,
 }
 impl Secondaries {
-    /// A gun each side amidships and another on the bow.
+    /// A gun each side amidships and another on the bow, of two inches.
     pub const STOCK: Self = Self {
         per_side: 2,
         damage: 1,
         reload: 0.82,
         range: 160.,
         barrels: 1,
-        gunhouse: None,
+        bore: 2.,
     };
-    /// Inches across the round a shielded mount fires. A gunhouse fires its own bore's.
-    pub const MOUNT_BORE: f32 = 0.07 / 0.0254;
-    /// Inches across the round each gun fires.
-    pub fn bore(&self) -> f32 {
-        self.gunhouse.map_or(Self::MOUNT_BORE, f32::from)
-    }
     /// No hull has room for more guns a side than this. Her deck room grows with her
     /// length, two a side on each open section: see `Design::wing_stations`.
     pub const MOST_PER_SIDE: usize = 24;
+}
+
+/// The secondary battery as fitted: gunhouses along her deck edge, on a battleship's
+/// hull and up, of a bore between the deck guns' and the main battery's. Each stands
+/// where two deck guns would.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gunhouses {
+    /// Gunhouses on each side.
+    pub per_side: usize,
+    /// Inches across the bore.
+    pub bore: u16,
+    /// Barrels in each gunhouse, fired together.
+    pub barrels: usize,
+    /// Damage a hit does.
+    pub damage: u16,
+    /// Seconds between rounds from one gunhouse.
+    pub reload: f32,
+    /// Metres out to which the crew engages.
+    pub range: f32,
+}
+impl Gunhouses {
+    /// None at all.
+    pub const NONE: Self = Self {
+        per_side: 0,
+        bore: 4,
+        barrels: 2,
+        damage: 3,
+        reload: 1.6,
+        range: 340.,
+    };
+    /// No hull has room for more gunhouses a side than this: one on each open section.
+    pub const MOST_PER_SIDE: usize = 10;
 }
 
 /// The light anti-aircraft battery as fitted. Each mount fires a time-fused round that

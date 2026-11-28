@@ -8,7 +8,7 @@ use super::{
     torpedo_boat::HARRYING_SCATTER,
 };
 use glam::{Vec2, Vec3, Vec3Swizzles};
-use shipvivor_artillery::ArmorPanel;
+use shipvivor_artillery::{ArmorPanel, gunnery::FLAGSHIP_SUPPRESSION};
 use shipvivor_shipyard::{Berth, Component, Design, State, WingStation, clear_arcs};
 use std::f32::consts::PI;
 use std::sync::{Arc, OnceLock};
@@ -624,6 +624,9 @@ pub struct Raider {
     works: f32,
     /// Seconds left before she is under command again after losing her bridge.
     conn_lost: f32,
+    /// Seconds left before her gun crews, thrown off by Breakwater's suppressing fire,
+    /// stand to their guns again. Until then they hold fire, and no gun loads.
+    suppressed: f32,
     helm: Helm,
     pub(super) knock: Vec2,
     pub(super) way: Vec2,
@@ -695,6 +698,7 @@ impl Raider {
                 fore: gun.offset.y,
                 home: gun.train,
                 arc: gun.arc,
+                emplacement: shipvivor_shipyard::Emplacement::Deck,
             })
             .collect();
         for (gun, cleared) in
@@ -726,6 +730,7 @@ impl Raider {
             },
             works: class.works_strength(),
             conn_lost: 0.,
+            suppressed: 0.,
             // She is already under way when she comes into the sector or off the slip.
             helm: Helm::under_way(p.speed),
             knock: Vec2::ZERO,
@@ -911,6 +916,22 @@ impl Raider {
     pub fn helm_lost(&self) -> f32 {
         self.conn_lost
     }
+    /// Seconds left before her gun crews stand to their guns again after suppressing
+    /// fire, or zero when they are at them.
+    pub fn suppressed(&self) -> f32 {
+        self.suppressed
+    }
+    /// A hit throws her gun crews off for `seconds`, or for as long as an earlier one
+    /// already has: hits do not stack. A flagship's crews are drilled to stand to their
+    /// guns, and are thrown off for [`FLAGSHIP_SUPPRESSION`] as long.
+    pub(super) fn suppress(&mut self, seconds: f32) {
+        let seconds = if self.class.is_flagship() {
+            seconds * FLAGSHIP_SUPPRESSION
+        } else {
+            seconds
+        };
+        self.suppressed = self.suppressed.max(seconds);
+    }
     /// What reached her bridge. True if it smashed it: she holds her course at a
     /// fraction of her speed for [`CONN_LOST`] seconds. A bridge is smashed only once.
     pub(super) fn hit_bridge(&mut self, damage: f32) -> bool {
@@ -1014,6 +1035,7 @@ impl Raider {
         self.sync();
         self.ram_rest = (self.ram_rest - dt).max(0.);
         self.conn_lost = (self.conn_lost - dt).max(0.);
+        self.suppressed = (self.suppressed - dt).max(0.);
         self.body.pos += self.knock * dt;
         self.knock *= (-KNOCK_DRAG * dt).exp();
         // A heavier hull takes longer to gather way, or to lose it.
@@ -1197,8 +1219,13 @@ impl Raider {
         // Each gun on the side she lies on follows her from the moment her lookouts have
         // her, and opens fire once she comes within its range. Each is worked by its own
         // crew, so it fights on whatever becomes of the turrets beside it.
+        // Thrown off by suppressing fire, her crews hold fire and load nothing, though
+        // the guns stay trained on her.
+        let held = self.suppressed > 0.;
         for (index, gun) in self.secondaries.iter_mut().enumerate() {
-            gun.reload = (gun.reload - dt).max(0.);
+            if !held {
+                gun.reload = (gun.reload - dt).max(0.);
+            }
             if !gun.live() {
                 continue;
             }
@@ -1229,7 +1256,7 @@ impl Raider {
                 stand_easy(gun);
                 continue;
             }
-            if trained && gun.reload == 0. {
+            if trained && gun.reload == 0. && !held {
                 let bracket = ((*serial + index as u64 * 3) % 9) as f32 - 4.;
                 let mark = ahead + delta.normalize_or_zero().perp() * bracket * 2.2;
                 super::fire(
@@ -1280,6 +1307,13 @@ impl Raider {
             }
             if !trained {
                 gun.charging = gun.committed.is_some();
+                continue;
+            }
+            if held {
+                // The Regent's crews give up the patch of water they committed to.
+                if gun.committed.take().is_some() {
+                    gun.reload = REGENT_WARNING;
+                }
                 continue;
             }
             gun.reload -= dt;
