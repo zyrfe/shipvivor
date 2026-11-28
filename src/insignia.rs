@@ -54,6 +54,8 @@ pub struct Insignia {
     /// The yard's stock of whole sections that are not turrets or engines.
     pub floatplane: Handle<Image>,
     pub missile: Handle<Image>,
+    /// A set of torpedo tubes, three abreast in their mount.
+    pub tubes: Handle<Image>,
     /// The customise screen's spin of the wheel.
     pub dice: Handle<Image>,
     loader: Handle<Image>,
@@ -688,6 +690,20 @@ pub fn setup(
             "..#..##..#..",
             "....#..#....",
             "...#....#...",
+        ]),
+        tubes: stamp([
+            "............",
+            ".##..##..##.",
+            ".##..##..##.",
+            ".##..##..##.",
+            ".##..##..##.",
+            ".##..##..##.",
+            ".##..##..##.",
+            ".##..##..##.",
+            "############",
+            "############",
+            ".#........#.",
+            "............",
         ]),
         dice: stamp([
             "............",

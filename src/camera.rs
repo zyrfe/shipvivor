@@ -772,6 +772,7 @@ pub fn follow(
     sea: Res<crate::seascape::Sea>,
     window: Single<&Window>,
     masthead: Single<&Transform, (With<crate::scene::Masthead>, Without<FollowCamera>)>,
+    career: Option<Res<crate::career::CareerBook>>,
     mut framed_length: Local<Option<f32>>,
     mut camera: Single<(&mut Transform, &mut Projection), With<FollowCamera>>,
 ) {
@@ -790,7 +791,9 @@ pub fn follow(
         let (next_pose, fov) = if run.screen() == crate::state::Screen::Customise {
             flag_pose(&helm, &sea, &masthead, aspect)
         } else if run.mode == Mode::Title {
-            title_pose(&helm, &sea, aspect)
+            // A launch from the career page holds the camera while she sails off.
+            let anchor = career.as_deref().and_then(|book| book.camera_anchor());
+            title_pose(anchor.unwrap_or(&helm), &sea, aspect)
         } else {
             (view.pose(helm.position), view.fov())
         };

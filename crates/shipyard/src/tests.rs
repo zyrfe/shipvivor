@@ -107,8 +107,10 @@ fn tend(ship: &mut Ship, seconds: usize) -> Vec<Mend> {
 fn stock_designs_come_out_at_the_figures_the_game_already_uses() {
     let cruiser = Design::breakwater().sheet();
     assert!(near(cruiser.length, 30.) && near(cruiser.beam, 5.5));
-    assert!(near(cruiser.mass, 8.) && near(cruiser.structure, 100.));
-    assert!(near(cruiser.top_speed, 13.6));
+    // The reference cruiser weighed 8 with her racks aboard; the light cruiser sails
+    // without them and a little faster.
+    assert!(near(cruiser.mass, 7.75) && near(cruiser.structure, 100.));
+    assert!(near(cruiser.top_speed, 13.6 * (8. / 7.75_f32).cbrt()));
     assert!(near(Design::breakwater().turn_rate(), 0.38));
     assert_eq!(cruiser.deck_mounts, 10);
 
@@ -194,7 +196,7 @@ fn fittings_stand_on_their_modules_with_side_mounts_paired_across_the_hull() {
     let (port, starboard) = (at(berth(2, 1)), at(berth(2, 2)));
     assert_eq!((port.0, port.1), (CloseGun, 12.5));
     assert!(near(port.2, -2.475) && near(starboard.2, 2.475));
-    assert_eq!(at(berth(3, 2)), (Engine, 17.5, 0.));
+    assert_eq!(at(berth(3, 0)), (Engine, 17.5, 0.));
 }
 
 #[test]
@@ -253,7 +255,7 @@ fn the_dock_inserts_and_removes_modules_and_refuses_what_cannot_be_built() {
 
 #[test]
 fn a_round_reaches_the_engine_only_through_the_middle_of_the_machinery_space() {
-    let engine = berth(3, 2);
+    let engine = berth(3, 0);
     // Twelve is enough to knock her engine out, and the machinery space runs from 15 m
     // to 20 m aft of the bow with her engine in its middle.
     let struck = |aft: f32, abeam: f32, reach: Reach| {
@@ -286,7 +288,7 @@ fn a_round_reaches_the_engine_only_through_the_middle_of_the_machinery_space() {
 #[test]
 fn breakwaters_stock_engine_takes_twelve_damage_to_knock_out() {
     let mut ship = Ship::new(Design::breakwater());
-    let engine = berth(3, 2);
+    let engine = berth(3, 0);
     assert_eq!(ship.strike_hull(17., 5.), []);
     assert_eq!(ship.state(engine), State::Working);
     assert_eq!(ship.strike_hull(17., 5.), []);
@@ -302,11 +304,9 @@ fn breakwaters_stock_engine_takes_twelve_damage_to_knock_out() {
         ship.fitted(MainGun)
             .all(|(_, state)| state == State::Working)
     );
-    assert_eq!(ship.state(berth(3, 0)), State::Working);
 
-    // Wrecking the module takes the racks on its deck with it.
+    // Wrecking the module leaves her on reserve power.
     assert_eq!(ship.strike_hull(17., 6.), [Loss::Wrecked(3)]);
-    assert_eq!(ship.state(berth(3, 0)), State::Out);
     assert!(ship.on_reserve_power());
 }
 
@@ -325,13 +325,19 @@ fn a_wrecked_module_soaks_up_fire_and_passes_half_to_its_neighbours() {
     assert!(near(left(&ship, 1), 13.));
 }
 
+/// Breakwater under the reference cruiser's plate, which the plating figures are
+/// worked out on.
+fn stock_plate() -> Design {
+    Design::breakwater().protected(Protection::BREAKWATER)
+}
+
 /// A round wider than Breakwater's stock plate.
 const SIX_INCH: Option<f32> = Some(6.);
 
 /// Hits of `damage` on module 1 of a fresh Breakwater, cycling through `points` as
 /// (metres aft, metres abeam), until it floods. Returns how many it took.
 fn hits_to_flood(points: &[(f32, f32)], damage: f32) -> usize {
-    let mut ship = Ship::new(Design::breakwater());
+    let mut ship = Ship::new(stock_plate());
     (1..100)
         .find(|hit| {
             let (aft, abeam) = points[(hit - 1) % points.len()];
@@ -343,7 +349,7 @@ fn hits_to_flood(points: &[(f32, f32)], damage: f32) -> usize {
 
 #[test]
 fn hammering_one_stretch_of_plating_floods_a_module_sooner_than_spreading_the_same_fire() {
-    let ship = Ship::new(Design::breakwater());
+    let ship = Ship::new(stock_plate());
     // Module 1 runs from 5 to 10 metres aft: its fore half, then its after half.
     assert_eq!(ship.panel_at(6., -2.), (1, Panel::new(Side::Port, true)));
     assert_eq!(
@@ -358,7 +364,7 @@ fn hammering_one_stretch_of_plating_floods_a_module_sooner_than_spreading_the_sa
 
 #[test]
 fn turning_the_other_beam_brings_fresh_plating_to_bear() {
-    let mut ship = Ship::new(Design::breakwater());
+    let mut ship = Ship::new(stock_plate());
     let port = Panel::new(Side::Port, true);
     let lost = |ship: &mut Ship, abeam: f32| {
         let before = ship.compartments()[1].structure();
@@ -630,7 +636,7 @@ fn a_torpedo_lets_the_sea_in_and_slows_her_until_it_is_pumped_out() {
 #[test]
 fn a_knocked_out_engine_waits_for_the_repair_party() {
     let mut ship = Ship::new(stock_crew());
-    let engine = berth(3, 2);
+    let engine = berth(3, 0);
     // A hit on the engine alone, so the machinery space stays tight.
     ship.strike_fitting(engine, 12.);
     assert!(tend(&mut ship, 300).is_empty());
@@ -718,7 +724,7 @@ fn reserve_power_lasts_until_either_engine_is_back_in_service() {
     let mut ship = Ship::new(stock_crew());
     ship.insert_module(4, Module::new(Frame::Straight, [Engine]))
         .unwrap();
-    let (first, second) = (berth(3, 2), berth(4, 0));
+    let (first, second) = (berth(3, 0), berth(4, 0));
     ship.strike_fitting(first, 12.);
     assert!(!ship.on_reserve_power());
     assert_eq!((ship.propulsion(), ship.gun_train_rate()), (0.5, 1.));
@@ -753,7 +759,7 @@ fn an_enemy_boats_battery_runs_out_after_twenty_seconds() {
 #[test]
 fn the_dock_repairs_what_its_budget_reaches_and_she_sails_with_the_rest() {
     let mut ship = Ship::new(Design::breakwater());
-    let engine = berth(3, 2);
+    let engine = berth(3, 0);
     ship.strike_hull(17., 12.);
     ship.strike_hull(7.5, 18.);
     assert!(near(ship.hull(), 70.));
@@ -810,7 +816,7 @@ fn extending_a_live_hull_preserves_damage_and_the_repair_partys_berth() {
 
 #[test]
 fn thick_plate_turns_aside_light_rounds_until_heavy_ones_wear_it_thin() {
-    let armoured = Design::breakwater().protected(Protection {
+    let armoured = stock_plate().protected(Protection {
         plating: 2.,
         thickness: 7.,
         ..Protection::BREAKWATER
@@ -819,7 +825,7 @@ fn thick_plate_turns_aside_light_rounds_until_heavy_ones_wear_it_thin() {
     let (module, panel) = ship.panel_at(7.5, 2.);
     assert!(near(
         ship.design().plate_strength(module),
-        2. * Design::breakwater().plate_strength(module)
+        2. * stock_plate().plate_strength(module)
     ));
     let lost = |ship: &mut Ship, abeam: f32, calibre: Option<f32>| {
         let before = ship.compartments()[module].structure();
@@ -840,7 +846,7 @@ fn thick_plate_turns_aside_light_rounds_until_heavy_ones_wear_it_thin() {
     assert_eq!(lost(&mut ship, -2., Some(5.9)), 0.);
     assert!(near(lost(&mut Ship::new(armoured), 2., None), 4.));
     // Stock plate turns nothing that is fired at her.
-    let mut stock = Ship::new(Design::breakwater());
+    let mut stock = Ship::new(stock_plate());
     assert!(near(lost(&mut stock, 2., Some(2.8)), 4.));
 }
 
@@ -874,7 +880,7 @@ fn her_log_says_what_each_round_met_and_what_got_through_until_it_is_read() {
 #[test]
 fn hardening_strengthens_engine_and_fittings_and_keeps_damage_as_a_share() {
     let mut ship = Ship::new(Design::breakwater());
-    let engine = berth(3, 2);
+    let engine = berth(3, 0);
     let gun = ship.fitted(MainGun).next().unwrap().0;
     assert_eq!(ship.design().strength(Engine), Some(12.));
     ship.strike_hull(17., 6.);

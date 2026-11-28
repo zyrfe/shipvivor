@@ -18,6 +18,7 @@ fn steaming(id: u64, pos: Vec2, pace: f32) -> Steaming {
         hull: CRUISER,
         way: 6.6 * pace,
         pace,
+        churn: Churn::Hull,
     }
 }
 
@@ -114,4 +115,23 @@ fn only_the_nearest_hulls_are_drawn() {
         .map(|slot| wakes.hulls[2 * slot].x)
         .fold(0., f32::max);
     assert_eq!(farthest, 100. * (WAKES - 1) as f32);
+}
+
+#[test]
+fn a_torpedo_leaves_a_thin_short_line_of_bubbles_and_no_bow_wave() {
+    let mut tracks = Tracks::default();
+    let mut pos = Vec2::ZERO;
+    for _ in 0..(8. / TICK) as usize {
+        pos += shipvivor_compass::direction(0.) * 38. * TICK;
+        tracks.step(TICK, [Steaming::torpedo(1, pos, 0.)]);
+    }
+    let wakes = tracks.draw(pos);
+    let hull = wakes.hulls[1];
+    // Its swirl reaches a couple of metres, where a hull's bow wave runs tens.
+    assert!(hull.z < 3., "{hull:?}");
+    let line = points(&wakes, 0);
+    assert!(line.iter().all(|p| p.w < 1.5 && p.z <= WHITE * BUBBLES.0));
+    // The bubbles behind it are gone after a few seconds: well short of the run.
+    let oldest = line.last().unwrap();
+    assert!(pos.distance(oldest.xy()) < 38. * BUBBLES.1 + 5.);
 }

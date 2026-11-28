@@ -1,15 +1,26 @@
-//! Breakwater's arcade broadside spreads. The sight and launcher share each rack's sector.
-//! The enemy's torpedo boats fire the same torpedo, one at a time, at her.
+//! Breakwater's arcade torpedo spreads, from whatever tubes her sections carry: fixed
+//! in the bow and firing ahead, fixed in the stern and firing astern, and trained to
+//! either beam amidships. The sight and the tubes share each set's sector. The enemy's
+//! torpedo boats fire the same torpedo, one at a time, at her.
 use super::torpedo_boat::WARHEAD;
 use super::{Battle, Blow, Body, Effect, EffectKind, Events, body, entry};
 use glam::Vec2;
 use shipvivor_compass::direction;
+use shipvivor_shipyard::{Design, Ship, TubeAim, TubeMount};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 pub const TORPEDO_RANGE: f32 = 420.;
 pub const TORPEDO_SPEED: f32 = 38.;
+/// Half the sector a set of tubes amidships covers on either beam.
 pub const RACK_HALF_ARC: f32 = 50_f32.to_radians();
+/// Half the sector fixed bow or stern tubes cover: a torpedo's gyro turns it onto any
+/// course this far off dead ahead, or dead astern, once it is in the water.
+pub const FIXED_HALF_ARC: f32 = 30_f32.to_radians();
 pub const SPREAD_HALF_ARC: f32 = 4_f32.to_radians();
+/// Seconds a set of tubes takes to load again after a spread.
+pub const TUBE_RELOAD: f32 = 14.;
+/// Metres out from the centreline that tubes amidships fire from, at the stock beam.
+const BEAM_TUBES_ABEAM: (f32, f32) = (1.95, 0.75);
 /// Integrity a torpedo's warhead takes off the ice it strikes: enough to split the
 /// biggest slab at a blow.
 const WARHEAD_ON_ICE: f32 = 12.;
@@ -29,9 +40,6 @@ impl Rack {
                 FRAC_PI_2
             }
     }
-    pub fn origin(self, player: Vec2, heading: f32) -> Vec2 {
-        player - direction(heading) * 1.9 + direction(self.center(heading)) * 2.7
-    }
     pub fn for_aim(heading: f32, aim: f32) -> Option<Self> {
         Self::BOTH.into_iter().find(|side| {
             let delta = (aim - side.center(heading) + PI).rem_euclid(TAU) - PI;
@@ -39,6 +47,55 @@ impl Rack {
         })
     }
 }
+/// A set of torpedo tubes aboard Breakwater, and how near it is to firing again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TubeSet {
+    pub mount: TubeMount,
+    /// Seconds until it can fire again.
+    reload: f32,
+    /// Its tubes are sound enough to fire.
+    pub in_service: bool,
+}
+impl TubeSet {
+    fn new(mount: TubeMount) -> Self {
+        Self {
+            mount,
+            reload: 0.,
+            in_service: true,
+        }
+    }
+    pub fn reload(&self) -> f32 {
+        self.reload
+    }
+    pub fn loaded(&self) -> bool {
+        self.in_service && self.reload == 0.
+    }
+    /// Half the sector it covers about each of its [`TubeSet::centres`].
+    pub fn half_arc(&self) -> f32 {
+        match self.mount.aim {
+            TubeAim::Beam => RACK_HALF_ARC,
+            TubeAim::Ahead | TubeAim::Astern => FIXED_HALF_ARC,
+        }
+    }
+    /// The middle of each sector it covers on a ship steering `heading`: dead ahead,
+    /// dead astern, or both beams.
+    pub fn centres(&self, heading: f32) -> Vec<f32> {
+        match self.mount.aim {
+            TubeAim::Ahead => vec![heading],
+            TubeAim::Astern => vec![heading + PI],
+            TubeAim::Beam => Rack::BOTH.map(|side| side.center(heading)).to_vec(),
+        }
+    }
+    /// The middle of the sector it would fire a spread at `aim` from, if any: a whole
+    /// spread must fit inside the sector.
+    pub fn centre_for(&self, heading: f32, aim: f32) -> Option<f32> {
+        let reach = self.half_arc() - SPREAD_HALF_ARC;
+        self.centres(heading)
+            .into_iter()
+            .find(|centre| ((aim - centre + PI).rem_euclid(TAU) - PI).abs() <= reach)
+    }
+}
+
 #[derive(Clone)]
 pub struct Torpedo {
     pub body: Body,
@@ -92,24 +149,67 @@ pub fn intercept(from: Vec2, ship: Vec2, way: Vec2, speed: f32) -> Option<Vec2> 
 }
 
 impl Battle {
-    pub fn rack_origin(&self, rack: Rack, player: Vec2, heading: f32) -> Vec2 {
-        player - direction(heading) * (1.9 + self.deck.machinery_z)
-            + direction(rack.center(heading)) * (1.95 * self.deck.beam_scale + 0.75)
+    /// Fit the tubes `design` carries. A set that stands where one stood before keeps
+    /// its reload.
+    pub(super) fn fit_tubes(&mut self, design: &Design) {
+        let old = std::mem::take(&mut self.tubes);
+        self.tubes = design
+            .tube_mounts()
+            .into_iter()
+            .map(|mount| {
+                old.iter()
+                    .find(|set| set.mount == mount)
+                    .cloned()
+                    .unwrap_or_else(|| TubeSet::new(mount))
+            })
+            .collect();
+    }
+    /// Tubes knocked out by a hit cannot fire until they are mended.
+    pub(super) fn tube_service(&mut self, ship: &Ship) {
+        for set in &mut self.tubes {
+            set.in_service = ship.ready(set.mount.berth);
+        }
+    }
+    /// Every set of tubes aboard, from the bow aft.
+    pub fn tube_sets(&self) -> &[TubeSet] {
+        &self.tubes
+    }
+    /// The set of tubes that would fire a spread at `aim`: a loaded one whose sector
+    /// takes it, or failing that the one in service that will be loaded soonest.
+    pub fn tubes_for_aim(&self, heading: f32, aim: f32) -> Option<usize> {
+        self.tubes
+            .iter()
+            .enumerate()
+            .filter(|(_, set)| set.in_service && set.centre_for(heading, aim).is_some())
+            .min_by(|a, b| a.1.reload.total_cmp(&b.1.reload))
+            .map(|(i, _)| i)
+    }
+    /// Where a spread from tube set `set`, aimed at `aim`, leaves the ship at `player`
+    /// steering `heading`: tubes amidships fire from the beam the spread goes out on.
+    pub fn tube_origin(&self, set: usize, player: Vec2, heading: f32, aim: f32) -> Vec2 {
+        let set = &self.tubes[set];
+        let along = player - direction(heading) * (set.mount.aft - self.keel.1.bow);
+        match (set.mount.aim, set.centre_for(heading, aim)) {
+            (TubeAim::Beam, Some(beam)) => {
+                let (out, rail) = BEAM_TUBES_ABEAM;
+                along + direction(beam) * (out * self.deck.beam_scale + rail)
+            }
+            _ => along,
+        }
     }
     pub fn torpedoes(&self) -> &[Torpedo] {
         &self.torpedoes
     }
-    pub fn rack_reload(&self, rack: Rack) -> f32 {
-        self.racks[rack as usize]
-    }
+    /// Fire a spread of three at `aim` from a loaded set of tubes whose sector takes it.
+    /// Returns whether one fired.
     pub fn launch_spread(&mut self, player: Vec2, heading: f32, aim: f32) -> bool {
-        let Some(rack) = Rack::for_aim(heading, aim) else {
+        let Some(set) = self.tubes_for_aim(heading, aim) else {
             return false;
         };
-        if self.rack_reload(rack) > 0. {
+        if !self.tubes[set].loaded() {
             return false;
         }
-        let origin = self.rack_origin(rack, player, heading);
+        let origin = self.tube_origin(set, player, heading, aim);
         for offset in [-SPREAD_HALF_ARC, 0., SPREAD_HALF_ARC] {
             self.torpedoes.push(Torpedo {
                 body: body(&mut self.serial, origin, aim + offset),
@@ -123,7 +223,7 @@ impl Battle {
             age: 0.,
             height: 0.2,
         });
-        self.racks[rack as usize] = 14.;
+        self.tubes[set].reload = TUBE_RELOAD;
         true
     }
     /// A torpedo boat at `from`, with the id `boat`, puts her one torpedo in the water on
@@ -139,8 +239,8 @@ impl Battle {
     /// enemy's strike her, at `player`, and pass under their own side. Land and ice
     /// stop both.
     pub(super) fn advance_torpedoes(&mut self, dt: f32, player: Vec2, events: &mut Events) {
-        for reload in &mut self.racks {
-            *reload = (*reload - dt).max(0.);
+        for set in &mut self.tubes {
+            set.reload = (set.reload - dt).max(0.);
         }
         let (forward, keel) = self.keel;
         let outline = keel.outline().map(Vec2::from);

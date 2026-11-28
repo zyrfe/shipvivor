@@ -33,6 +33,15 @@ impl Protection {
         engine: 2. / 3.,
         fittings: 1.,
     };
+
+    /// The light cruiser's plate: thinner than [`Protection::BREAKWATER`], and weaker.
+    /// She trades it for the reach of her guns.
+    pub const LIGHT_CRUISER: Self = Self {
+        plating: 0.8,
+        thickness: 0.75,
+        engine: 2. / 3.,
+        fittings: 1.,
+    };
 }
 
 impl Design {
@@ -44,26 +53,52 @@ impl Design {
     /// knocked about stays that way for a while.
     pub const BREAKWATER_REPAIR: f32 = 0.65;
 
-    /// The player's cruiser: 30 metres and 100 hull points, a main gun fore and aft,
-    /// the director and close guns amidships, and the torpedo racks over the engine.
-    /// She stays afloat until four of her six modules are wrecked, and her crew mends
-    /// at [`Design::BREAKWATER_REPAIR`] pace.
+    /// The player's light cruiser: 30 metres and 100 hull points, a main gun fore and
+    /// aft, the director and close guns amidships and the engine between them, under
+    /// [`Protection::LIGHT_CRUISER`] plate. She carries no tubes. She stays afloat until
+    /// four of her six modules are wrecked, and her crew mends at
+    /// [`Design::BREAKWATER_REPAIR`] pace.
     pub fn breakwater() -> Self {
-        let mut ship = Self::new(
+        Self::player(
             "Breakwater",
             vec![
                 Module::new(Bow, []),
                 Module::new(Straight, [MainGun]),
                 Module::new(Sponsons, [Director, CloseGun, CloseGun]),
-                Module::new(Sponsons, [TorpedoRack, TorpedoRack, Engine]),
+                Module::new(Sponsons, [Engine]),
                 Module::new(Straight, [MainGun]),
                 Module::new(Stern, []),
             ],
+            Protection::LIGHT_CRUISER,
         )
-        .expect("a stock design");
+    }
+
+    /// The player's heavy destroyer: the light cruiser's 30 metres and sections, with a
+    /// second engine under the fore turret and tubes in the bow, amidships over the
+    /// engine and in the stern, under [`Protection::BREAKWATER`] plate.
+    pub fn heavy_destroyer() -> Self {
+        Self::player(
+            "Breakwater",
+            vec![
+                Module::new(Bow, [TorpedoRack]),
+                Module::new(Straight, [MainGun, Engine]),
+                Module::new(Sponsons, [Director, CloseGun, CloseGun]),
+                Module::new(Sponsons, [Engine, TorpedoRack]),
+                Module::new(Straight, [MainGun]),
+                Module::new(Stern, [TorpedoRack]),
+            ],
+            Protection::BREAKWATER,
+        )
+    }
+
+    /// A hull for the player: she founders once two thirds of her vital length is
+    /// wrecked, mends at [`Design::BREAKWATER_REPAIR`] pace, leaks, and drives on her
+    /// auxiliary machinery with every engine out.
+    fn player(name: &str, modules: Vec<Module>, plate: Protection) -> Self {
+        let mut ship = Self::new(name, modules).expect("a stock design");
         ship.sinks_at = 2. / 3.;
         ship.repair = Self::BREAKWATER_REPAIR;
-        ship.protect(Protection::BREAKWATER);
+        ship.protect(plate);
         ship.auxiliary_drive = true;
         ship.leaks = true;
         ship

@@ -430,16 +430,14 @@ pub struct DeckOffsets {
 impl DeckOffsets {
     pub fn for_design(design: &shipvivor_shipyard::Design) -> Self {
         use shipvivor_shipyard::Component;
-        let shift = |component, stock_module| {
-            design
-                .modules()
-                .iter()
-                .position(|m| m.fit.contains(&component))
-                .map_or(0., |index| design.span(index).0 - stock_module as f32 * 5.)
+        let shift = |at: Option<usize>, stock_module| {
+            at.map_or(0., |index| design.span(index).0 - stock_module as f32 * 5.)
         };
+        let carrying =
+            |component| design.modules().iter().position(|m| m.fit.contains(&component));
         Self {
-            bridge_z: shift(Component::Director, 2),
-            machinery_z: shift(Component::TorpedoRack, 3),
+            bridge_z: shift(carrying(Component::Director), 2),
+            machinery_z: shift(design.machinery(), 3),
             beam_scale: design.beam_factor(),
         }
     }

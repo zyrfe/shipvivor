@@ -388,9 +388,13 @@ pub fn churn(
                 hull: profile.hull,
                 way,
                 pace: way / profile.speed(),
+                churn: wakes::Churn::Hull,
             }
         });
-        sea.tracks.step(clock.delta_secs(), afloat);
+        // Running torpedoes leave a line of bubbles on the same water.
+        let fish = (battle.torpedoes().iter())
+            .map(|fish| Steaming::torpedo(fish.body.id, fish.body.pos, fish.body.heading));
+        sea.tracks.step(clock.delta_secs(), afloat.chain(fish));
     }
     sea.wake.step(clock.delta_secs(), helm.position, &keels);
     sea.stirred = true;

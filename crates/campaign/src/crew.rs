@@ -33,10 +33,17 @@ pub enum Skill {
     ReconFlight,
     FleetGunfire,
     FighterCover,
+    // The captain's skills, which work ship-wide. No officer brings them.
+    Quartermaster,
+    Renown,
+    Lucky,
+    OldHand,
+    Reputation,
+    Provisioner,
 }
 
 impl Skill {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 25] = [
         Self::GunFury,
         Self::SpottingCorrections,
         Self::RatePlot,
@@ -56,7 +63,28 @@ impl Skill {
         Self::ReconFlight,
         Self::FleetGunfire,
         Self::FighterCover,
+        Self::Quartermaster,
+        Self::Renown,
+        Self::Lucky,
+        Self::OldHand,
+        Self::Reputation,
+        Self::Provisioner,
     ];
+
+    /// The skills only a captain brings: ship-wide, and apart from every officer's post.
+    pub const CAPTAIN: [Self; 6] = [
+        Self::Quartermaster,
+        Self::Renown,
+        Self::Lucky,
+        Self::OldHand,
+        Self::Reputation,
+        Self::Provisioner,
+    ];
+
+    /// A captain's skill, which no officer brings.
+    pub fn captain(self) -> bool {
+        Self::CAPTAIN.contains(&self)
+    }
 
     /// Its name in the data file.
     pub fn id(self) -> &'static str {
@@ -80,6 +108,12 @@ impl Skill {
             Self::ReconFlight => "recon_flight",
             Self::FleetGunfire => "fleet_gunfire",
             Self::FighterCover => "fighter_cover",
+            Self::Quartermaster => "quartermaster",
+            Self::Renown => "renown",
+            Self::Lucky => "lucky",
+            Self::OldHand => "old_hand",
+            Self::Reputation => "reputation",
+            Self::Provisioner => "provisioner",
         }
     }
 
@@ -110,6 +144,12 @@ impl Skill {
             Self::ReconFlight => &["hidden_fleet", "spotter"],
             Self::FleetGunfire => &["per_round", "barrels", "bore"],
             Self::FighterCover => &["fighters", "every_raid"],
+            Self::Quartermaster => &["points"],
+            Self::Renown => &["seconds"],
+            Self::Lucky => &["glance"],
+            Self::OldHand => &["experience"],
+            Self::Reputation => &["lean"],
+            Self::Provisioner => &["repair"],
         }
     }
 
@@ -132,7 +172,17 @@ impl Skill {
             Self::BomberStrike => Some("point of damage the bombers do to port facilities"),
             Self::FleetGunfire => Some("point of damage the salvos do"),
             Self::FighterCover => Some("plane the fighters bring down"),
-            Self::FallOfShot | Self::ForcedDraught | Self::HardOver | Self::ReconFlight => None,
+            // A captain's skills rank up only from career points.
+            Self::FallOfShot
+            | Self::ForcedDraught
+            | Self::HardOver
+            | Self::ReconFlight
+            | Self::Quartermaster
+            | Self::Renown
+            | Self::Lucky
+            | Self::OldHand
+            | Self::Reputation
+            | Self::Provisioner => None,
         }
     }
 }
@@ -206,6 +256,48 @@ impl Hand {
             .find(|(r, _)| *r == rarity)
             .map_or(0., |(_, table)| by_stars(table, stars))
     }
+}
+
+impl Hand {
+    /// [`Hand::weight`], leaned rarer by a captain's reputation: commons drawn less by
+    /// `lean` of their weight and rares more by as much. A lean of 0 changes nothing.
+    pub fn weight_leaning(&self, rarity: Rarity, stars: u8, lean: f32) -> f32 {
+        let weight = self.weight(rarity, stars);
+        match rarity {
+            Rarity::Common => weight * (1. - lean).max(0.),
+            Rarity::Uncommon => weight,
+            Rarity::Rare => weight * (1. + lean.max(0.)),
+        }
+    }
+}
+
+/// How a career captain earns points across runs, and what each tier of a skill costs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CareerRules {
+    /// Career points each star of a run pays when it ends, won or lost.
+    pub points_per_star: u32,
+    /// Career points more for a run that sinks the Regent.
+    pub points_for_a_win: u32,
+    /// Career points to raise a captain's skill to tier II, then tier III.
+    pub tier_cost: Vec<u32>,
+}
+
+impl CareerRules {
+    /// The points to raise a skill to `tier`, or `None` past the last tier priced.
+    pub fn cost(&self, tier: u8) -> Option<u32> {
+        let at = usize::from(tier).checked_sub(2)?;
+        self.tier_cost.get(at).copied()
+    }
+}
+
+/// A captain who can be picked to start a career.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Captain {
+    pub id: String,
+    pub name: String,
+    pub portrait: Option<String>,
+    /// The captain's skills and the tier each starts at, in [`Skill::ALL`] order.
+    pub skills: Vec<(Skill, u8)>,
 }
 
 fn by_stars(table: &[f32], stars: u8) -> f32 {
@@ -328,6 +420,8 @@ pub struct Wardroom {
     /// One for every skill, in [`Skill::ALL`] order.
     skills: Vec<SkillBook>,
     pub officers: Vec<Officer>,
+    pub career: CareerRules,
+    pub captains: Vec<Captain>,
 }
 
 impl Wardroom {
@@ -355,6 +449,10 @@ impl Wardroom {
         &self.posts[officer.post]
     }
 
+    pub fn captain(&self, id: &str) -> Option<&Captain> {
+        self.captains.iter().find(|captain| captain.id == id)
+    }
+
     /// The rank of an officer holding `tiers` skill tiers, all skills together: the
     /// highest they have the tiers for, or the lowest.
     pub fn rank(&self, tiers: u32) -> &Rank {
@@ -379,6 +477,8 @@ impl Wardroom {
         let ladder = ladder(raw.rank, &mut problems);
         let skills = skills(raw.skill, &growth, &mut problems);
         let officers = officers(raw.officer, &posts, &ladder, &skills, &mut problems);
+        let career = career(raw.career, &growth, &mut problems);
+        let captains = captains(raw.captain, &ladder, &skills, &mut problems);
         if problems.is_empty() {
             Ok(Self {
                 growth,
@@ -387,6 +487,8 @@ impl Wardroom {
                 ladder,
                 skills,
                 officers,
+                career,
+                captains,
             })
         } else {
             Err(Problems(problems))
@@ -407,6 +509,26 @@ struct RawWardroom {
     skill: Vec<RawSkill>,
     #[serde(default)]
     officer: Vec<RawOfficer>,
+    career: RawCareer,
+    #[serde(default)]
+    captain: Vec<RawCaptain>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCareer {
+    points_per_star: u32,
+    points_for_a_win: u32,
+    tier_cost: Vec<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCaptain {
+    id: String,
+    name: String,
+    portrait: Option<String>,
+    skills: BTreeMap<String, u8>,
 }
 
 #[derive(Deserialize)]
@@ -819,6 +941,9 @@ fn officers(
                 problems.push(format!("{at}: no skill called {id}"));
                 continue;
             };
+            if skill.captain() {
+                problems.push(format!("{at}: {id} is a captain's skill"));
+            }
             let tiers = skills
                 .iter()
                 .find(|b| b.skill == skill)
@@ -841,6 +966,89 @@ fn officers(
         });
     }
     officers
+}
+
+fn career(raw: RawCareer, growth: &Growth, problems: &mut Vec<String>) -> CareerRules {
+    let priced = growth.most_tiers() - 1;
+    if raw.tier_cost.len() != priced {
+        problems.push(format!(
+            "career.tier_cost: give {priced} costs, one for each tier past the first, not {}",
+            raw.tier_cost.len()
+        ));
+    }
+    if raw.tier_cost.contains(&0) {
+        problems.push("career.tier_cost: a tier must cost more than 0".into());
+    }
+    CareerRules {
+        points_per_star: raw.points_per_star,
+        points_for_a_win: raw.points_for_a_win,
+        tier_cost: raw.tier_cost,
+    }
+}
+
+fn captains(
+    raw: Vec<RawCaptain>,
+    ladder: &[Rank],
+    skills: &[SkillBook],
+    problems: &mut Vec<String>,
+) -> Vec<Captain> {
+    if raw.is_empty() {
+        problems.push("captain: give at least one captain".into());
+    }
+    let mut captains: Vec<Captain> = Vec::new();
+    for captain in raw {
+        let at = format!("captain {}", captain.id);
+        if captains.iter().any(|c| c.id == captain.id) {
+            problems.push(format!("{at}: listed twice"));
+            continue;
+        }
+        if let Some(rank) = ladder
+            .iter()
+            .find(|rank| captain.name.starts_with(&format!("{} ", rank.short)))
+        {
+            problems.push(format!(
+                "{at}: leave {} off the name; the card puts the rank there",
+                rank.short
+            ));
+        }
+        if !(1..=3).contains(&captain.skills.len()) {
+            problems.push(format!(
+                "{at}: brings {} skills; a captain brings 1 to 3",
+                captain.skills.len()
+            ));
+        }
+        let mut brings = Vec::new();
+        for (id, start) in &captain.skills {
+            let Some(skill) = Skill::from_id(id) else {
+                problems.push(format!("{at}: no skill called {id}"));
+                continue;
+            };
+            if !skill.captain() {
+                problems.push(format!(
+                    "{at}: {id} is an officer's skill; a captain brings {}",
+                    Skill::CAPTAIN.map(Skill::id).join(", ")
+                ));
+            }
+            let tiers = skills
+                .iter()
+                .find(|b| b.skill == skill)
+                .map_or(0, |b| b.tiers.len());
+            if *start == 0 || usize::from(*start) > tiers {
+                problems.push(format!(
+                    "{at}: {id} starts at tier {start}, but it has tiers 1 to {tiers}"
+                ));
+            }
+            brings.push((skill, *start));
+        }
+        brings.sort();
+        captains.push(Captain {
+            id: captain.id,
+            name: captain.name,
+            portrait: captain.portrait,
+            skills: brings,
+        });
+    }
+    captains
 }
 
 #[cfg(test)]

@@ -1632,6 +1632,18 @@ fn section_names(run: &Campaign) -> Vec<String> {
                 (*name).to_string()
             }
         })
+        .zip(run.ship.design().modules())
+        // A section with tubes fitted into it says so, so fitting them is logged.
+        .map(|(name, module)| {
+            if module
+                .fit
+                .contains(&shipvivor_shipyard::Component::TorpedoRack)
+            {
+                format!("{name} with tubes")
+            } else {
+                name
+            }
+        })
         .collect()
 }
 

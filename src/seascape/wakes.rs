@@ -54,6 +54,44 @@ pub struct Steaming {
     /// Metres a second she is making, and the share of her full speed that is.
     pub way: f32,
     pub pace: f32,
+    pub churn: Churn,
+}
+
+/// What a hull leaves on the water.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Churn {
+    /// A breaking bow wave and white water astern, as hard as she is steaming.
+    #[default]
+    Hull,
+    /// A running torpedo's thin line of bubbles, with no bow wave to speak of.
+    Bubbles,
+}
+
+/// The size a torpedo's bubbles are laid for: a slim body a couple of metres long.
+const TORPEDO: Hull = Hull {
+    radius: 0.3,
+    bow: 1.2,
+    stern: 1.2,
+    mass: 0.1,
+    shock_per_point: 1.,
+};
+/// How white a torpedo's bubbles are against a hull's wash at her full speed, and the
+/// seconds they last: long enough to show where it came from, a couple of hundred metres.
+const BUBBLES: (f32, f32) = (0.45, 5.);
+
+impl Steaming {
+    /// A torpedo running at `pos` on `heading`.
+    pub fn torpedo(id: u64, pos: Vec2, heading: f32) -> Self {
+        Self {
+            id,
+            pos,
+            heading,
+            hull: TORPEDO,
+            way: 0.,
+            pace: 1.,
+            churn: Churn::Bubbles,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -120,20 +158,26 @@ impl Tracks {
             track.afloat = None;
         }
         for ship in afloat {
+            let bubbles = ship.churn == Churn::Bubbles;
             let track = self.hulls.entry(ship.id).or_insert_with(|| Track {
                 half_beam: ship.hull.radius,
-                life: life(&ship.hull),
+                life: if bubbles { BUBBLES.1 } else { life(&ship.hull) },
                 crumbs: VecDeque::new(),
                 afloat: None,
             });
             let ahead = shipvivor_compass::direction(ship.heading);
-            let wash = wash(ship.pace);
+            let (wash, reach) = if bubbles {
+                // Only a swirl where the body runs just under the surface.
+                (BUBBLES.0, ship.hull.bow + ship.hull.stern)
+            } else {
+                (wash(ship.pace), reach(&ship.hull, ship.way, ship.pace))
+            };
             track.afloat = Some(Afloat {
                 pos: ship.pos,
                 ahead,
                 bow: ship.hull.bow,
                 stern: ship.hull.stern,
-                reach: reach(&ship.hull, ship.way, ship.pace),
+                reach,
                 wash,
             });
             let spacing = track.life / (TRACK - 1) as f32;

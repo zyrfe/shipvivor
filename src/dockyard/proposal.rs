@@ -463,6 +463,28 @@ pub(super) fn details(
             Some(why) => refusal(cmd, spec, art, why),
             None => note(cmd, spec, art, "Fully fitted"),
         },
+        DockJob::Tubes { at } => {
+            let last = design.modules().len() - 1;
+            note(
+                cmd,
+                spec,
+                art,
+                match at {
+                    0 => "A spread of three, fired dead ahead",
+                    _ if at == last => "A spread of three, fired dead astern",
+                    _ => "A spread of three, trained to either beam",
+                },
+            );
+            figure(
+                cmd,
+                spec,
+                art,
+                Mark::Icon(art.tubes.clone()),
+                design.tube_mounts().len().to_string(),
+                (design.tube_mounts().len() + 1).to_string(),
+                Change::New.color(),
+            );
+        }
         DockJob::Fitting(Card::Turbines) => {
             delta(
                 cmd,

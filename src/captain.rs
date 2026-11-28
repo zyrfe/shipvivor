@@ -5,11 +5,84 @@ use crate::surfaces::painted_image;
 use bevy::prelude::*;
 use shipvivor_encounter::Events;
 
-#[derive(Resource)]
-pub struct CaptainArt {
+/// Each captain's paintings, by their id in the crew data: the watch sheet of four
+/// faces (calm, startled, determined, delighted), the calm face blinking, and the
+/// figure on the prow. The first stands in for a captain with none of their own.
+const PAINTED: [(&str, &[u8], &[u8], &[u8]); 4] = [
+    (
+        "calloway",
+        include_bytes!("captain/calloway/watch.png"),
+        include_bytes!("captain/calloway/blink.png"),
+        include_bytes!("captain/calloway/prow.png"),
+    ),
+    (
+        "marrack",
+        include_bytes!("captain/marrack/watch.png"),
+        include_bytes!("captain/marrack/blink.png"),
+        include_bytes!("captain/marrack/prow.png"),
+    ),
+    (
+        "ashby",
+        include_bytes!("captain/ashby/watch.png"),
+        include_bytes!("captain/ashby/blink.png"),
+        include_bytes!("captain/ashby/prow.png"),
+    ),
+    (
+        "thorne",
+        include_bytes!("captain/thorne/watch.png"),
+        include_bytes!("captain/thorne/blink.png"),
+        include_bytes!("captain/thorne/prow.png"),
+    ),
+];
+
+/// One captain's paintings, loaded.
+struct Painted {
+    id: &'static str,
     faces: Handle<Image>,
     blink: Handle<Image>,
+    figure: Handle<Image>,
+    /// Pixels on a side of one face on the watch sheet.
     cell: f32,
+}
+
+#[derive(Resource)]
+pub struct CaptainArt {
+    painted: Vec<Painted>,
+}
+
+impl CaptainArt {
+    /// The paintings of the captain with this id, or the stand-in's.
+    fn of(&self, id: Option<&str>) -> &Painted {
+        (self.painted.iter())
+            .find(|p| Some(p.id) == id)
+            .unwrap_or(&self.painted[0])
+    }
+
+    /// A captain's face at rest, for a portrait: the sheet and the cell to show.
+    pub fn portrait(&self, id: &str) -> (Handle<Image>, Rect) {
+        let painted = self.of(Some(id));
+        (
+            painted.faces.clone(),
+            Rect::new(0., 0., painted.cell, painted.cell),
+        )
+    }
+}
+
+/// The captain to show on the prow and at the watch: the one previewed on the career
+/// page while it is open, else the one in command of this run, else the one the saved
+/// career is under.
+pub fn shown(
+    run: &Campaign,
+    book: Option<&crate::career::CareerBook>,
+    crew: Option<&crate::crew_book::CrewBook>,
+) -> Option<String> {
+    if run.screen() == crate::state::Screen::Career
+        && let (Some(book), Some(crew)) = (book, crew)
+    {
+        return (crew.wardroom.captains.get(book.captain)).map(|c| c.id.clone());
+    }
+    (run.captain.as_ref().map(|c| c.id.clone()))
+        .or_else(|| book.and_then(|b| b.career.as_ref()).map(|c| c.captain.clone()))
 }
 
 pub fn setup(
@@ -19,26 +92,52 @@ pub fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     hull: Single<Entity, With<crate::scene::Ship>>,
 ) {
-    let faces = painted_image(include_bytes!("captain/watch.png"));
-    let cell = faces.width() as f32 * 0.5;
-    cmd.insert_resource(CaptainArt {
-        faces: images.add(faces),
-        cell,
-        blink: images.add(painted_image(include_bytes!("captain/blink.png"))),
-    });
-    let figure = painted_image(include_bytes!("captain/prow.png"));
-    let aspect = figure.width() as f32 / figure.height() as f32;
+    let mut aspect = 1.;
+    let painted = PAINTED
+        .map(|(id, watch, blink, prow)| {
+            let faces = painted_image(watch);
+            let figure = painted_image(prow);
+            // Every figure is painted to the same proportions.
+            aspect = figure.width() as f32 / figure.height() as f32;
+            Painted {
+                id,
+                cell: faces.width() as f32 * 0.5,
+                faces: images.add(faces),
+                blink: images.add(painted_image(blink)),
+                figure: images.add(figure),
+            }
+        })
+        .into();
+    let art = CaptainArt { painted };
     prow::spawn(
         &mut cmd,
         *hull,
         &mut meshes,
         &mut materials,
-        images.add(figure),
+        art.of(None).figure.clone(),
         aspect,
     );
+    cmd.insert_resource(art);
 }
 
-#[cfg(test)]
+/// Dress the figure on the prow as the captain [`shown`].
+pub fn dress(
+    run: Res<Campaign>,
+    book: Option<Res<crate::career::CareerBook>>,
+    crew: Option<Res<crate::crew_book::CrewBook>>,
+    art: Res<CaptainArt>,
+    figure: Single<&MeshMaterial3d<StandardMaterial>, With<ProwCaptain>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let id = shown(&run, book.as_deref(), crew.as_deref());
+    let wanted = &art.of(id.as_deref()).figure;
+    if let Some(mut material) = materials.get_mut(&figure.0)
+        && material.base_color_texture.as_ref() != Some(wanted)
+    {
+        material.base_color_texture = Some(wanted.clone());
+    }
+}
+
 pub(crate) use prow::ProwCaptain;
 pub use prow::wind;
 
@@ -104,11 +203,13 @@ pub fn portrait(cmd: &mut Commands, parent: Entity, art: &CaptainArt) {
             ChildOf(parent),
         ))
         .id();
+    // The captain in command takes the frame on the first `react`.
+    let stand_in = art.of(None);
     cmd.spawn((
         Face,
         ImageNode {
-            image: art.faces.clone(),
-            rect: Some(Rect::new(0., 0., art.cell, art.cell)),
+            image: stand_in.faces.clone(),
+            rect: Some(Rect::new(0., 0., stand_in.cell, stand_in.cell)),
             ..default()
         },
         Node {
@@ -132,6 +233,7 @@ pub fn react(
     let Some((mut image, mut pose)) = portraits.iter_mut().next() else {
         return;
     };
+    let art = art.of(run.captain.as_ref().map(|c| c.id.as_str()));
     let strained = run.ship.on_reserve_power() || run.ship.in_peril() || helm.rudder.abs() > 0.85;
     let spotted = battle.spotters().iter().any(|p| p.alert_left > 0.);
     let expression = run.watch.expression(strained, spotted);
@@ -159,4 +261,21 @@ pub fn react(
     let flinch = run.watch.startle_left.powi(2);
     pose.rotation = Rot2::degrees(-1.5 * helm.rudder + flinch * (t * 31.).sin());
     pose.translation = Val2::px(0., (t * 1.6).sin() * 0.65 - flinch);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PAINTED;
+
+    #[test]
+    fn every_captain_in_the_crew_data_is_painted() {
+        let wardroom = shipvivor_campaign::crew::Wardroom::stock();
+        for captain in &wardroom.captains {
+            assert!(
+                PAINTED.iter().any(|(id, ..)| *id == captain.id),
+                "{} has no paintings in src/captain/",
+                captain.id
+            );
+        }
+    }
 }

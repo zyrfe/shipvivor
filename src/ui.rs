@@ -1,3 +1,4 @@
+pub(crate) mod career;
 pub(crate) mod customise;
 pub(crate) mod exercise;
 pub(crate) mod feedback;
@@ -127,6 +128,16 @@ pub(crate) enum Action {
     /// Open the battle's timeline, from the pause menu or the report of her loss, to sail
     /// on from an earlier moment of the leg.
     Rewind,
+    /// Open the career page from the title.
+    Career,
+    /// On the career page: preview the captain at this place in the crew data.
+    PickCaptain(usize),
+    /// On the career page: raise the career captain's skill at this place a tier.
+    Raise(usize),
+    /// On the career page: preview this hull.
+    Vessel(shipvivor_campaign::StartingHull),
+    /// On the career page: lock in the captain and hull picked, and launch the run.
+    Launch,
 }
 #[derive(Component)]
 pub struct ScreenRoot;
@@ -177,6 +188,32 @@ pub fn intent(
         Screen::Title if key(KeyCode::KeyC) => Some(Action::Customise),
         Screen::Title if key(KeyCode::KeyO) => Some(Action::Options),
         Screen::Title if key(KeyCode::KeyX) => Some(Action::TestMode),
+        Screen::Title if key(KeyCode::KeyK) => Some(Action::Career),
+        Screen::Career if key(KeyCode::Escape) => Some(Action::Title),
+        Screen::Career if key(KeyCode::Enter) => Some(Action::Launch),
+        Screen::Career if key(KeyCode::KeyA) => {
+            Some(Action::Vessel(shipvivor_campaign::StartingHull::LightCruiser))
+        }
+        Screen::Career if key(KeyCode::KeyS) => {
+            Some(Action::Vessel(shipvivor_campaign::StartingHull::HeavyDestroyer))
+        }
+        Screen::Career => [KeyCode::KeyQ, KeyCode::KeyW, KeyCode::KeyE]
+            .into_iter()
+            .position(key)
+            .map(Action::Raise)
+            .or_else(|| {
+                [
+                    KeyCode::Digit1,
+                    KeyCode::Digit2,
+                    KeyCode::Digit3,
+                    KeyCode::Digit4,
+                    KeyCode::Digit5,
+                    KeyCode::Digit6,
+                ]
+                .into_iter()
+                .position(key)
+                .map(Action::PickCaptain)
+            }),
         Screen::Exercise if key(KeyCode::Escape) => Some(Action::Title),
         Screen::Exercise if key(KeyCode::KeyG) => Some(Action::TestGrade(match run.bench.1 {
             Grade::Moderate => Grade::Tough,
@@ -508,7 +545,11 @@ pub fn hover(
     for (action, cursor, mut bg, chart_name) in &mut buttons {
         let desired = if matches!(
             run.screen(),
-            Screen::Title | Screen::Customise | Screen::Options | Screen::Exercise
+            Screen::Title
+                | Screen::Customise
+                | Screen::Options
+                | Screen::Exercise
+                | Screen::Career
         ) {
             title::fill(*action, cursor.cursor_over())
         } else if let Action::Punish(lane) = *action {
@@ -690,6 +731,11 @@ pub fn rebuild_screen(
     }
     if run.screen() == Screen::Exercise {
         exercise::show(&mut cmd, root, &run, &art.display_face);
+        return;
+    }
+    // The career page draws itself as the career changes: see `career::draw`.
+    if run.screen() == Screen::Career {
+        title::backdrop(&mut cmd, root);
         return;
     }
     // The timeline draws its own bar, over the waters of the moment it shows.
@@ -1794,26 +1840,54 @@ pub fn instruments(
                 }
             }
             Instrument::Impact if guns.torpedo_mode => {
-                use shipvivor_encounter::Rack;
-                match Rack::for_aim(helm.heading, view.bearing) {
-                    None => "Turn to a broadside".to_string(),
-                    Some(r) if battle.rack_reload(r) > 0. => {
-                        format!("{r:?} tubes   /   {:.0} s", battle.rack_reload(r).ceil())
+                let sets = battle.tube_sets();
+                match battle.tubes_for_aim(helm.heading, view.bearing) {
+                    None if sets.is_empty() => "No tubes aboard".to_string(),
+                    None if sets.iter().all(|set| !set.in_service) => {
+                        "Tubes knocked out".to_string()
                     }
-                    Some(r) => format!("{r:?} tubes ready"),
+                    None => "Turn to bring tubes to bear".to_string(),
+                    Some(set) => {
+                        let name = tube_name(&sets[set], helm.heading, view.bearing);
+                        let left = sets[set].reload();
+                        if left > 0. {
+                            format!("{name} tubes   /   {:.0} s", left.ceil())
+                        } else {
+                            format!("{name} tubes ready")
+                        }
+                    }
                 }
             }
             Instrument::Impact => {
                 use shipvivor_encounter::Impact;
-                match battle.salvo_report() {
+                let report = match battle.salvo_report() {
                     Some(Impact::Bounced) => "RICOCHET",
                     Some(Impact::Embedded) => "ARMOR HELD",
                     Some(Impact::Penetrated) => "PENETRATION",
                     Some(Impact::PassedThrough) => "OPEN BREACH",
                     Some(Impact::Overpenetrated) => "OVERPENETRATION",
                     None => "",
+                };
+                // A ship well inside a torpedo's run that loaded tubes bear on: the call
+                // stands on a line of its own until T brings the tubes up.
+                let quarry = view
+                    .target(&battle)
+                    .or_else(|| battle.nearest_ship(helm.position));
+                let tubes_bear = quarry.is_some_and(|ship| {
+                    let at = ship.body.pos;
+                    at.distance(helm.position) < shipvivor_encounter::TORPEDO_RANGE * 0.8
+                        && battle
+                            .tubes_for_aim(
+                                helm.heading,
+                                shipvivor_compass::heading(at - helm.position),
+                            )
+                            .is_some_and(|set| battle.tube_sets()[set].loaded())
+                });
+                if tubes_bear {
+                    format!("{report}\nPRESS T FOR TORPEDOES")
+                } else {
+                    report.into()
                 }
-                .into()
             }
             Instrument::Flagship => {
                 let boss = crate::mission_hud::ship_class(
@@ -1892,15 +1966,25 @@ pub fn instruments(
                 } else {
                     // The main battery has its own board in the centre.
                     let batteries = if guns.torpedo_mode {
-                        let [port, starboard] = shipvivor_encounter::Rack::BOTH.map(|r| {
-                            let left = battle.rack_reload(r);
-                            if left > 0. {
-                                format!("{left:.0}s")
-                            } else {
-                                "READY".into()
-                            }
-                        });
-                        format!("\nTubes   P {port}   S {starboard}")
+                        let sets: Vec<String> = battle
+                            .tube_sets()
+                            .iter()
+                            .map(|set| {
+                                let state = if !set.in_service {
+                                    "OUT".into()
+                                } else if set.reload() > 0. {
+                                    format!("{:.0}s", set.reload())
+                                } else {
+                                    "READY".into()
+                                };
+                                format!("{} {state}", tube_initial(set))
+                            })
+                            .collect();
+                        if sets.is_empty() {
+                            "\nTubes   none".to_string()
+                        } else {
+                            format!("\nTubes   {}", sets.join("   "))
+                        }
                     } else {
                         String::new()
                     };
@@ -1936,5 +2020,31 @@ pub fn instruments(
         if label.0 != value {
             label.0 = value;
         }
+    }
+}
+
+/// What the captain calls a set of tubes firing at `aim` from a ship steering
+/// `heading`: bow, stern, or the beam it fires over.
+fn tube_name(set: &shipvivor_encounter::TubeSet, heading: f32, aim: f32) -> &'static str {
+    use shipvivor_encounter::Rack;
+    use shipvivor_shipyard::TubeAim;
+    match set.mount.aim {
+        TubeAim::Ahead => "Bow",
+        TubeAim::Astern => "Stern",
+        TubeAim::Beam => match Rack::for_aim(heading, aim) {
+            Some(Rack::Port) => "Port",
+            _ => "Starboard",
+        },
+    }
+}
+
+/// A set of tubes in one letter for the helm readout: B for the bow, S for the stern
+/// and M for a set amidships.
+fn tube_initial(set: &shipvivor_encounter::TubeSet) -> &'static str {
+    use shipvivor_shipyard::TubeAim;
+    match set.mount.aim {
+        TubeAim::Ahead => "B",
+        TubeAim::Astern => "S",
+        TubeAim::Beam => "M",
     }
 }

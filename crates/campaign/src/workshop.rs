@@ -195,7 +195,15 @@ pub enum DockJob {
         at: usize,
         with: DeckModule,
     },
+    /// Fit a set of torpedo tubes into module `at`, beside what it carries: in the bow
+    /// they fire ahead, in the stern astern, and amidships they train to either beam.
+    Tubes {
+        at: usize,
+    },
 }
+
+/// Yard points for a set of torpedo tubes.
+pub const TUBES_PRICE: u16 = 4;
 
 impl Run {
     /// Work on the hull as a whole rather than on any one section of her.
@@ -220,8 +228,11 @@ impl Run {
         let Some(module) = design.modules().get(at) else {
             return Vec::new();
         };
+        // Tubes go into any section of a built-up hull that has none yet.
+        let tubes = (module.frame != Frame::Boat && !module.fit.contains(&Component::TorpedoRack))
+            .then_some(DockJob::Tubes { at });
         if at == 0 || at == last {
-            return Vec::new();
+            return tubes.into_iter().collect();
         }
         let mut jobs = Vec::new();
         if !self.module_locked(at) {
@@ -238,7 +249,7 @@ impl Run {
             .into_iter()
             .flatten()
             {
-                if !module.same_kind(&with.build()) {
+                if !module.same_kind(&self.rebuilt(at, with)) {
                     jobs.push(DockJob::Replace { at, with });
                 }
             }
@@ -304,6 +315,7 @@ impl Run {
         if carries(Component::Catapult) {
             jobs.extend([MorePlanes, MoreBombs].map(DockJob::Fitting));
         }
+        jobs.extend(tubes);
         // Moves are free, so they come last.
         if at > 1 {
             jobs.push(DockJob::Move {
@@ -560,6 +572,7 @@ impl DockJob {
                 ..
             } => 2 * EXCHANGE,
             Self::Replace { .. } => EXCHANGE,
+            Self::Tubes { .. } => TUBES_PRICE,
             Self::Fitting(_) => 2,
         }
     }
@@ -597,7 +610,7 @@ impl Run {
             Frame::BatteryGallery => DeckModule::WingBattery.name(),
             Frame::DoubleBattery => DeckModule::DoubleBattery.name(),
             _ if m.fit.contains(&Component::Director) => "Bridge",
-            _ if m.fit.contains(&Component::TorpedoRack) => "Machinery space",
+            _ if self.ship.design().machinery() == Some(at) => "Machinery space",
             _ if m.fit.contains(&Component::Engine) => DockModule::EngineRoom.name(),
             _ if m.fit.contains(&Component::MainGun) => DeckModule::CentreBattery.name(),
             _ if m.fit.contains(&Component::Catapult) => DockModule::Floatplane.name(),
@@ -671,6 +684,21 @@ impl Run {
     }
 
     /// Bow, stern, propulsion and the bridge stay aboard. All interior modules may move.
+    /// Module `at` rebuilt as `with`. Any tubes fitted into it stay aboard.
+    fn rebuilt(&self, at: usize, with: DeckModule) -> Module {
+        let mut module = with.build();
+        let tubes = self
+            .ship
+            .design()
+            .modules()
+            .get(at)
+            .is_some_and(|old| old.fit.contains(&Component::TorpedoRack));
+        if tubes {
+            module.fit.push(Component::TorpedoRack);
+        }
+        module
+    }
+
     pub fn module_locked(&self, at: usize) -> bool {
         self.ship.design().modules().get(at).is_none_or(|module| {
             !Frame::MIDSHIPS.contains(&module.frame)
@@ -771,7 +799,7 @@ impl Run {
                 {
                     return None;
                 }
-                let replacement = with.build();
+                let replacement = self.rebuilt(at, with);
                 if design.modules()[at].same_kind(&replacement) {
                     return None;
                 }
@@ -780,6 +808,13 @@ impl Run {
                 if !(1..=most).contains(&design.count(Component::MainGun)) {
                     return None;
                 }
+            }
+            DockJob::Tubes { at } => {
+                let module = design.modules().get(at)?;
+                if module.fit.contains(&Component::TorpedoRack) {
+                    return None;
+                }
+                design.fit(at, Component::TorpedoRack).ok()?;
             }
         }
         Some(design)
@@ -826,7 +861,8 @@ impl Run {
         let applied = match job {
             DockJob::Insert { at, module } => self.ship.insert_module(at, module.build()),
             DockJob::Move { from, to } => self.ship.move_module(from, to),
-            DockJob::Replace { at, with } => self.ship.replace_module(at, with.build()),
+            DockJob::Replace { at, with } => self.ship.replace_module(at, self.rebuilt(at, with)),
+            DockJob::Tubes { at } => self.ship.fit_tubes(at).map(|_| ()),
             DockJob::Barrels { at, .. }
             | DockJob::Barbette { at, .. }
             | DockJob::Calibre { at, .. } => {
@@ -929,6 +965,39 @@ mod tests {
         run.clear();
         run.points = points;
         run
+    }
+
+    #[test]
+    fn tubes_go_into_any_section_and_stay_through_a_rebuild() {
+        use shipvivor_shipyard::TubeAim;
+        let mut run = docked(20);
+        let last = run.ship.design().modules().len() - 1;
+        // The bow and the stern offer tubes and nothing else.
+        assert_eq!(run.section_jobs(0), [DockJob::Tubes { at: 0 }]);
+        assert_eq!(run.section_jobs(last), [DockJob::Tubes { at: last }]);
+        assert!(run.refit_in_dock(DockJob::Tubes { at: 0 }));
+        assert_eq!(run.points(), 20 - TUBES_PRICE);
+        assert!(run.section_jobs(0).is_empty());
+        assert!(!run.refit_in_dock(DockJob::Tubes { at: 0 }));
+        // Amidships, over the after turret, and kept when the turret makes way for a bay.
+        let at = last - 1;
+        assert!(run.section_jobs(at).contains(&DockJob::Tubes { at }));
+        assert!(run.refit_in_dock(DockJob::Tubes { at }));
+        let bay = DockJob::Replace {
+            at,
+            with: DeckModule::Reserve,
+        };
+        assert!(run.refit_in_dock(bay));
+        let mounts: Vec<_> = run
+            .ship
+            .design()
+            .tube_mounts()
+            .iter()
+            .map(|t| (t.berth.module, t.aim))
+            .collect();
+        assert_eq!(mounts, [(0, TubeAim::Ahead), (at, TubeAim::Beam)]);
+        // The new tubes are sound, and moving the section takes them along.
+        assert!(run.ship.ready(run.ship.design().tube_mounts()[1].berth));
     }
 
     /// Splice a reserve bay in ahead of the after turret.
@@ -1123,7 +1192,8 @@ mod tests {
         assert!(run.refit_in_dock(DockJob::WidenBeam));
         assert_eq!(run.refusal(armor), None);
         assert!(run.refit_in_dock(armor));
-        assert_eq!(run.ship.design().protection().thickness, 8.5);
+        // On the light cruiser's three quarters of an inch of stock plate.
+        assert_eq!(run.ship.design().protection().thickness, 8.25);
     }
 
     #[test]
@@ -1536,9 +1606,10 @@ mod tests {
         let mut run = clear_sector(0);
         lengthen(&mut run);
         let last = run.ship.design().modules().len() - 1;
-        // Bow and stern are fixed. The hull's own work is offered for the whole ship.
+        // Bow and stern are fixed, and take only tubes. The hull's own work is offered for
+        // the whole ship.
         for end in [0, last] {
-            assert!(run.section_jobs(end).is_empty());
+            assert_eq!(run.section_jobs(end), [DockJob::Tubes { at: end }]);
         }
         assert_eq!(
             run.hull_jobs(),

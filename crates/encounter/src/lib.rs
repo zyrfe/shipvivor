@@ -77,7 +77,8 @@ pub use shipvivor_artillery::{
 };
 use shipvivor_compass::heading as bearing;
 pub use torpedo::{
-    RACK_HALF_ARC, Rack, SPREAD_HALF_ARC, TORPEDO_RANGE, TORPEDO_SPEED, Torpedo, intercept,
+    FIXED_HALF_ARC, RACK_HALF_ARC, Rack, SPREAD_HALF_ARC, TORPEDO_RANGE, TORPEDO_SPEED, TUBE_RELOAD,
+    Torpedo, TubeSet, intercept,
 };
 pub use torpedo_boat::{
     AIM_ERROR, FIRING_RANGE, FIRST_RUN, HARRYING_RANGE, MOORED_PAIR, MOST_OUT, RELOAD, REPLACEMENT,
@@ -504,7 +505,8 @@ pub struct Battle {
     fairway: Vec<Vec2>,
     shots: Vec<Shot>,
     torpedoes: Vec<Torpedo>,
-    racks: [f32; 2],
+    /// Her sets of torpedo tubes, from the bow aft.
+    tubes: Vec<TubeSet>,
     floatplanes: Vec<Floatplane>,
     bombs: Vec<Bomb>,
     launchers: Vec<Launcher>,
@@ -656,7 +658,7 @@ impl Battle {
             sunk: vec![],
             shots: vec![],
             torpedoes: vec![],
-            racks: [0.; 2],
+            tubes: vec![],
             floatplanes: vec![],
             bombs: vec![],
             launchers: vec![],
@@ -1380,6 +1382,7 @@ impl Battle {
         self.wing_stations = design.wing_stations();
         self.fit_secondaries(self.secondaries);
         self.fit_strike_craft(design);
+        self.fit_tubes(design);
     }
     pub fn update_mount_service(&mut self, ship: &shipvivor_shipyard::Ship) {
         self.gun_train_rate = ship.gun_train_rate();
@@ -1387,6 +1390,7 @@ impl Battle {
             mount.in_service = ship.ready(mount.position.berth);
         }
         self.strike_craft_service(ship);
+        self.tube_service(ship);
     }
     /// Training gear on every main gunhouse, now and as the yard adds them.
     pub fn fit_training(&mut self, gear: u16) {

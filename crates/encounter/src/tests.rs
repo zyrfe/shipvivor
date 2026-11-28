@@ -2474,35 +2474,77 @@ fn each_picket_lies_at_one_of_three_stations_the_seed_picks() {
     assert_eq!(seen.len(), PICKET_SHIFTS.len());
 }
 
+/// `b` with Breakwater fitted out as the heavy destroyer: tubes in the bow, amidships
+/// and in the stern.
+fn destroyer(mut b: Battle) -> Battle {
+    b.fit_tubes(&shipvivor_shipyard::Design::heavy_destroyer());
+    b
+}
+
 #[test]
-fn torpedo_racks_share_the_displayed_sectors_and_load_independently() {
-    let mut b = battle();
+fn each_set_of_tubes_fires_into_its_own_sector_and_loads_on_its_own() {
+    use std::f32::consts::{FRAC_PI_2, PI, TAU};
+    let mut b = destroyer(battle());
     let player = Vec2::splat(3000.);
-    let heading = std::f32::consts::TAU - 0.2;
-    assert!(!b.launch_spread(player, heading, heading));
-    for side in Rack::BOTH {
-        let beam = side.center(heading);
-        assert_eq!(
-            Rack::for_aim(heading, beam - std::f32::consts::TAU),
-            Some(side)
-        );
-        assert!(!b.launch_spread(player, heading, beam + RACK_HALF_ARC));
-        assert!(b.launch_spread(player, heading, beam));
-        assert!(!b.launch_spread(player, heading, beam));
+    let heading = TAU - 0.2;
+    assert_eq!(b.tube_sets().len(), 3);
+    // The bow tubes take a spread a little off the bow, the stern tubes one a little off
+    // the stern, and the set amidships one on either beam.
+    for (aim, set) in [
+        (heading, 0),
+        (heading + 0.3, 0),
+        (heading + PI - 0.3, 2),
+        (heading + FRAC_PI_2, 1),
+        (heading - FRAC_PI_2 - TAU, 1),
+    ] {
+        assert_eq!(b.tubes_for_aim(heading, aim), Some(set), "aim {aim}");
+    }
+    // Between the bow's sector and the beam's, none bears.
+    assert_eq!(b.tubes_for_aim(heading, heading + 0.6), None);
+    // Each fires a spread of three from where it stands: the bow tubes well ahead of
+    // her middle, the stern tubes well astern, the set amidships from the beam.
+    for (aim, along) in [
+        (heading, 13.5),
+        (heading + PI, -11.5),
+        (heading + FRAC_PI_2, -1.5),
+    ] {
+        let set = b.tubes_for_aim(heading, aim).unwrap();
+        let from = b.tube_origin(set, player, heading, aim);
+        let ahead = shipvivor_compass::direction(heading);
+        assert!(((from - player).dot(ahead) - along).abs() < 1e-3);
+        assert!(b.launch_spread(player, heading, aim));
+        assert!(!b.launch_spread(player, heading, aim));
         let fan = &b.torpedoes()[b.torpedoes.len() - 3..];
         for (fish, offset) in fan.iter().zip([-SPREAD_HALF_ARC, 0., SPREAD_HALF_ARC]) {
-            assert_eq!(fish.body.pos, side.origin(player, heading));
-            assert!((fish.body.heading - beam - offset).abs() < 1e-5);
+            assert_eq!(fish.body.pos, from);
+            assert!((fish.body.heading - aim - offset).abs() < 1e-5);
         }
     }
+    // The set amidships has fired, so it has nothing for the other beam either.
+    assert!(!b.launch_spread(player, heading, heading - FRAC_PI_2));
     b.advance_torpedoes(20., player, &mut Events::default());
     assert!(b.torpedoes.is_empty());
-    assert!(b.launch_spread(player, heading, Rack::Port.center(heading)));
+    assert!(b.launch_spread(player, heading, heading - FRAC_PI_2));
+
+    // Tubes a hit knocks out hold their fire until they are mended.
+    let mut ship = shipvivor_shipyard::Ship::new(shipvivor_shipyard::Design::heavy_destroyer());
+    ship.strike_fitting(b.tube_sets()[0].mount.berth, 100.);
+    b.tube_service(&ship);
+    assert!(!b.launch_spread(player, heading, heading));
+    assert_eq!(b.tubes_for_aim(heading, heading), None);
+}
+
+#[test]
+fn a_light_cruiser_has_no_tubes_to_fire() {
+    let mut b = battle();
+    b.fit_tubes(&shipvivor_shipyard::Design::breakwater());
+    assert!(b.tube_sets().is_empty());
+    assert!(!b.launch_spread(Vec2::ZERO, 0., std::f32::consts::FRAC_PI_2));
 }
 
 #[test]
 fn a_spread_hits_the_first_ship_once_and_land_stops_it() {
-    let mut b = battle();
+    let mut b = destroyer(battle());
     b.raiders.clear();
     b.landmarks.clear();
     let p = Vec2::splat(2000.);
@@ -3095,7 +3137,7 @@ fn only_a_round_that_gets_below_her_deck_amidships_reaches_her_engine() {
         ship.strike_into(blow.aft, blow.abeam, 7., None, blow.reach);
         let berth = shipvivor_shipyard::Berth {
             module: 3,
-            index: 2,
+            index: 0,
         };
         ship.state(berth)
     };

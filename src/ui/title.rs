@@ -63,6 +63,12 @@ pub(super) fn show(cmd: &mut Commands, root: Entity, face: &Handle<Font>) {
             "ENTER",
         ),
         (
+            Action::Career,
+            "Career",
+            "A captain who carries over from run to run, and a hull of your choosing",
+            "K",
+        ),
+        (
             Action::Trial,
             "Helm trial",
             "Practice on the five-gate buoy course",
@@ -137,7 +143,7 @@ pub(super) fn button(
     label: &str,
     shortcut: &str,
 ) -> Button {
-    let primary = action == Action::Start;
+    let primary = matches!(action, Action::Start | Action::Launch);
     let node = cmd
         .spawn((
             Node {
@@ -215,8 +221,8 @@ pub(super) fn backdrop(cmd: &mut Commands, root: Entity) {
 
 pub(super) fn fill(action: Action, hovered: bool) -> Color {
     match (action, hovered) {
-        (Action::Start, true) => Color::srgb_u8(255, 224, 146),
-        (Action::Start, false) => Color::srgb_u8(236, 188, 99),
+        (Action::Start | Action::Launch, true) => Color::srgb_u8(255, 224, 146),
+        (Action::Start | Action::Launch, false) => Color::srgb_u8(236, 188, 99),
         (_, true) => button_color(true),
         (_, false) => Color::srgba_u8(16, 39, 49, 213),
     }

@@ -672,7 +672,8 @@ fn reserve_power_reaches_the_helm_and_damage_control_until_the_engine_restarts()
         w.run_schedule(FixedUpdate);
     }
     assert!(turned(initial_heading, w.resource::<PlayerHelm>().heading) < -0.001);
-    for _ in 0..5 * 60 {
+    // At her crew's pace the party has the engine turning again some 15 s after the hit.
+    for _ in 0..9 * 60 {
         w.run_schedule(FixedUpdate);
     }
     w.run_schedule(Update);
@@ -912,7 +913,7 @@ fn a_run_reaches_the_regent_through_the_helm_and_keeps_its_refits() {
     start_in_narrows(w);
     assert_eq!(
         w.resource::<Campaign>().fittings,
-        shipvivor_campaign::Fittings::default()
+        shipvivor_campaign::StartingHull::LightCruiser.fittings()
     );
     assert_eq!(w.resource::<Campaign>().points(), 0);
     assert_eq!(
@@ -2308,6 +2309,15 @@ fn torpedo_mode_click_launches_once_and_a_larger_bore_resizes_the_deck_models() 
         scales(w),
         vec![shipvivor_encounter::MainShell::STOCK.mount_scale(); 2]
     );
+    // The light cruiser carries no tubes, so T leaves her on her guns.
+    press(w, KeyCode::KeyT);
+    assert!(!w.resource::<Guns>().torpedo_mode);
+    // She sails as the heavy destroyer instead, with tubes amidships to fire abeam.
+    let run = (**w.resource::<Campaign>())
+        .clone()
+        .with_hull(shipvivor_campaign::StartingHull::HeavyDestroyer);
+    shipvivor_sim::fit_player(&mut w.resource_mut::<Encounter>(), &run);
+    **w.resource_mut::<Campaign>() = run;
     press(w, KeyCode::KeyT);
     let abeam = w.resource::<PlayerHelm>().heading + std::f32::consts::FRAC_PI_2;
     w.resource_mut::<ShipView>().bearing = abeam;
@@ -3473,8 +3483,8 @@ fn pumps_come_in_a_hand_or_from_the_engine_bay_and_reach_the_ship() {
     let mut app = headless_game();
     let w = app.world_mut();
     start_in_narrows(w);
-    // The card says how far the crew's pumps hold a holed module dry: down to 31% of its
-    // structure on the stock pumps, and 21% with half as much again.
+    // The card says how far the crew's pumps hold a holed module dry: down to 40% of its
+    // structure on the stock pumps at her crew's pace, and 31% with half as much again.
     let run = w.resource::<Campaign>();
     let face = cards::face(Card::Pumps, run.fittings, run.ship.design());
     let figures: Vec<_> = face
@@ -3484,7 +3494,7 @@ fn pumps_come_in_a_hand_or_from_the_engine_bay_and_reach_the_ship() {
         .collect();
     assert_eq!(
         figures,
-        [("Pumping", "100%", "150%"), ("Holds dry to", "31%", "21%")]
+        [("Pumping", "100%", "150%"), ("Holds dry to", "40%", "31%")]
     );
     // A level deals them, and the first rank reaches her pumps at once.
     w.resource_mut::<Campaign>().experience = 30;
@@ -3509,7 +3519,7 @@ fn pumps_come_in_a_hand_or_from_the_engine_bay_and_reach_the_ship() {
     w.run_schedule(Update);
     visit(w, 3);
     choose(w, DockJob::Fitting(Card::Pumps));
-    for figure in ["150%", "200%", "21%", "13%"] {
+    for figure in ["150%", "200%", "31%", "24%"] {
         assert!(
             w.query::<&Text>().iter(w).any(|t| t.0 == figure),
             "{figure}"

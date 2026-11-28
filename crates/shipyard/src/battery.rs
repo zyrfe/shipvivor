@@ -354,18 +354,16 @@ impl Design {
     /// forward end of each open section, nearest the bridge first. A longer hull has
     /// room for more. Only the player's hull carries them.
     pub fn aa_stations(&self) -> Vec<AaStation> {
-        let moved = |component, stock_module: f32| {
-            self.modules()
-                .iter()
-                .position(|m| m.fit.contains(&component))
-                .map_or(0., |at| {
-                    self.span(at).0 - stock_module * Frame::Straight.spec().length
-                })
+        let moved = |at: Option<usize>, stock_module: f32| {
+            at.map_or(0., |at| {
+                self.span(at).0 - stock_module * Frame::Straight.spec().length
+            })
         };
-        let (bridge, machinery) = (
-            moved(Component::Director, 2.),
-            moved(Component::TorpedoRack, 3.),
-        );
+        let bridge = self
+            .modules()
+            .iter()
+            .position(|m| m.fit.contains(&Component::Director));
+        let (bridge, machinery) = (moved(bridge, 2.), moved(self.machinery(), 3.));
         // Starboard mounts: metres out at the stock beam, forward of the datum, and
         // whether it stands on a bridge wing.
         let mut mounts: Vec<(f32, f32, bool)> = vec![

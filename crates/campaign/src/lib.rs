@@ -5,6 +5,10 @@
 //! it, and finishing inside it pays a star's worth of yard points.
 mod battery;
 pub mod crew;
+mod start;
+pub use start::StartingHull;
+pub mod career;
+pub use career::{CaptainAboard, CaptainPerks, Career, CareerStart, Paid};
 mod plan;
 mod workshop;
 pub use battery::{CALIBRES, ShipBeam};
@@ -720,6 +724,8 @@ fn next(state: &mut u64) -> u64 {
 }
 /// Keeps the hands' stream apart from anything else drawn from the run seed.
 const HAND_STREAM: u64 = 0x6861_6e64_7300_0000;
+/// Keeps the captain's luck apart from every other draw on the run's seed.
+const LUCK_STREAM: u64 = 0x6c75_636b_0000_0000;
 
 /// Up to [`HAND`] different cards from `pool`, each draw weighted by rarity among the cards
 /// not yet drawn.
@@ -1124,6 +1130,8 @@ pub struct Run {
     /// Crown Deep. The anchorage is [`Run::origin`], and Crown Deep is no passage.
     pub course: Vec<Stage>,
     pub elapsed: f32,
+    /// The hull she started the run in.
+    pub hull: StartingHull,
     /// Breakwater herself: her modules, what is fitted to them, and their condition.
     pub ship: Ship,
     pub fittings: Fittings,
@@ -1158,6 +1166,12 @@ pub struct Run {
     /// The scope shows where to lay the guns on a moving ship: a mark where she will be
     /// when a round gets there. On from the start for now; a character card is to grant it.
     pub lead_sight: bool,
+    /// The career captain in command, whose skills work ship-wide, or `None`.
+    pub captain: Option<CaptainAboard>,
+    /// Hits that have tried the captain's luck, so each tries it afresh from the seed.
+    luck_draws: u32,
+    /// Experience earned short of a whole point, carried to the next.
+    experience_carry: f32,
 }
 impl Default for Run {
     fn default() -> Self {
@@ -1168,8 +1182,9 @@ impl Default for Run {
             origin: Stage::IronNarrows,
             course: Vec::new(),
             elapsed: 0.,
-            ship: Ship::new(Design::breakwater()),
-            fittings: Fittings::default(),
+            hull: StartingHull::LightCruiser,
+            ship: Ship::new(StartingHull::LightCruiser.design()),
+            fittings: StartingHull::LightCruiser.fittings(),
             objectives: Objectives::default(),
             previous_stars: 0,
             experience: 0,
@@ -1186,6 +1201,9 @@ impl Default for Run {
             spent: 0,
             exercise: false,
             lead_sight: true,
+            captain: None,
+            luck_draws: 0,
+            experience_carry: 0.,
         }
     }
 }
@@ -1285,7 +1303,9 @@ impl Run {
     }
     /// Seconds on the leg's clock: its minutes, and [`BASE_TIME`] for each base wrecked.
     pub fn clock(&self) -> f32 {
-        f32::from(self.stage.mission().minutes) * 60. + BASE_TIME * f32::from(self.objectives.yards)
+        f32::from(self.stage.mission().minutes) * 60.
+            + BASE_TIME * f32::from(self.objectives.yards)
+            + self.perks().clock_seconds
     }
     /// Seconds left on the leg's clock, the time to beat. Past it the leg goes on and
     /// this runs negative, until a base wrecked puts time back on it.
@@ -1320,7 +1340,7 @@ impl Run {
             return;
         }
         self.objectives.kills = self.objectives.kills.saturating_sub(count);
-        self.experience += u32::from(count) * TORPEDO_BOAT_XP;
+        self.earn(u32::from(count) * TORPEDO_BOAT_XP);
     }
 
     /// Stars for the goals met. The clock never takes one away.
@@ -1367,6 +1387,32 @@ impl Run {
             .saturating_add(self.cargo_points())
             .saturating_add(self.clock_points())
             .saturating_add(self.survival_points())
+            .saturating_add(self.perks().yard_points)
+    }
+    /// What the captain's skills do on this run: nothing without a career captain.
+    pub fn perks(&self) -> CaptainPerks {
+        self.captain.as_ref().map(|c| c.perks).unwrap_or_default()
+    }
+    /// Experience earned, more by the captain's share, carrying what falls short of a
+    /// whole point.
+    fn earn(&mut self, experience: u32) {
+        if experience == 0 {
+            return;
+        }
+        let earned = experience as f32 * (1. + self.perks().experience) + self.experience_carry;
+        let whole = earned.floor();
+        self.experience_carry = earned - whole;
+        self.experience += whole as u32;
+    }
+    /// Whether this hit glances off, by the captain's luck. Each hit draws afresh.
+    fn glances(&mut self) -> bool {
+        let chance = self.perks().glance;
+        if chance <= 0. {
+            return false;
+        }
+        self.luck_draws += 1;
+        let roll = mix(self.seed ^ LUCK_STREAM ^ u64::from(self.luck_draws)) >> 40;
+        (roll as f32 / (1u64 << 24) as f32) < chance
     }
     /// How many times over the bases of these waters moor and launch their ships: 1, or
     /// [`PUNISHING_STRENGTH`] on a punishing passage.
@@ -1510,16 +1556,18 @@ impl Run {
         self.objectives.cargo += gains.cargo.max(0.);
         self.objectives.destroyed_drydock |=
             gains.destroyed_drydock || gains.yards > 0 || objective == Some(LegEnd::BasesDestroyed);
-        self.ship
-            .patch(f32::from(gains.crates.saturating_mul(CRATE_REPAIR)));
-        self.experience += u32::from(gains.crates) * CRATE_XP;
-        self.experience += u32::from(gains.coasters) * COASTER_XP;
+        self.ship.patch(
+            f32::from(gains.crates.saturating_mul(CRATE_REPAIR))
+                * (1. + self.perks().stores_repair),
+        );
+        self.earn(u32::from(gains.crates) * CRATE_XP);
+        self.earn(u32::from(gains.coasters) * COASTER_XP);
         self.objectives.planes = self.objectives.planes.saturating_add(gains.planes);
-        self.experience += u32::from(gains.planes) * PLANE_XP;
+        self.earn(u32::from(gains.planes) * PLANE_XP);
         self.objectives.guns = self.objectives.guns.saturating_add(gains.guns);
-        self.experience += u32::from(gains.guns) * GUN_XP;
+        self.earn(u32::from(gains.guns) * GUN_XP);
         self.objectives.vehicles = self.objectives.vehicles.saturating_add(gains.vehicles);
-        self.experience += u32::from(gains.vehicles) * VEHICLE_XP;
+        self.earn(u32::from(gains.vehicles) * VEHICLE_XP);
         while self.experience >= self.next_level_xp() {
             self.experience -= self.next_level_xp();
             self.level += 1;
@@ -1536,7 +1584,7 @@ impl Run {
     /// A hit on the hull, `aft` metres behind the bow tip, that meets no plating. It
     /// lands on the module there.
     pub fn strike(&mut self, aft: f32, damage: u16) {
-        if self.phase == Phase::Sailing {
+        if self.phase == Phase::Sailing && !self.glances() {
             self.ship.strike_hull(aft, f32::from(damage));
         }
     }
@@ -1553,7 +1601,7 @@ impl Run {
         calibre: Option<f32>,
         reach: shipvivor_shipyard::Reach,
     ) {
-        if self.phase == Phase::Sailing {
+        if self.phase == Phase::Sailing && !self.glances() {
             let damage = f32::from(damage) * bore_share(calibre);
             self.ship.strike_into(aft, abeam, damage, calibre, reach);
         }
@@ -1577,7 +1625,7 @@ impl Run {
     /// Plate, harden and pump the hull as her fittings say.
     pub(crate) fn refit_protection(&mut self) {
         self.ship
-            .protect(self.fittings.protection(Protection::BREAKWATER));
+            .protect(self.fittings.protection(self.hull.protection()));
         self.ship.fit_pumps(self.fittings.pumping());
     }
     pub fn hull_percent(&self) -> u16 {
@@ -2246,7 +2294,7 @@ mod tests {
         let mut run = Run::default();
         let engine = Berth {
             module: 3,
-            index: 2,
+            index: 0,
         };
         // Two hits on the engine module put her on reserve power.
         run.strike(17., 6);
@@ -2620,7 +2668,7 @@ mod tests {
         r.install(other);
         assert_eq!(
             (r.fittings, r.fittings_remaining()),
-            (Fittings::default(), 2)
+            (StartingHull::LightCruiser.fittings(), 2)
         );
         r.install(hand[0]);
         assert_eq!(r.phase, Phase::Drydock(LegEnd::BasesDestroyed));

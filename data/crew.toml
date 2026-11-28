@@ -335,6 +335,76 @@ tiers = [
     { fighters = 4, every_raid = true, text = "4 fighters break up every air raid" },
 ]
 
+# --- Captain's skills --------------------------------------------------------------------
+# Ship-wide skills only a captain brings, apart from every officer's post. They rank up
+# from career points alone (see [career]), so their experience is 0.
+
+[[skill]]
+id = "quartermaster"
+name = "Quartermaster"
+card = "+{points} yard point every patrol"
+experience = 0.0
+tiers = [
+    { points = 1 },
+    { points = 2 },
+    { points = 3, text = "+3 yard points every patrol" },
+]
+
+[[skill]]
+id = "renown"
+name = "Renown"
+card = "+{seconds} s on every patrol's clock"
+experience = 0.0
+tiers = [
+    { seconds = 20 },
+    { seconds = 35 },
+    { seconds = 50 },
+]
+
+[[skill]]
+id = "lucky"
+name = "Lucky"
+card = "{glance%} of hits glance off harmlessly"
+experience = 0.0
+tiers = [
+    { glance = 0.04 },
+    { glance = 0.07 },
+    { glance = 0.10 },
+]
+
+[[skill]]
+id = "old_hand"
+name = "Old Hand"
+card = "+{experience%} experience"
+experience = 0.0
+tiers = [
+    { experience = 0.10 },
+    { experience = 0.20 },
+    { experience = 0.30 },
+]
+
+[[skill]]
+id = "reputation"
+name = "Reputation"
+card = "Leader hands lean rarer: commons -{lean%}, rares +{lean%}"
+experience = 0.0
+tiers = [
+    { lean = 0.15 },
+    { lean = 0.30 },
+    { lean = 0.45 },
+]
+
+[[skill]]
+id = "provisioner"
+name = "Provisioner"
+card = "Salvaged stores mend +{repair%} more"
+experience = 0.0
+tiers = [
+    { repair = 0.25 },
+    { repair = 0.50 },
+    { repair = 0.75 },
+]
+
 # --- Officers ----------------------------------------------------------------------------
 # `skills` gives each skill the officer brings and the tier it starts at.
 # `portrait` is the painting's file name.
@@ -458,3 +528,39 @@ post = "liaison"
 rarity = "rare"
 portrait = "liaison-quintero.png"
 skills = { bomber_strike = 1, fighter_cover = 1, recon_flight = 1 }
+
+# --- Career ------------------------------------------------------------------------------
+# A career captain carries over from run to run, with their skill tiers. Each run, won or
+# lost, pays career points; spend them before the next run on the captain's own skills.
+
+[career]
+# Career points each star of the run pays when it ends.
+points_per_star = 1
+# Career points more for sinking the Iron Regent.
+points_for_a_win = 5
+# Career points to raise a captain's skill to tier II, then tier III.
+tier_cost = [6, 12]
+
+# --- Captains ----------------------------------------------------------------------------
+# Who can be picked to start a career. Each brings captain's skills only, at the tier
+# given. The card puts the rank before the name.
+
+[[captain]]
+id = "marrack"
+name = "Isolde Marrack"
+skills = { quartermaster = 1, provisioner = 1 }
+
+[[captain]]
+id = "ashby"
+name = "Corwin Ashby"
+skills = { lucky = 1, renown = 1 }
+
+[[captain]]
+id = "thorne"
+name = "Wilhelmina Thorne"
+skills = { old_hand = 1, reputation = 1 }
+
+[[captain]]
+id = "calloway"
+name = "Ezra Calloway"
+skills = { lucky = 1, old_hand = 1 }

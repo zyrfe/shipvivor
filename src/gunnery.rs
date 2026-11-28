@@ -42,7 +42,17 @@ impl DeckPlan {
         {
             return image.clone();
         }
-        let image = images.add(plan_image(design));
+        // The funnels as her class stands them: each a circle about the middle of its
+        // casing, as wide and as long as it.
+        let funnels: Vec<(Vec2, Vec2)> = crate::scene::Look::of(design, run.hull, &run.fittings)
+            .funnels
+            .iter()
+            .map(|f| {
+                let middle = f.lip.z - 0.5 * f.rake * f.size.z;
+                (Vec2::new(0., middle), 0.5 * f.size.xz())
+            })
+            .collect();
+        let image = images.add(plan_image(design, &funnels));
         self.cached = Some((design.clone(), image.clone()));
         image
     }
@@ -121,14 +131,15 @@ fn paint(
     outline: &[(f32, f32)],
     design: &Design,
     offsets: shipvivor_encounter::DeckOffsets,
+    funnels: &[(Vec2, Vec2)],
     p: Vec2,
 ) -> Option<[f32; 3]> {
     if !inside(outline, p) {
         return None;
     }
-    let funnel = [0.5_f32, 2.75]
+    let funnel = funnels
         .iter()
-        .any(|z| Vec2::new(p.x / 0.875, (p.y - offsets.machinery_z - z) / 1.15).length() <= 1.);
+        .any(|&(middle, radii)| ((p - middle) / radii).length() <= 1.);
     let aft = p.y + shipvivor_encounter::Hull::CRUISER.bow;
     let i = design.module_at(aft);
     let module = &design.modules()[i];
@@ -164,7 +175,7 @@ fn plan_scale(design: &Design) -> Vec2 {
         SCALE.y,
     )
 }
-fn plan_image(design: &Design) -> Image {
+fn plan_image(design: &Design, funnels: &[(Vec2, Vec2)]) -> Image {
     let hull = shipvivor_encounter::Hull::breakwater(design);
     let extension = hull.extension();
     let outline = hull.outline();
@@ -193,7 +204,9 @@ fn plan_image(design: &Design) -> Image {
                     for sx in 0..4 {
                         let at = Vec2::new(x as f32, y as f32)
                             + (Vec2::new(sx as f32, sy as f32) + 0.5) / 4.;
-                        if let Some(rgb) = paint(&outline, design, offsets, (at - origin) / scale) {
+                        if let Some(rgb) =
+                            paint(&outline, design, offsets, funnels, (at - origin) / scale)
+                        {
                             for (s, c) in sum.iter_mut().zip(rgb) {
                                 *s += c;
                             }

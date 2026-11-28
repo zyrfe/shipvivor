@@ -1264,6 +1264,15 @@ fn job_name(job: DockJob, run: &Campaign) -> String {
         }
         .into(),
         DockJob::Replace { at, with } => exchange_name(run, at, with).into(),
+        DockJob::Tubes { at } => {
+            let last = run.ship.design().modules().len() - 1;
+            match at {
+                0 => "Bow torpedo tubes",
+                _ if at == last => "Stern torpedo tubes",
+                _ => "Torpedo tubes",
+            }
+            .into()
+        }
     }
 }
 fn button_paint(selected: bool, confirm: bool, hover: bool) -> Color {

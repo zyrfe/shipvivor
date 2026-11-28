@@ -65,8 +65,6 @@ enum Shape {
     Torpedo,
     /// An enemy torpedo, red in the head.
     EnemyTorpedo,
-    /// A stretch of the white bubble track an enemy torpedo leaves, nearest it first.
-    Track(u8),
     /// A torpedo boat's bow wave either side and the wash under her stern, at speed.
     Wash(u8),
     Ship(EnemyClass),
@@ -589,42 +587,9 @@ const AFLOAT: f32 = 2.94;
 /// and the model metres it settles by then, enough to take the tail down too.
 const SINKING: f32 = 1.8;
 const SUNK: f32 = 9.;
-/// Metres of the bubble track drawn behind an enemy torpedo, in stretches, and how wide
-/// it is at the torpedo and at its far end.
-const TRACK: (f32, u8) = (72., 4);
-const TRACK_WIDTH: (f32, f32) = (0.55, 1.5);
-
-/// The white track an enemy torpedo leaves along its run, widening as its bubbles rise
-/// and spread behind it. It is what gives the torpedo away at range.
-fn enemy_track(
-    fish: &shipvivor_encounter::Torpedo,
-    sea: &crate::seascape::Sea,
-    wanted: &mut HashMap<Actor, Transform>,
-) {
-    let (length, stretches) = TRACK;
-    let stretch = length / f32::from(stretches);
-    let back = -fish.body.forward();
-    for k in 0..stretches {
-        let near = f32::from(k) * stretch + 1.5;
-        let far = (near + stretch).min(fish.run());
-        if far <= near {
-            break;
-        }
-        let middle = fish.body.pos + back * (0.5 * (near + far));
-        let spread = (0.5 * (near + far) / length).min(1.);
-        let width = TRACK_WIDTH.0 + (TRACK_WIDTH.1 - TRACK_WIDTH.0) * spread;
-        let at = Body {
-            pos: middle,
-            ..fish.body
-        };
-        let xf = pose(&at, sea.height(middle) + 0.04).with_scale(Vec3::new(
-            width,
-            0.07,
-            0.5 * (far - near),
-        ));
-        wanted.insert(Actor(fish.body.id, Shape::Track(k)), xf);
-    }
-}
+/// A running torpedo's height: metres above the still sea, and the share of the swell
+/// it rises and falls with.
+const TORPEDO_RIDE: (f32, f32) = (0.08, 0.2);
 
 fn pose(b: &Body, h: f32) -> Transform {
     Transform::from_xyz(b.pos.x, h, b.pos.y).with_rotation(Quat::from_rotation_y(-b.heading))
@@ -971,17 +936,9 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
             } else {
                 &kit.red
             };
+            // Its wake is the sea's own: a line of bubbles drawn on the water.
             part(&kit.ball, &kit.dark, v(0., 0., 0.), v(0.29, 0.28, 1.68));
             part(&kit.ball, head, v(0., 0., -1.23), v(0.27, 0.24, 0.52));
-            part(&kit.ball, &kit.foam, v(0., 0., 4.), v(0.35, 0.12, 3.7));
-            for side in [-1., 1.] {
-                part(
-                    &kit.ball,
-                    &kit.foam,
-                    v(side * 0.48, 0., 8.),
-                    v(0.25, 0.09, 2.5),
-                );
-            }
         }
         Shape::Ship(class) => {
             let p = class.profile();
@@ -1135,7 +1092,7 @@ fn create(cmd: &mut Commands, kit: &Kit, key: Actor, xf: Transform) {
             );
         }
         Shape::FoamRing => part(&kit.ring, &kit.foam, Vec3::ZERO, Vec3::ONE),
-        Shape::Track(_) | Shape::Wash(_) => part(&kit.ball, &kit.foam, Vec3::ZERO, Vec3::ONE),
+        Shape::Wash(_) => part(&kit.ball, &kit.foam, Vec3::ZERO, Vec3::ONE),
         Shape::Fire | Shape::GunFire(_) => {
             part(&kit.ball, &kit.flame, Vec3::ZERO, v(1.2, 2.4, 1.4));
             part(&kit.ball, &kit.gold, v(-0.6, 0., -0.45), v(0.7, 1.3, 1.));
@@ -1638,13 +1595,13 @@ pub fn sync(
             } else {
                 Shape::Torpedo
             };
+            // It runs at a set depth, so it holds a level line through the waves and
+            // only the swell lifts it a little.
+            let swell = sea.height(fish.body.pos);
             wanted.insert(
                 Actor(fish.body.id, shape),
-                pose(&fish.body, sea.height(fish.body.pos) + 0.12),
+                pose(&fish.body, TORPEDO_RIDE.0 + TORPEDO_RIDE.1 * swell),
             );
-            if fish.hostile() {
-                enemy_track(fish, &sea, &mut wanted);
-            }
         }
         for s in battle.shots() {
             let shape = match s.battery {

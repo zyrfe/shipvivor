@@ -110,6 +110,8 @@ pub enum TitlePage {
     Options,
     Departure,
     Exercise,
+    /// Career: the captain and the hull, picked on one page, then launched.
+    Career,
 }
 
 /// What the player is looking at: the mode, refined by the run's phase while on patrol.
@@ -125,6 +127,10 @@ pub enum Screen {
     /// Test mode's list of seas, opened from the title or from its yard: choose a round,
     /// a grade and a sea to try a ship against.
     Exercise,
+    /// Opened from the title for a career: a captain and a hull, each picked and
+    /// previewed on the one page, the captain's skills raised there with career points,
+    /// and the pair locked in and launched together.
+    Career,
     Trial,
     Sailing,
     Secured,
@@ -172,6 +178,9 @@ pub struct Campaign {
     pub hits: u32,
     pub sunk: u32,
     pub mode: Mode,
+    /// A career run's hull and captain, chosen on the title's career page and set out
+    /// with her when she departs. `None` for a run that is not a career's.
+    pub career: Option<shipvivor_campaign::CareerStart>,
     /// The run itself. Its `seed` charts every leg and deals every level-up hand, and
     /// `ChartSeeds` draws a new one for each run.
     #[deref]
@@ -221,6 +230,7 @@ impl Campaign {
             dock_plan: None,
             dock_revision: 0,
             title_page: TitlePage::Menu,
+            career: None,
             bench: (1, Grade::Tough),
             berth: None,
             debrief: None,
@@ -228,6 +238,10 @@ impl Campaign {
             sunk: 0,
             run: Run::default(),
         }
+    }
+    /// Set her out as a career run starts: in its hull, under its captain.
+    pub fn board(&mut self, start: shipvivor_campaign::CareerStart) {
+        self.run = start.board(std::mem::take(&mut self.run));
     }
     /// A run made elsewhere, as it stands, entered in the given mode.
     pub fn with_run(mode: Mode, run: Run) -> Self {
@@ -471,6 +485,7 @@ impl Campaign {
                 TitlePage::Options => Screen::Options,
                 TitlePage::Departure => Screen::Departure,
                 TitlePage::Exercise => Screen::Exercise,
+                TitlePage::Career => Screen::Career,
             },
             Mode::Trial => Screen::Trial,
             Mode::Paused if self.chart_roll.is_some() => Screen::PassageMap,

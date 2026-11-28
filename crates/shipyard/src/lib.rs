@@ -22,7 +22,7 @@ pub use battery::{
 pub use design::{
     BOMB_DAMAGE, Berth, Component, Design, FLOATPLANE_REACH, Fault, Fitting, Frame, FrameSpec,
     Gunhouse, MISSILE_DAMAGE, MISSILE_RANGE, MISSILE_RELOAD, MISSILE_SALVO, MOST_TIER, Module,
-    Protection, SORTIE_SECONDS, Sheet, Slot, StrikeCraft,
+    Protection, SORTIE_SECONDS, Sheet, Slot, StrikeCraft, TubeAim, TubeMount,
 };
 pub use repair::{DRAINED, Mend, PARTY_PUMP, PUMP, Task};
 pub use ship::{BREACH, Compartment, INFLOW, Loss, Panel, Reach, Ship, Side, State, Struck};

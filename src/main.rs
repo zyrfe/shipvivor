@@ -5,6 +5,7 @@ mod blueprint;
 mod camera;
 mod captain;
 mod cards;
+mod career;
 mod crew_book;
 mod damage_control;
 mod damage_fx;
@@ -68,7 +69,6 @@ fn main() {
         .add_plugins(seascape::SeascapePlugin)
         .add_plugins(blueprint::BlueprintPlugin)
         .add_plugins(GamePlugin)
-        .add_plugins(crew_book::CrewBookPlugin)
         .add_plugins(sound::SoundPlugin)
         .add_plugins(snapshot::SnapshotPlugin)
         .add_plugins(telemetry::TelemetryPlugin)
@@ -84,7 +84,9 @@ fn main() {
 struct GamePlugin;
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(Time::<Fixed>::from_hz(60.))
+        // The crew data first: the career is checked against it as it is read.
+        app.add_plugins((crew_book::CrewBookPlugin, career::CareerPlugin))
+            .insert_resource(Time::<Fixed>::from_hz(60.))
             .init_resource::<Assets<seascape::Seascape>>()
             .init_resource::<Assets<blueprint::Drafted>>()
             .init_resource::<Assets<Font>>()
@@ -165,6 +167,7 @@ impl Plugin for GamePlugin {
                     ui::intent
                         .pipe(ui::customise::choose)
                         .pipe(ui::options::choose)
+                        .pipe(ui::career::choose)
                         .pipe(ui::feedback::rate)
                         .pipe(apply_action),
                     engine_orders,
@@ -249,7 +252,7 @@ impl Plugin for GamePlugin {
                         dockyard::dimension,
                         dockyard::place,
                         ui::instruments,
-                        captain::react,
+                        (captain::react, captain::dress),
                         mission_hud::update,
                         mission_hud::spotter_alerts,
                         flagship_hud::update,
@@ -411,12 +414,15 @@ fn apply_action(In(action): In<Option<ui::Action>>, mut run: ResMut<Campaign>, m
             }
         }
         (Screen::Departure, Action::Depart(stage)) if stage.is_opening() => {
+            let career = run.career.take();
             *run = Campaign::new(Mode::Patrol);
             run.stage = stage;
             run.origin = stage;
             run.seed = voyage.seeds.draw();
             if let Some(veteran) = dev_start(run.seed) {
                 *run = Campaign::with_run(Mode::Patrol, veteran);
+            } else if let Some(career) = career {
+                run.board(career);
             }
             voyage.outfit(&mut run);
         }
@@ -580,7 +586,9 @@ fn aim_guns(
         guns.mouse_captured = true;
     }
     let live = run.screen() == Screen::Sailing && window.focused;
-    if live && keys.just_pressed(KeyCode::KeyT) {
+    // A ship with no tubes aboard has nothing to switch to.
+    let tubes = !battle.tube_sets().is_empty();
+    if live && keys.just_pressed(KeyCode::KeyT) && (tubes || guns.torpedo_mode) {
         guns.torpedo_mode = !guns.torpedo_mode;
         guns.launch_pending = false;
     }

@@ -93,7 +93,7 @@ pub fn wind(
     let (figure, handle, mut visibility) = captain.into_inner();
     if !matches!(
         run.screen(),
-        Screen::Title | Screen::Options | Screen::Exercise
+        Screen::Title | Screen::Options | Screen::Exercise | Screen::Career
     ) {
         visibility.set_if_neq(Visibility::Hidden);
         return;

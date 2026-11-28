@@ -8,7 +8,7 @@ pub(super) fn slot_name(design: &Design, at: usize) -> &'static str {
     use shipvivor_shipyard::Component::*;
     let parts = &design.modules()[at].fit;
     if parts.contains(&Engine) {
-        if parts.contains(&TorpedoRack) {
+        if design.machinery() == Some(at) {
             "Engine"
         } else {
             "Aux engine"
@@ -69,7 +69,7 @@ enum Row {
 fn row_of(job: DockJob) -> Row {
     use Card::*;
     match job {
-        DockJob::Replace { .. } | DockJob::Move { .. } => Row::Bay,
+        DockJob::Replace { .. } | DockJob::Move { .. } | DockJob::Tubes { .. } => Row::Bay,
         DockJob::Calibre { .. } => Row::Bore,
         DockJob::Barrels { .. } | DockJob::Barbette { .. } => Row::Turret,
         DockJob::Fitting(
@@ -123,6 +123,7 @@ pub(super) fn tile_art(job: DockJob, run: &Campaign, art: &Insignia) -> Handle<I
         DockJob::Barbette { .. } => art.turret.clone(),
         DockJob::Fitting(card) => art.fitting(card),
         DockJob::Calibre { .. } => art.fitting(Card::Shells),
+        DockJob::Tubes { .. } => art.tubes.clone(),
     }
 }
 
@@ -177,6 +178,7 @@ pub(super) fn caption(job: DockJob, run: &Campaign) -> &'static str {
         DockJob::Barbette { from, to, .. } if to > from => "Raise",
         DockJob::Barbette { .. } => "Lower",
         DockJob::Calibre { .. } => "",
+        DockJob::Tubes { .. } => "Tubes",
         DockJob::Fitting(card) => match card {
             TripleTurrets => "Triple",
             QuadTurrets => "Quad",

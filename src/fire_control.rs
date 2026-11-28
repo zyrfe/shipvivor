@@ -7,13 +7,24 @@ use crate::{
 use bevy::{light::NotShadowCaster, prelude::*};
 use shipvivor_compass::{direction, heading};
 use shipvivor_encounter::{
-    RACK_HALF_ARC, Rack, Raider, SPREAD_HALF_ARC, TORPEDO_RANGE, TORPEDO_SPEED,
+    FIXED_HALF_ARC, RACK_HALF_ARC, Raider, SPREAD_HALF_ARC, TORPEDO_RANGE, TORPEDO_SPEED,
 };
+
+/// Sectors of each width the sight can show at once: one for each beam of every set of
+/// tubes amidships, or for every set in the bow and the stern.
+const TRAVERSE_SLOTS: usize = 8;
 
 #[derive(Component)]
 pub enum Sector {
-    Traverse(Rack),
-    Spread { ready: bool },
+    /// One sector a set of tubes covers, by its place among the sectors of its width:
+    /// a fixed set's narrow one ahead or astern, or one beam of a set amidships.
+    Traverse {
+        slot: usize,
+        fixed: bool,
+    },
+    Spread {
+        ready: bool,
+    },
     Suggested,
 }
 fn fan(half_angle: f32, reach: f32, opacity: f32) -> Mesh {
@@ -62,12 +73,14 @@ pub fn setup(
             NotShadowCaster,
         ));
     };
-    for rack in Rack::BOTH {
-        sector(
-            Sector::Traverse(rack),
-            fan(RACK_HALF_ARC, 134., 0.15),
-            Color::srgb(0.14, 0.89, 0.65),
-        );
+    for slot in 0..TRAVERSE_SLOTS {
+        for (fixed, half_arc) in [(false, RACK_HALF_ARC), (true, FIXED_HALF_ARC)] {
+            sector(
+                Sector::Traverse { slot, fixed },
+                fan(half_arc, 134., 0.15),
+                Color::srgb(0.14, 0.89, 0.65),
+            );
+        }
     }
     sector(
         Sector::Spread { ready: true },
@@ -105,26 +118,37 @@ pub fn place_sectors(
     sea: Res<crate::seascape::Sea>,
     mut sectors: Query<(&Sector, &mut Transform, &mut Visibility)>,
 ) {
+    use shipvivor_shipyard::TubeAim;
+    // Every sector her tubes cover, where it opens and which way it faces.
+    let mut arcs: [Vec<(Vec2, f32)>; 2] = [vec![], vec![]];
+    for (i, set) in battle.tube_sets().iter().enumerate() {
+        let fixed = set.mount.aim != TubeAim::Beam;
+        for centre in set.centres(helm.heading) {
+            let at = battle.tube_origin(i, helm.position, helm.heading, centre);
+            arcs[usize::from(fixed)].push((at, centre));
+        }
+    }
     for (kind, mut pose, mut vis) in &mut sectors {
         *vis = Visibility::Hidden;
         if run.screen() != Screen::Sailing || !guns.torpedo_mode {
             continue;
         }
         let (at, bearing, layer) = match kind {
-            Sector::Traverse(r) => (
-                battle.rack_origin(*r, helm.position, helm.heading),
-                r.center(helm.heading),
-                0.,
-            ),
-            Sector::Spread { ready } => {
-                let Some(r) = Rack::for_aim(helm.heading, view.bearing) else {
+            Sector::Traverse { slot, fixed } => {
+                let Some(&(at, centre)) = arcs[usize::from(*fixed)].get(*slot) else {
                     continue;
                 };
-                if (battle.rack_reload(r) == 0.) != *ready {
+                (at, centre, 0.)
+            }
+            Sector::Spread { ready } => {
+                let Some(set) = battle.tubes_for_aim(helm.heading, view.bearing) else {
+                    continue;
+                };
+                if battle.tube_sets()[set].loaded() != *ready {
                     continue;
                 }
                 (
-                    battle.rack_origin(r, helm.position, helm.heading),
+                    battle.tube_origin(set, helm.position, helm.heading, view.bearing),
                     view.bearing,
                     0.10,
                 )
@@ -138,10 +162,10 @@ pub fn place_sectors(
                     continue;
                 }
                 let bearing = heading(mark - helm.position);
-                let Some(rack) = Rack::for_aim(helm.heading, bearing) else {
+                let Some(set) = battle.tubes_for_aim(helm.heading, bearing) else {
                     continue;
                 };
-                let at = battle.rack_origin(rack, helm.position, helm.heading);
+                let at = battle.tube_origin(set, helm.position, helm.heading, bearing);
                 (at, heading(mark - at), 0.2)
             }
         };
@@ -338,10 +362,7 @@ pub fn update_marks(
             }
             (_, None) => continue,
             (Mark::Lead, Some((r, _, _, (_, edge)))) => {
-                if !run.lead_sight
-                    || (!guns.torpedo_mode && view.zoom < 0.45)
-                    || !edge.is_empty()
-                {
+                if !run.lead_sight || (!guns.torpedo_mode && view.zoom < 0.45) || !edge.is_empty() {
                     continue;
                 }
                 let speed = if guns.torpedo_mode {

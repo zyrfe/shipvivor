@@ -397,6 +397,7 @@ fn a_torpedo_spends_itself_on_ice() {
         vec![],
         vec![piece(150., 0., 15., IceShape::Dome)],
     );
+    b.fit_tubes(&shipvivor_shipyard::Design::heavy_destroyer());
     let p = Vec2::ZERO;
     let beam = Rack::Starboard.center(0.);
     assert!(b.launch_spread(p, 0., beam));

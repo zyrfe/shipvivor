@@ -9,12 +9,24 @@ const LIP: Color = Color::srgb(0.48, 0.51, 0.50);
 
 /// A raked oval uptake. The lip is directly above `foot`, where the smoke starts.
 pub(crate) fn funnel(mesh: &mut Facets, foot: Vec3, size: Vec3, livery: Color, fleet_bands: bool) {
+    raked_funnel(mesh, foot, size, livery, fleet_bands, 0.17);
+}
+
+/// [`funnel`] with its foot `rake` of its length forward of its lip.
+pub(crate) fn raked_funnel(
+    mesh: &mut Facets,
+    foot: Vec3,
+    size: Vec3,
+    livery: Color,
+    fleet_bands: bool,
+    rake: f32,
+) {
     let point = |angle: f32, h: f32, width: f32| {
         let (sin, cos) = angle.sin_cos();
         foot + Vec3::new(
             size.x * 0.5 * cos * width,
             size.y * h,
-            size.z * (0.5 * sin * width - (1. - h) * 0.17),
+            size.z * (0.5 * sin * width - (1. - h) * rake),
         )
     };
     let course = [
@@ -261,4 +273,414 @@ pub(crate) fn gun_tube(mesh: &mut Facets, breech: Vec3, length: f32, radius: f32
             SOOT,
         );
     }
+}
+
+const SHIELD: Color = Color::srgb(0.69, 0.75, 0.725);
+const SHIELD_ROOF: Color = Color::srgb(0.77, 0.81, 0.78);
+const GRATING: Color = Color::srgb(0.25, 0.30, 0.32);
+const MANTLET: Color = Color::srgb(0.32, 0.39, 0.41);
+
+/// Height above her deck of a secondary's trunnions: enough that its barrels clear the
+/// top of the deck rail when they are trained out over it.
+const TRUNNION: f32 = 0.9;
+/// Metres ahead of the trunnions of the foot of a secondary's shield.
+const SHIELD_FOOT: f32 = 0.44;
+/// How far the shield's front corners are bent back, across and aft.
+const SHIELD_BEND: f32 = 0.13;
+/// Metres ahead of the trunnions of the front of the mantlet, and how far it stands
+/// out either side of the outer barrels.
+const MANTLET_FRONT: f32 = 0.52;
+const MANTLET_SIDE: f32 = 0.13;
+
+/// Metres across from the middle of a shielded secondary to each of its barrels.
+fn barrel_spread(barrels: usize) -> &'static [f32] {
+    match barrels {
+        0 | 1 => &[0.],
+        2 => &[-0.18, 0.18],
+        3 => &[-0.3, 0., 0.3],
+        _ => &[-0.39, -0.13, 0.13, 0.39],
+    }
+}
+
+/// Half the breadth of the shield over this many barrels.
+fn shield_half_width(barrels: usize) -> f32 {
+    let outer = barrel_spread(barrels).last().copied().unwrap_or(0.);
+    (outer + 0.27).max(0.42)
+}
+
+/// Metres from a shielded secondary's pivot to the farthest of its shield, trained any
+/// way: what must stay inboard of the deck rail.
+pub(crate) fn shield_reach(barrels: usize) -> f32 {
+    let w = shield_half_width(barrels);
+    let outer = barrel_spread(barrels).last().copied().unwrap_or(0.);
+    (w - SHIELD_BEND)
+        .hypot(SHIELD_FOOT)
+        .max(w.hypot(SHIELD_FOOT - SHIELD_BEND))
+        .max((outer + MANTLET_SIDE).hypot(MANTLET_FRONT))
+}
+
+/// A face turned away from `inside`, a point within the solid it bounds.
+fn outward(mesh: &mut Facets, mut face: [Vec3; 4], inside: Vec3, paint: Color) {
+    // The diagonals give the facing even where two corners meet in a point.
+    let normal = (face[2] - face[0]).cross(face[3] - face[1]);
+    let middle = face.iter().copied().sum::<Vec3>() / 4.;
+    if normal.dot(middle - inside) < 0. {
+        face.reverse();
+    }
+    mesh.quad(face, paint);
+}
+
+/// A triangle turned away from `inside`.
+fn outward_tri(mesh: &mut Facets, [a, mut b, mut c]: [Vec3; 3], inside: Vec3, paint: Color) {
+    if (b - a).cross(c - a).dot((a + b + c) / 3. - inside) < 0. {
+        std::mem::swap(&mut b, &mut c);
+    }
+    mesh.triangle([a, b, c], paint);
+}
+
+/// A convex block from a loop of four lower corners and the four upper corners above
+/// them, each face turned out.
+fn block(mesh: &mut Facets, low: [Vec3; 4], high: [Vec3; 4], paint: Color) {
+    let inside = low.iter().chain(&high).copied().sum::<Vec3>() / 8.;
+    for face in [
+        low,
+        high,
+        [low[0], low[1], high[1], high[0]],
+        [low[1], low[2], high[2], high[1]],
+        [low[2], low[3], high[3], high[2]],
+        [low[3], low[0], high[0], high[3]],
+    ] {
+        outward(mesh, face, inside, paint);
+    }
+}
+
+/// A box square to the axes, between two opposite corners.
+fn cuboid(mesh: &mut Facets, min: Vec3, max: Vec3, paint: Color) {
+    let ring = |y| {
+        [
+            Vec3::new(min.x, y, min.z),
+            Vec3::new(max.x, y, min.z),
+            Vec3::new(max.x, y, max.z),
+            Vec3::new(min.x, y, max.z),
+        ]
+    };
+    block(mesh, ring(min.y), ring(max.y), paint);
+}
+
+/// An upright twelve-sided drum, narrowing or flaring from `r0` at `y0` to `r1` at
+/// `y1`, closed at both ends.
+fn frustum(mesh: &mut Facets, (y0, r0): (f32, f32), (y1, r1): (f32, f32), paint: Color) {
+    let at = |i: usize, y: f32, r: f32| {
+        let (s, c) = (std::f32::consts::TAU * i as f32 / 12.).sin_cos();
+        Vec3::new(c * r, y, s * r)
+    };
+    let inside = Vec3::Y * 0.5 * (y0 + y1);
+    for i in 0..12 {
+        outward(
+            mesh,
+            [
+                at(i, y0, r0),
+                at(i + 1, y0, r0),
+                at(i + 1, y1, r1),
+                at(i, y1, r1),
+            ],
+            inside,
+            paint,
+        );
+        for (y, r) in [(y0, r0), (y1, r1)] {
+            let centre = Vec3::Y * y;
+            outward_tri(mesh, [centre, at(i, y, r), at(i + 1, y, r)], inside, paint);
+        }
+    }
+}
+
+/// A secondary of this many barrels side by side, on a pedestal behind a bent shield
+/// with a half roof, open at the back, in the frame it trains in: its pivot at her deck
+/// and its muzzles towards -z. The barrels clear the top of her rail; the shield stays
+/// within [`shield_reach`] of the pivot.
+pub(crate) fn shielded_mount(barrels: usize) -> Mesh {
+    let mut mesh = Facets::default();
+    let v = Vec3::new;
+    let spread = barrel_spread(barrels);
+    let outer = spread.last().copied().unwrap_or(0.);
+    let w = shield_half_width(barrels);
+    // The pedestal bolted to the deck, and the platform the crew stand on.
+    frustum(&mut mesh, (0., 0.27), (0.06, 0.27), IRON);
+    frustum(&mut mesh, (0.06, 0.23), (0.09, 0.21), LIP);
+    frustum(&mut mesh, (0.09, 0.19), (0.42, 0.15), STEEL);
+    frustum(&mut mesh, (0.42, 0.44), (0.47, 0.44), GRATING);
+    // The cradle's side brackets, with a handwheel on each, and the trunnions across.
+    for side in [-1., 1.] {
+        let (out, inner) = (side * (outer + 0.15), side * (outer + 0.10));
+        let ring = |y, z0, z1| {
+            [
+                v(out, y, z0),
+                v(inner, y, z0),
+                v(inner, y, z1),
+                v(out, y, z1),
+            ]
+        };
+        block(
+            &mut mesh,
+            ring(0.47, -0.14, 0.2),
+            ring(TRUNNION, -0.08, 0.1),
+            STEEL,
+        );
+        mesh.tube(
+            v(out, 0.7, 0.06),
+            v(out + side * 0.05, 0.7, 0.06),
+            0.075,
+            0.075,
+            IRON,
+        );
+    }
+    mesh.tube(
+        v(-(outer + 0.19), TRUNNION, 0.),
+        v(outer + 0.19, TRUNNION, 0.),
+        0.055,
+        0.055,
+        IRON,
+    );
+    // Each barrel with its breech block and the recoil cylinder above it.
+    for &x in spread {
+        gun_tube(&mut mesh, v(x, TRUNNION, 0.2), 2.0, 0.08);
+        cuboid(
+            &mut mesh,
+            v(x - 0.085, TRUNNION - 0.08, 0.2),
+            v(x + 0.085, TRUNNION + 0.08, 0.42),
+            IRON,
+        );
+        mesh.tube(
+            v(x, TRUNNION + 0.11, 0.16),
+            v(x, TRUNNION + 0.11, -0.3),
+            0.04,
+            0.04,
+            STEEL,
+        );
+    }
+    // The shield's face leans back from its foot, its corners bent back to the cheeks.
+    // The cheeks run back level with the roof, then fall away to the open rear.
+    let (foot, top, plate) = (0.46, 1.24, 0.04);
+    let lean = 0.13;
+    let bend = SHIELD_BEND;
+    let front = |y: f32| -SHIELD_FOOT + lean * (y - foot) / (top - foot);
+    let face = |y: f32| {
+        let z = front(y);
+        [
+            v(-(w - bend), y, z),
+            v(w - bend, y, z),
+            v(w - bend, y, z + plate),
+            v(-(w - bend), y, z + plate),
+        ]
+    };
+    block(&mut mesh, face(foot), face(top), SHIELD);
+    for side in [-1., 1.] {
+        // Square across the bend, a plate's thickness inboard of its face.
+        let inward = v(-side, 0., 1.) * (plate * std::f32::consts::FRAC_1_SQRT_2);
+        let corner = |y: f32| {
+            let z = front(y);
+            let (a, b) = (v(side * (w - bend), y, z), v(side * w, y, z + bend));
+            [a, b, b + inward, a + inward]
+        };
+        block(&mut mesh, corner(foot), corner(top), SHIELD);
+        let (out, inner) = (side * w, side * (w - plate));
+        let ring = |y, z0, z1| {
+            [
+                v(out, y, z0),
+                v(inner, y, z0),
+                v(inner, y, z1),
+                v(out, y, z1),
+            ]
+        };
+        block(
+            &mut mesh,
+            ring(foot, front(foot) + bend, 0.05),
+            ring(top, front(top) + bend, 0.05),
+            SHIELD,
+        );
+        block(
+            &mut mesh,
+            ring(foot, 0.05, 0.3),
+            [
+                v(out, top, 0.05),
+                v(inner, top, 0.05),
+                v(inner, 0.96, 0.3),
+                v(out, 0.96, 0.3),
+            ],
+            SHIELD,
+        );
+        // A sighting hood each side of the roof, for the layer and the trainer.
+        let (a, b) = (side * (w - 0.3), side * (w - 0.15));
+        let (x0, x1) = (a.min(b), a.max(b));
+        cuboid(
+            &mut mesh,
+            v(x0, top, -0.3),
+            v(x1, top + 0.08, -0.13),
+            SHIELD,
+        );
+        outward(
+            &mut mesh,
+            [
+                v(x0 + 0.02, top + 0.025, -0.302),
+                v(x1 - 0.02, top + 0.025, -0.302),
+                v(x1 - 0.02, top + 0.055, -0.302),
+                v(x0 + 0.02, top + 0.055, -0.302),
+            ],
+            v(0.5 * (x0 + x1), top + 0.04, 0.),
+            SOOT,
+        );
+    }
+    // The half roof, its front corners bent back with the face beneath.
+    let lid = |y: f32| {
+        let z = front(top) - 0.015;
+        [
+            v(-w - 0.01, y, z + bend),
+            v(-(w - bend), y, z),
+            v(w - bend, y, z),
+            v(w + 0.01, y, z + bend),
+        ]
+    };
+    block(&mut mesh, lid(top - 0.02), lid(top + 0.02), SHIELD_ROOF);
+    let aft = |y: f32| {
+        let z = front(top) - 0.015 + bend;
+        [
+            v(-w - 0.01, y, z),
+            v(w + 0.01, y, z),
+            v(w + 0.01, y, 0.07),
+            v(-w - 0.01, y, 0.07),
+        ]
+    };
+    block(&mut mesh, aft(top - 0.02), aft(top + 0.02), SHIELD_ROOF);
+    // A stiffener across the face, and the mantlet the barrels run out through.
+    cuboid(
+        &mut mesh,
+        v(-(w - bend) + 0.02, 0.6, -0.432),
+        v(w - bend - 0.02, 0.64, -0.4),
+        LIP,
+    );
+    cuboid(
+        &mut mesh,
+        v(-(outer + MANTLET_SIDE), TRUNNION - 0.08, -MANTLET_FRONT),
+        v(outer + MANTLET_SIDE, TRUNNION + 0.1, -0.34),
+        MANTLET,
+    );
+    mesh.finish()
+}
+
+/// A gun sponson built out from her starboard side, in the frame of the gun's pivot at
+/// deck height with +x outboard, a metre in radius: drawn to the reach of the mount it
+/// carries. Its deck is level with hers and its breastwork low enough for the shield to
+/// train over; beneath, it is faired back into her plating. Inboard of her side it runs
+/// on under her deck, out of sight wherever she is broad.
+pub(super) fn sponson() -> Mesh {
+    use super::paint::{PLAIN, shell_uv, teak_uv};
+    use std::f32::consts::PI;
+    let mut mesh = Facets::default();
+    let mut uv: Vec<[f32; 2]> = Vec::new();
+    let mut mapped = |mesh: &Facets, map: &dyn Fn(Vec3) -> [f32; 2]| {
+        let done = uv.len();
+        uv.extend(mesh.positions[done..].iter().map(|p| map(Vec3::from(*p))));
+    };
+    // Her plating's pattern, as though the sponson stood on the stock deck height.
+    let shell = |p: Vec3| shell_uv(p + Vec3::Y * super::deck_height(0.));
+    // Painted as her side, with the pale strake along her deck edge carried round.
+    let plating = Color::srgb_u8(85, 112, 133);
+    let rim = Color::srgb_u8(183, 189, 168);
+    let rail = Color::srgb_u8(201, 204, 185);
+    let decking = Color::srgb_u8(159, 149, 126);
+    const STEPS: usize = 12;
+    const INBOARD: f32 = -1.8;
+    let (top, bottom, wall, coaming) = (-0.012, -0.12, 0.3, 0.05);
+    let arc = |k: usize, r: f32, y: f32| {
+        let (s, c) = (-0.5 * PI + PI * k as f32 / STEPS as f32).sin_cos();
+        Vec3::new(c * r, y, s * r)
+    };
+    // The outline of its deck: round outboard, square where it runs in under hers.
+    let outline = |y: f32| {
+        let mut points: Vec<Vec3> = (0..=STEPS).map(|k| arc(k, 1., y)).collect();
+        points.extend([Vec3::new(INBOARD, y, 1.), Vec3::new(INBOARD, y, -1.)]);
+        points
+    };
+    let middle = Vec3::new(-0.2, 0.5 * (top + bottom), 0.);
+    let (upper, lower) = (outline(top), outline(bottom));
+    for i in 0..upper.len() {
+        let j = (i + 1) % upper.len();
+        let centre = Vec3::new(-0.2, top, 0.);
+        outward_tri(&mut mesh, [centre, upper[i], upper[j]], middle, decking);
+    }
+    mapped(&mesh, &teak_uv);
+    for i in 0..upper.len() {
+        let j = (i + 1) % upper.len();
+        outward(
+            &mut mesh,
+            [upper[i], upper[j], lower[j], lower[i]],
+            middle,
+            rim,
+        );
+    }
+    // Faired down and in to her side beneath it.
+    let (depth, root) = (-0.75, -1.6);
+    let foot = |k: usize| arc(k, 0.3, depth) + Vec3::X * root;
+    let within = Vec3::new(-0.9, -0.3, 0.);
+    for k in 0..STEPS {
+        outward(
+            &mut mesh,
+            [lower[k], lower[k + 1], foot(k + 1), foot(k)],
+            within,
+            plating,
+        );
+    }
+    for (k, z) in [(0, -1.), (STEPS, 1.)] {
+        outward(
+            &mut mesh,
+            [
+                Vec3::new(INBOARD, bottom, z),
+                lower[k],
+                foot(k),
+                Vec3::new(INBOARD, depth, z * 0.3),
+            ],
+            within,
+            plating,
+        );
+    }
+    // The breastwork round its outboard edge, running a little way in at either end.
+    let ring = |k: usize, y: f32, inner: f32, outer: f32| {
+        [
+            arc(k, inner, y),
+            arc(k, outer, y),
+            arc(k + 1, outer, y),
+            arc(k + 1, inner, y),
+        ]
+    };
+    for k in 0..STEPS {
+        block(
+            &mut mesh,
+            ring(k, top, 1. - coaming, 1.),
+            ring(k, wall, 1. - coaming, 1.),
+            plating,
+        );
+    }
+    for z in [-1., 1.] {
+        let run = |y| {
+            [
+                Vec3::new(-0.15, y, z),
+                Vec3::new(0., y, z),
+                Vec3::new(0., y, z * (1. - coaming)),
+                Vec3::new(-0.15, y, z * (1. - coaming)),
+            ]
+        };
+        block(&mut mesh, run(top), run(wall), plating);
+    }
+    mapped(&mesh, &shell);
+    for k in 0..STEPS {
+        block(
+            &mut mesh,
+            ring(k, wall, 1. - coaming - 0.02, 1.015),
+            ring(k, wall + 0.03, 1. - coaming - 0.02, 1.015),
+            rail,
+        );
+    }
+    mapped(&mesh, &|_| PLAIN);
+    mesh.finish()
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uv)
 }

@@ -103,8 +103,12 @@ fn saved(file: &Path) -> Option<SystemTime> {
         .ok()
 }
 
-fn reread(time: Res<Time<Real>>, mut book: ResMut<CrewBook>) {
-    book.check(time.delta_secs());
+/// Real time, so a save is picked up while the game is paused. An app without a clock
+/// (the headless tests) reads nothing again.
+fn reread(time: Option<Res<Time<Real>>>, mut book: ResMut<CrewBook>) {
+    if let Some(time) = time {
+        book.check(time.delta_secs());
+    }
 }
 
 impl CrewBook {

@@ -87,6 +87,9 @@ impl Frame {
             Slot::Centre => spec.centre,
             Slot::Side => spec.side,
             Slot::Bay => spec.bay,
+            // Every section of a built-up hull has room for a set of tubes beside
+            // whatever else it carries. A boat has none.
+            Slot::Tubes => usize::from(self != Self::Boat),
         }
     }
 }
@@ -97,9 +100,11 @@ pub enum Slot {
     Centre,
     Side,
     Bay,
+    /// The set of torpedo tubes a section can take on top of everything else.
+    Tubes,
 }
 impl Slot {
-    pub const ALL: [Self; 3] = [Self::Centre, Self::Side, Self::Bay];
+    pub const ALL: [Self; 4] = [Self::Centre, Self::Side, Self::Bay, Self::Tubes];
 }
 
 /// Something fitted to a module. New kinds of equipment are added here.
@@ -107,6 +112,9 @@ impl Slot {
 pub enum Component {
     MainGun,
     CloseGun,
+    /// A set of torpedo tubes, fitted into a section beside what it already carries. In
+    /// the bow they fire ahead, in the stern astern, and amidships they train to either
+    /// beam. See [`Design::tube_mounts`].
     TorpedoRack,
     /// Fire control. A ship that carries one reloads slowly without it.
     Director,
@@ -160,7 +168,8 @@ impl Component {
     pub fn slot(self) -> Slot {
         match self {
             Self::MainGun | Self::Director | Self::Catapult | Self::MissileRack => Slot::Centre,
-            Self::CloseGun | Self::TorpedoRack => Slot::Side,
+            Self::CloseGun => Slot::Side,
+            Self::TorpedoRack => Slot::Tubes,
             Self::Engine | Self::Magazine => Slot::Bay,
         }
     }
@@ -728,4 +737,53 @@ impl Design {
         }
         fittings
     }
+
+    /// Every set of torpedo tubes aboard, from the bow aft, and which way it fires.
+    pub fn tube_mounts(&self) -> Vec<TubeMount> {
+        let last = self.modules.len().saturating_sub(1);
+        self.fittings()
+            .into_iter()
+            .filter(|f| f.component == Component::TorpedoRack)
+            .map(|f| TubeMount {
+                berth: f.berth,
+                aft: f.aft,
+                aim: match f.berth.module {
+                    0 => TubeAim::Ahead,
+                    at if at == last => TubeAim::Astern,
+                    _ => TubeAim::Beam,
+                },
+            })
+            .collect()
+    }
+
+    /// The machinery space: the main engine room, where her funnels and uptakes stand.
+    /// It is the first engine section built with sponsons, or failing one the first
+    /// section with an engine.
+    pub fn machinery(&self) -> Option<usize> {
+        let engine = |m: &Module| m.fit.contains(&Component::Engine);
+        self.modules
+            .iter()
+            .position(|m| engine(m) && m.frame == Frame::Sponsons)
+            .or_else(|| self.modules.iter().position(engine))
+    }
+}
+
+/// Which way a set of torpedo tubes fires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TubeAim {
+    /// Fixed in the bow, firing dead ahead.
+    Ahead,
+    /// Fixed in the stern, firing dead astern.
+    Astern,
+    /// Trained to whichever beam the target is on.
+    Beam,
+}
+
+/// A set of torpedo tubes and where it stands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TubeMount {
+    pub berth: Berth,
+    /// Metres aft of the bow tip.
+    pub aft: f32,
+    pub aim: TubeAim,
 }

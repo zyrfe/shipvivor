@@ -411,6 +411,20 @@ impl Ship {
         Arc::make_mut(&mut self.design).rearm(at, gunhouse)
     }
 
+    /// Fit a set of torpedo tubes into module `at`, beside what it carries, leaving its
+    /// compartment as it stands. The new tubes come aboard sound.
+    pub fn fit_tubes(&mut self, at: usize) -> Result<Berth, Fault> {
+        let berth = Arc::make_mut(&mut self.design).fit(at, Component::TorpedoRack)?;
+        let max = self.design.module_structure(at);
+        let health = Component::TorpedoRack.health(max, &self.design);
+        self.holds[at].gear.push(Gear {
+            health,
+            max: health,
+            out: false,
+        });
+        Ok(berth)
+    }
+
     pub fn replace_module(&mut self, at: usize, module: Module) -> Result<(), Fault> {
         Arc::make_mut(&mut self.design).replace_module(at, module)?;
         self.holds[at] = Compartment::new(&self.design, at);
