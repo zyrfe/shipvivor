@@ -11,7 +11,7 @@
 
 # --- Ranking up --------------------------------------------------------------------------
 
-[ranks]
+[growth]
 # Experience a skill needs to reach each tier past the first: tier II, then tier III.
 # A skill can't have more tiers than this list allows (one more than its length).
 experience = [100, 250]
@@ -19,6 +19,44 @@ experience = [100, 250]
 points_per_star = 1
 # Experience one officer point buys.
 experience_per_point = 50
+
+# --- Rank --------------------------------------------------------------------------------
+# An officer's rank follows the skill tiers they hold, all skills together, so a skill
+# ranking up can bring a promotion. Lowest first; each needs more tiers than the last.
+# Officers who bring two skills top out at 6 tiers, three skills at 9.
+#
+# lace is the gold on the shoulder board, from the outer end in: w a wide stripe, n a thin
+# one, b a commodore's broad band. The post's colour shows between the stripes.
+
+[[rank]]
+name = "Sub-Lieutenant"
+short = "Sub-Lt."
+lace = "w"
+tiers = 0
+
+[[rank]]
+name = "Lieutenant"
+short = "Lt."
+lace = "ww"
+tiers = 3
+
+[[rank]]
+name = "Lieutenant Commander"
+short = "Lt. Cdr."
+lace = "wnw"
+tiers = 4
+
+[[rank]]
+name = "Commander"
+short = "Cdr."
+lace = "www"
+tiers = 6
+
+[[rank]]
+name = "Captain"
+short = "Capt."
+lace = "wwww"
+tiers = 8
 
 # --- Leader hands ------------------------------------------------------------------------
 
@@ -303,7 +341,7 @@ tiers = [
 
 [[officer]]
 id = "varenholt"
-name = "Lt. Cdr. Ilse Varenholt"
+name = "Ilse Varenholt"
 post = "gunnery"
 rarity = "common"
 portrait = "gunnery.png"
@@ -311,7 +349,7 @@ skills = { spotting_corrections = 1, rate_plot = 1 }
 
 [[officer]]
 id = "brask"
-name = "Lt. Augustin Brask"
+name = "Augustin Brask"
 post = "gunnery"
 rarity = "uncommon"
 portrait = "gunnery-brask.png"
@@ -319,7 +357,7 @@ skills = { gun_fury = 2, spotting_corrections = 1 }
 
 [[officer]]
 id = "sollum"
-name = "Master Gunner Henrik Sollum"
+name = "Henrik Sollum"
 post = "gunnery"
 rarity = "rare"
 portrait = "gunnery-sollum.png"
@@ -327,7 +365,7 @@ skills = { gun_fury = 1, spotting_corrections = 1, rate_plot = 1 }
 
 [[officer]]
 id = "callender"
-name = "Sub-Lt. Pip Callender"
+name = "Pip Callender"
 post = "signals"
 rarity = "common"
 portrait = "signals.png"
@@ -335,7 +373,7 @@ skills = { radar_operator = 1, range_boost = 1 }
 
 [[officer]]
 id = "haddad"
-name = "Lt. Noor Haddad"
+name = "Noor Haddad"
 post = "signals"
 rarity = "uncommon"
 portrait = "signals-haddad.png"
@@ -343,7 +381,7 @@ skills = { target_identification = 2, fall_of_shot = 1 }
 
 [[officer]]
 id = "wyck"
-name = "Dr. Leopold Wyck"
+name = "Leopold Wyck"
 post = "signals"
 rarity = "rare"
 portrait = "signals-wyck.png"
@@ -351,7 +389,7 @@ skills = { radar_operator = 1, target_identification = 1, range_boost = 1 }
 
 [[officer]]
 id = "rao"
-name = "Chief Engineer Devika Rao"
+name = "Devika Rao"
 post = "engineering"
 rarity = "common"
 portrait = "engineer.png"
@@ -359,7 +397,7 @@ skills = { steam_held = 1, forced_draught = 1 }
 
 [[officer]]
 id = "marsk"
-name = "Lt. Teodor Marsk"
+name = "Teodor Marsk"
 post = "engineering"
 rarity = "uncommon"
 portrait = "engineer-marsk.png"
@@ -367,7 +405,7 @@ skills = { smoke_screen = 2, hard_over = 1 }
 
 [[officer]]
 id = "brenner"
-name = "Cdr. Gunhild Brenner"
+name = "Gunhild Brenner"
 post = "engineering"
 rarity = "rare"
 portrait = "engineer-brenner.png"
@@ -375,7 +413,7 @@ skills = { forced_draught = 1, steam_held = 1, smoke_screen = 1 }
 
 [[officer]]
 id = "abernathy"
-name = "Lt. Cdr. Elias Abernathy"
+name = "Elias Abernathy"
 post = "damage_control"
 rarity = "common"
 portrait = "first-lieutenant.png"
@@ -383,7 +421,7 @@ skills = { second_repair_crew = 1, shoring = 1 }
 
 [[officer]]
 id = "dalisay"
-name = "Lt. Marisol Dalisay"
+name = "Marisol Dalisay"
 post = "damage_control"
 rarity = "uncommon"
 portrait = "firstlt-dalisay.png"
@@ -391,7 +429,7 @@ skills = { drilled_party = 2, counterflooding = 1 }
 
 [[officer]]
 id = "fuimaono"
-name = "Lt. Cdr. Tavita Fuimaono"
+name = "Tavita Fuimaono"
 post = "damage_control"
 rarity = "rare"
 portrait = "firstlt-fuimaono.png"
@@ -399,7 +437,7 @@ skills = { second_repair_crew = 1, drilled_party = 1, shoring = 1 }
 
 [[officer]]
 id = "morrow"
-name = "Lt. Kaede Morrow"
+name = "Kaede Morrow"
 post = "liaison"
 rarity = "common"
 portrait = "liaison.png"
@@ -407,7 +445,7 @@ skills = { bomber_strike = 1, recon_flight = 1 }
 
 [[officer]]
 id = "vance"
-name = "Cdr. Aurelian Vance"
+name = "Aurelian Vance"
 post = "liaison"
 rarity = "uncommon"
 portrait = "liaison-vance.png"
@@ -415,7 +453,7 @@ skills = { fleet_gunfire = 2, recon_flight = 1 }
 
 [[officer]]
 id = "quintero"
-name = "Lt. Rafael Quintero"
+name = "Rafael Quintero"
 post = "liaison"
 rarity = "rare"
 portrait = "liaison-quintero.png"

@@ -180,7 +180,7 @@ mod tests {
         assert_eq!(fury_seconds(&book), 12.);
 
         // A broken save keeps what the game had.
-        save(&file, "[ranks\nexperience = [100]", 3_000);
+        save(&file, "[growth\nexperience = [100]", 3_000);
         book.check(CHECK_EVERY);
         assert_eq!(fury_seconds(&book), 12.);
         assert_eq!(book.saved, saved(&file));

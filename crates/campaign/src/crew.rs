@@ -151,7 +151,7 @@ impl std::error::Error for Problems {}
 
 /// How skills rank up.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Ranks {
+pub struct Growth {
     /// Experience to reach each tier past the first.
     pub experience: Vec<u32>,
     /// Officer points each star of a leg pays.
@@ -160,7 +160,7 @@ pub struct Ranks {
     pub experience_per_point: u32,
 }
 
-impl Ranks {
+impl Growth {
     /// The most tiers any skill can have.
     pub fn most_tiers(&self) -> usize {
         self.experience.len() + 1
@@ -220,6 +220,31 @@ pub struct Post {
     pub colour: [u8; 3],
 }
 
+/// One stripe of gold lace on a shoulder board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lace {
+    /// The broad band a commodore wears.
+    Broad,
+    /// The ordinary stripe.
+    Wide,
+    /// The thin stripe set between two wide ones.
+    Thin,
+}
+
+/// An officer's rank. It follows the skill tiers the officer holds, all skills together,
+/// so it climbs as their skills rank up.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rank {
+    pub name: String,
+    /// Written before the name: `Lt. Cdr.`.
+    pub short: String,
+    /// The stripes on the shoulder board, from the outer end in. The post's colour shows
+    /// between them.
+    pub lace: Vec<Lace>,
+    /// Skill tiers held, all skills together, to wear it.
+    pub tiers: u32,
+}
+
 /// A skill as the data has it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkillBook {
@@ -234,8 +259,8 @@ pub struct SkillBook {
 
 impl SkillBook {
     /// The tier, from one, that `experience` reaches, capped at this skill's last.
-    pub fn tier_at(&self, ranks: &Ranks, experience: u32) -> u8 {
-        ranks.tier(experience).min(self.tiers.len() as u8)
+    pub fn tier_at(&self, growth: &Growth, experience: u32) -> u8 {
+        growth.tier(experience).min(self.tiers.len() as u8)
     }
 
     /// Tier `tier`, counting from one. A tier past the last gives the last.
@@ -285,12 +310,21 @@ pub struct Officer {
     pub skills: Vec<(Skill, u8)>,
 }
 
+impl Officer {
+    /// The skill tiers the officer joins with, all skills together.
+    pub fn tiers(&self) -> u32 {
+        self.skills.iter().map(|&(_, tier)| u32::from(tier)).sum()
+    }
+}
+
 /// The whole crew file, read and checked.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Wardroom {
-    pub ranks: Ranks,
+    pub growth: Growth,
     pub hand: Hand,
     pub posts: Vec<Post>,
+    /// Ranks from the lowest up.
+    pub ladder: Vec<Rank>,
     /// One for every skill, in [`Skill::ALL`] order.
     skills: Vec<SkillBook>,
     pub officers: Vec<Officer>,
@@ -321,6 +355,16 @@ impl Wardroom {
         &self.posts[officer.post]
     }
 
+    /// The rank of an officer holding `tiers` skill tiers, all skills together: the
+    /// highest they have the tiers for, or the lowest.
+    pub fn rank(&self, tiers: u32) -> &Rank {
+        self.ladder
+            .iter()
+            .rev()
+            .find(|rank| tiers >= rank.tiers)
+            .unwrap_or(&self.ladder[0])
+    }
+
     /// Reads a crew file, and checks everything the game would trip on.
     ///
     /// # Errors
@@ -329,16 +373,18 @@ impl Wardroom {
         let raw: RawWardroom =
             toml::from_str(text).map_err(|err| Problems(vec![err.to_string()]))?;
         let mut problems = Vec::new();
-        let ranks = ranks(raw.ranks, &mut problems);
+        let growth = growth(raw.growth, &mut problems);
         let hand = hand(raw.hand, &mut problems);
         let posts = posts(raw.post, &mut problems);
-        let skills = skills(raw.skill, &ranks, &mut problems);
-        let officers = officers(raw.officer, &posts, &skills, &mut problems);
+        let ladder = ladder(raw.rank, &mut problems);
+        let skills = skills(raw.skill, &growth, &mut problems);
+        let officers = officers(raw.officer, &posts, &ladder, &skills, &mut problems);
         if problems.is_empty() {
             Ok(Self {
-                ranks,
+                growth,
                 hand,
                 posts,
+                ladder,
                 skills,
                 officers,
             })
@@ -351,10 +397,12 @@ impl Wardroom {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawWardroom {
-    ranks: RawRanks,
+    growth: RawGrowth,
     hand: RawHand,
     #[serde(default)]
     post: Vec<RawPost>,
+    #[serde(default)]
+    rank: Vec<RawRank>,
     #[serde(default)]
     skill: Vec<RawSkill>,
     #[serde(default)]
@@ -363,7 +411,7 @@ struct RawWardroom {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawRanks {
+struct RawGrowth {
     experience: Vec<u32>,
     points_per_star: u32,
     experience_per_point: u32,
@@ -383,6 +431,15 @@ struct RawPost {
     id: String,
     name: String,
     colour: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRank {
+    name: String,
+    short: String,
+    lace: String,
+    tiers: u32,
 }
 
 #[derive(Deserialize)]
@@ -422,20 +479,20 @@ fn rarity(name: &str) -> Option<Rarity> {
         .map(|&(_, rarity)| rarity)
 }
 
-fn ranks(raw: RawRanks, problems: &mut Vec<String>) -> Ranks {
+fn growth(raw: RawGrowth, problems: &mut Vec<String>) -> Growth {
     if raw.experience.windows(2).any(|pair| pair[1] <= pair[0]) {
         problems.push(format!(
-            "ranks.experience: each tier must need more than the one before, not {:?}",
+            "growth.experience: each tier must need more than the one before, not {:?}",
             raw.experience
         ));
     }
     if raw.experience.first() == Some(&0) {
-        problems.push("ranks.experience: tier II must need more than 0".into());
+        problems.push("growth.experience: tier II must need more than 0".into());
     }
     if raw.experience_per_point == 0 {
-        problems.push("ranks.experience_per_point: must be more than 0".into());
+        problems.push("growth.experience_per_point: must be more than 0".into());
     }
-    Ranks {
+    Growth {
         experience: raw.experience,
         points_per_star: raw.points_per_star,
         experience_per_point: raw.experience_per_point,
@@ -514,7 +571,7 @@ fn posts(raw: Vec<RawPost>, problems: &mut Vec<String>) -> Vec<Post> {
     posts
 }
 
-fn skills(raw: Vec<RawSkill>, ranks: &Ranks, problems: &mut Vec<String>) -> Vec<SkillBook> {
+fn skills(raw: Vec<RawSkill>, growth: &Growth, problems: &mut Vec<String>) -> Vec<SkillBook> {
     let mut found: Vec<SkillBook> = Vec::new();
     for book in raw {
         let Some(skill) = Skill::from_id(&book.id) else {
@@ -538,10 +595,10 @@ fn skills(raw: Vec<RawSkill>, ranks: &Ranks, problems: &mut Vec<String>) -> Vec<
                 "{at}: nothing it does is counted, so experience must be 0"
             ));
         }
-        if book.tiers.is_empty() || book.tiers.len() > ranks.most_tiers() {
+        if book.tiers.is_empty() || book.tiers.len() > growth.most_tiers() {
             problems.push(format!(
-                "{at}: give 1 to {} tiers (ranks.experience allows that many), not {}",
-                ranks.most_tiers(),
+                "{at}: give 1 to {} tiers (growth.experience allows that many), not {}",
+                growth.most_tiers(),
                 book.tiers.len()
             ));
         }
@@ -671,9 +728,58 @@ fn plain(value: f32) -> String {
     }
 }
 
+fn ladder(raw: Vec<RawRank>, problems: &mut Vec<String>) -> Vec<Rank> {
+    if raw.is_empty() {
+        problems.push("rank: give at least one rank".into());
+    }
+    let mut ladder: Vec<Rank> = Vec::new();
+    for rank in raw {
+        let at = format!("rank {}", rank.name);
+        if let Some(below) = ladder.last()
+            && rank.tiers <= below.tiers
+        {
+            problems.push(format!(
+                "{at}: needs {} tiers, but it must need more than {} below it ({})",
+                rank.tiers, below.name, below.tiers
+            ));
+        }
+        if rank.short.trim().is_empty() {
+            problems.push(format!("{at}: short can't be blank"));
+        }
+        let lace: Option<Vec<Lace>> = rank
+            .lace
+            .chars()
+            .map(|c| match c {
+                'b' => Some(Lace::Broad),
+                'w' => Some(Lace::Wide),
+                'n' => Some(Lace::Thin),
+                _ => None,
+            })
+            .collect();
+        let lace = match lace {
+            Some(lace) if (1..=6).contains(&lace.len()) => lace,
+            _ => {
+                problems.push(format!(
+                    "{at}: lace \"{}\" should be 1 to 6 of b (broad), w (wide), n (thin)",
+                    rank.lace
+                ));
+                vec![Lace::Wide]
+            }
+        };
+        ladder.push(Rank {
+            name: rank.name,
+            short: rank.short,
+            lace,
+            tiers: rank.tiers,
+        });
+    }
+    ladder
+}
+
 fn officers(
     raw: Vec<RawOfficer>,
     posts: &[Post],
+    ladder: &[Rank],
     skills: &[SkillBook],
     problems: &mut Vec<String>,
 ) -> Vec<Officer> {
@@ -683,6 +789,15 @@ fn officers(
         if officers.iter().any(|o| o.id == officer.id) {
             problems.push(format!("{at}: listed twice"));
             continue;
+        }
+        if let Some(rank) = ladder
+            .iter()
+            .find(|rank| officer.name.starts_with(&format!("{} ", rank.short)))
+        {
+            problems.push(format!(
+                "{at}: leave {} off the name; the card puts the officer's rank there",
+                rank.short
+            ));
         }
         let post = posts.iter().position(|p| p.id == officer.post);
         if post.is_none() {
@@ -766,6 +881,50 @@ mod tests {
     }
 
     #[test]
+    fn rank_follows_the_tiers_held() {
+        let wardroom = Wardroom::stock();
+        let rank = |tiers| wardroom.rank(tiers).short.as_str();
+        assert_eq!(rank(0), "Sub-Lt.");
+        assert_eq!(rank(2), "Sub-Lt.");
+        assert_eq!(rank(3), "Lt.");
+        assert_eq!(rank(5), "Lt. Cdr.");
+        assert_eq!(rank(9), "Capt.");
+        assert_eq!(wardroom.rank(4).lace, [Lace::Wide, Lace::Thin, Lace::Wide]);
+        // Commons join as sub-lieutenants and the rest as lieutenants; each has
+        // promotions ahead of them.
+        for officer in &wardroom.officers {
+            let joins = wardroom.rank(officer.tiers());
+            let expected = if officer.rarity == Rarity::Common {
+                "Sub-Lt."
+            } else {
+                "Lt."
+            };
+            assert_eq!(joins.short, expected, "{}", officer.id);
+            let most = officer.skills.len() as u32 * wardroom.growth.most_tiers() as u32;
+            assert_ne!(wardroom.rank(most), joins, "{}", officer.id);
+        }
+    }
+
+    #[test]
+    fn a_bad_ladder_or_a_rank_in_a_name_is_refused() {
+        let text = stock_with("lace = \"wnw\"\ntiers = 4", "lace = \"wxw\"\ntiers = 2").replacen(
+            "name = \"Augustin Brask\"",
+            "name = \"Lt. Augustin Brask\"",
+            1,
+        );
+        assert_eq!(
+            problems(&text),
+            vec![
+                "rank Lieutenant Commander: needs 2 tiers, but it must need more than \
+                 Lieutenant below it (3)",
+                "rank Lieutenant Commander: lace \"wxw\" should be 1 to 6 of b (broad), \
+                 w (wide), n (thin)",
+                "officer brask: leave Lt. off the name; the card puts the officer's rank there",
+            ]
+        );
+    }
+
+    #[test]
     fn numbers_and_card_lines_come_from_the_tiers() {
         let wardroom = Wardroom::stock();
         let fury = wardroom.skill(Skill::GunFury);
@@ -790,14 +949,14 @@ mod tests {
     #[test]
     fn experience_ranks_a_skill_up_to_its_last_tier() {
         let wardroom = Wardroom::stock();
-        let ranks = &wardroom.ranks;
-        assert_eq!(ranks.tier(0), 1);
-        assert_eq!(ranks.tier(99), 1);
-        assert_eq!(ranks.tier(100), 2);
-        assert_eq!(ranks.tier(10_000), 3);
-        assert_eq!(ranks.floor(2), 100);
+        let growth = &wardroom.growth;
+        assert_eq!(growth.tier(0), 1);
+        assert_eq!(growth.tier(99), 1);
+        assert_eq!(growth.tier(100), 2);
+        assert_eq!(growth.tier(10_000), 3);
+        assert_eq!(growth.floor(2), 100);
         let fury = wardroom.skill(Skill::GunFury);
-        assert_eq!(fury.tier_at(ranks, 10_000), 3);
+        assert_eq!(fury.tier_at(growth, 10_000), 3);
         let brask = wardroom.officer("brask").unwrap();
         assert_eq!(wardroom.post(brask).name, "Gunnery");
         assert_eq!(brask.rarity, Rarity::Uncommon);
@@ -834,7 +993,7 @@ mod tests {
             .replacen("experience = [100, 250]", "experience = [250, 100]", 1);
         let found = problems(&text);
         assert_eq!(found.len(), 3, "{found:#?}");
-        assert!(found[0].starts_with("ranks.experience"));
+        assert!(found[0].starts_with("growth.experience"));
         assert!(
             found
                 .iter()
@@ -852,7 +1011,7 @@ mod tests {
         let unknown = problems(&stock_with("points_per_star = 1", "points_per_starr = 1"));
         assert!(unknown[0].contains("points_per_starr"), "{unknown:?}");
         assert!(unknown[0].contains("line"), "{unknown:?}");
-        let broken = problems("[ranks\nexperience = [100]");
+        let broken = problems("[growth\nexperience = [100]");
         assert!(broken[0].contains("line 1"), "{broken:?}");
     }
 
@@ -883,7 +1042,7 @@ mod tests {
         ));
         assert_eq!(
             four,
-            vec!["skill rate_plot: give 1 to 3 tiers (ranks.experience allows that many), not 4"]
+            vec!["skill rate_plot: give 1 to 3 tiers (growth.experience allows that many), not 4"]
         );
     }
 
